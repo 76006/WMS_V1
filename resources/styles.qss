@@ -8,7 +8,10 @@ QMainWindow, QDialog, QWidget#pageRoot {
     background: #f4f6f8;
 }
 
-QFrame#sidebar {
+QFrame#sidebar,
+QScrollArea#sidebarScroll,
+QWidget#sidebarViewport,
+QWidget#sidebarNav {
     background: #172033;
     border: none;
 }
@@ -26,17 +29,19 @@ QLabel#brandSubtitle {
 }
 
 QPushButton[nav="true"] {
-    color: #c7d0df;
+    color: #e2e8f0;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     border-radius: 5px;
     padding: 10px 14px;
     text-align: left;
     margin: 1px 8px;
+    font-size: 14px;
+    font-weight: 500;
 }
 
 QPushButton[nav="true"]:hover {
-    background: #253149;
+    background: #26344d;
     color: white;
 }
 
@@ -44,6 +49,10 @@ QPushButton[nav="true"]:checked {
     background: #2563eb;
     color: white;
     font-weight: 600;
+}
+
+QPushButton[nav="true"]:focus {
+    border-color: #93c5fd;
 }
 
 QFrame#topBar, QFrame#panel, QFrame#metricCard {
@@ -115,6 +124,12 @@ QPushButton:disabled {
     color: #9ca3af;
     background: #f3f4f6;
     border-color: #e5e7eb;
+}
+
+QPushButton[nav="true"]:disabled {
+    color: #64748b;
+    background: transparent;
+    border-color: transparent;
 }
 
 QTableView, QTableWidget {

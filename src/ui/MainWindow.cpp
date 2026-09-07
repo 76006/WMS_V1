@@ -62,11 +62,13 @@ void MainWindow::buildUi()
     sideLayout->addWidget(subtitle);
 
     auto *scroll = new QScrollArea(sidebar);
+    scroll->setObjectName(QStringLiteral("sidebarScroll"));
+    scroll->viewport()->setObjectName(QStringLiteral("sidebarViewport"));
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto *navWidget = new QWidget(scroll);
-    navWidget->setStyleSheet(QStringLiteral("background: transparent;"));
+    navWidget->setObjectName(QStringLiteral("sidebarNav"));
     auto *navLayout = new QVBoxLayout(navWidget);
     navLayout->setContentsMargins(0, 0, 0, 0);
     navLayout->setSpacing(0);
