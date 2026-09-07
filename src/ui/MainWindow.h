@@ -6,6 +6,8 @@
 #include <QSqlDatabase>
 
 class DashboardPage;
+class AttachmentPage;
+class BatchTracePage;
 class ExcelImportPage;
 class FinishedGoodsInPage;
 class InventoryPage;
@@ -14,6 +16,7 @@ class LedgerPage;
 class MaterialPage;
 class ProductionIssuePage;
 class ProductionReturnPage;
+class SerialTracePage;
 class StockInPage;
 class StockOutPage;
 class TransferPage;
@@ -55,6 +58,9 @@ private:
     FinishedGoodsInPage *m_finishedGoodsInPage = nullptr;
     InventoryPage *m_inventoryPage = nullptr;
     LedgerPage *m_ledgerPage = nullptr;
+    BatchTracePage *m_batchTracePage = nullptr;
+    SerialTracePage *m_serialTracePage = nullptr;
+    AttachmentPage *m_attachmentPage = nullptr;
     TransferPage *m_transferPage = nullptr;
     InventoryCountPage *m_countPage = nullptr;
 };

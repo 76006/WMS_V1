@@ -1,6 +1,8 @@
 #include "ui/MainWindow.h"
 
 #include "ui/pages/DashboardPage.h"
+#include "ui/pages/AttachmentPage.h"
+#include "ui/pages/BatchTracePage.h"
 #include "ui/pages/ExcelImportPage.h"
 #include "ui/pages/FinishedGoodsInPage.h"
 #include "ui/pages/InventoryPage.h"
@@ -10,6 +12,7 @@
 #include "ui/pages/PlaceholderPage.h"
 #include "ui/pages/ProductionIssuePage.h"
 #include "ui/pages/ProductionReturnPage.h"
+#include "ui/pages/SerialTracePage.h"
 #include "ui/pages/StockInPage.h"
 #include "ui/pages/StockOutPage.h"
 #include "ui/pages/TransferPage.h"
@@ -130,6 +133,9 @@ void MainWindow::buildUi()
     m_ledgerPage = new LedgerPage(m_database, m_session, m_stack);
     m_transferPage = new TransferPage(m_database, m_session, m_stack);
     m_countPage = new InventoryCountPage(m_database, m_session, m_stack);
+    m_batchTracePage = new BatchTracePage(m_database, m_stack);
+    m_serialTracePage = new SerialTracePage(m_database, m_stack);
+    m_attachmentPage = new AttachmentPage(m_database, m_session, m_stack);
 
     add(QStringLiteral("首页"), m_dashboardPage);
     add(QStringLiteral("物料管理"), m_materialPage);
@@ -144,12 +150,9 @@ void MainWindow::buildUi()
     add(QStringLiteral("库存流水"), m_ledgerPage);
     add(QStringLiteral("库存调拨"), m_transferPage, m_session.canManageWarehouse());
     add(QStringLiteral("库存盘点"), m_countPage, m_session.canManageWarehouse());
-    add(QStringLiteral("批次查询"), new PlaceholderPage(QStringLiteral("批次查询"),
-        QStringLiteral("页面已预留，批次库存已经按物料、仓库和库位独立记录。"), m_stack));
-    add(QStringLiteral("SN查询"), new PlaceholderPage(QStringLiteral("SN查询"),
-        QStringLiteral("页面已预留，SN状态、位置、入库和出库单据已经结构化保存。"), m_stack));
-    add(QStringLiteral("附件管理"), new PlaceholderPage(QStringLiteral("附件管理"),
-        QStringLiteral("页面已预留，附件将以BLOB形式存入当前SQLite数据库文件。"), m_stack));
+    add(QStringLiteral("批次查询"), m_batchTracePage);
+    add(QStringLiteral("SN查询"), m_serialTracePage);
+    add(QStringLiteral("附件管理"), m_attachmentPage);
     add(QStringLiteral("用户管理"), new PlaceholderPage(QStringLiteral("用户管理"),
         QStringLiteral("页面已预留，仅管理员可以维护账号和角色。"), m_stack), m_session.isAdministrator());
     add(QStringLiteral("系统设置"), new PlaceholderPage(QStringLiteral("系统设置"),
@@ -209,6 +212,9 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_ledgerPage) m_ledgerPage->refresh();
     else if (page == m_transferPage) m_transferPage->refreshReferenceData();
     else if (page == m_countPage) m_countPage->refreshReferenceData();
+    else if (page == m_batchTracePage) m_batchTracePage->refresh();
+    else if (page == m_serialTracePage) m_serialTracePage->refresh();
+    else if (page == m_attachmentPage) m_attachmentPage->refresh();
 }
 
 void MainWindow::refreshInventoryViews()
@@ -222,6 +228,9 @@ void MainWindow::refreshInventoryViews()
     m_excelImportPage->refreshReferenceData();
     m_transferPage->refreshReferenceData();
     m_countPage->refreshReferenceData();
+    m_batchTracePage->refresh();
+    m_serialTracePage->refresh();
+    m_attachmentPage->refresh();
     m_productionIssuePage->refreshReferenceData();
     m_productionReturnPage->refreshReferenceData();
     m_finishedGoodsInPage->refreshReferenceData();

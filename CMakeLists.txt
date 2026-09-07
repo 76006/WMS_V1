@@ -17,6 +17,7 @@ set(WMS_SOURCES
     src/database/DatabaseManager.cpp
     src/database/SchemaMigrator.cpp
     src/import/LegacyInventoryImporter.cpp
+    src/services/AttachmentService.cpp
     src/services/InventoryService.cpp
     src/services/InventoryServiceDocuments.cpp
     src/services/InventoryServiceProduction.cpp
@@ -24,6 +25,8 @@ set(WMS_SOURCES
     src/ui/MainWindow.cpp
     src/ui/dialogs/MaterialDialog.cpp
     src/ui/pages/DashboardPage.cpp
+    src/ui/pages/AttachmentPage.cpp
+    src/ui/pages/BatchTracePage.cpp
     src/ui/pages/ExcelImportPage.cpp
     src/ui/pages/FinishedGoodsInPage.cpp
     src/ui/pages/InventoryPage.cpp
@@ -33,6 +36,7 @@ set(WMS_SOURCES
     src/ui/pages/PlaceholderPage.cpp
     src/ui/pages/ProductionIssuePage.cpp
     src/ui/pages/ProductionReturnPage.cpp
+    src/ui/pages/SerialTracePage.cpp
     src/ui/pages/StockInPage.cpp
     src/ui/pages/StockOutPage.cpp
     src/ui/pages/TransferPage.cpp
@@ -44,11 +48,14 @@ set(WMS_SOURCES
     src/core/Session.h
     src/database/DatabaseManager.h
     src/database/SchemaMigrator.h
+    src/services/AttachmentService.h
     src/services/InventoryService.h
     src/ui/LoginDialog.h
     src/ui/MainWindow.h
     src/ui/dialogs/MaterialDialog.h
     src/ui/pages/DashboardPage.h
+    src/ui/pages/AttachmentPage.h
+    src/ui/pages/BatchTracePage.h
     src/ui/pages/ExcelImportPage.h
     src/ui/pages/FinishedGoodsInPage.h
     src/ui/pages/InventoryPage.h
@@ -58,6 +65,7 @@ set(WMS_SOURCES
     src/ui/pages/PlaceholderPage.h
     src/ui/pages/ProductionIssuePage.h
     src/ui/pages/ProductionReturnPage.h
+    src/ui/pages/SerialTracePage.h
     src/ui/pages/StockInPage.h
     src/ui/pages/StockOutPage.h
     src/ui/pages/TransferPage.h
@@ -151,6 +159,27 @@ if(BUILD_TESTING)
     target_include_directories(WmsWorkflowExpansionTests PRIVATE src)
     target_link_libraries(WmsWorkflowExpansionTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
     add_test(NAME WmsWorkflowExpansionTests COMMAND WmsWorkflowExpansionTests)
+
+    qt_add_executable(WmsTraceabilityAttachmentTests
+        tests/TraceabilityAttachmentTests.cpp
+        src/services/AttachmentService.cpp
+        src/services/AttachmentService.h
+        src/core/PasswordHasher.cpp
+        src/core/PasswordHasher.h
+        src/database/DatabaseManager.cpp
+        src/database/DatabaseManager.h
+        src/database/SchemaMigrator.cpp
+        src/database/SchemaMigrator.h
+    )
+    qt_add_resources(WmsTraceabilityAttachmentTests "wms_attachment_test_resources"
+        PREFIX "/"
+        FILES
+            database/schema.sql
+            database/migrations/002_production_workflow.sql
+    )
+    target_include_directories(WmsTraceabilityAttachmentTests PRIVATE src)
+    target_link_libraries(WmsTraceabilityAttachmentTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+    add_test(NAME WmsTraceabilityAttachmentTests COMMAND WmsTraceabilityAttachmentTests)
 
     add_test(NAME WmsAppSmoke
         COMMAND IceBeautyWms --smoke-test --database ${CMAKE_CURRENT_BINARY_DIR}/wms-smoke.db)
