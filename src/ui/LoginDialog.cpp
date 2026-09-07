@@ -30,7 +30,11 @@ LoginDialog::LoginDialog(QSqlDatabase database,
 
     auto *title = new QLabel(QStringLiteral("冰美肌库存管理"), this);
     title->setStyleSheet(QStringLiteral("font-size: 24px; font-weight: 600; color: #111827;"));
+#ifndef NDEBUG
+    auto *subtitle = new QLabel(QStringLiteral("测试模式：admin 可留空密码直接登录"), this);
+#else
     auto *subtitle = new QLabel(QStringLiteral("请输入账号和密码"), this);
+#endif
     subtitle->setObjectName(QStringLiteral("mutedText"));
     root->addWidget(title);
     root->addWidget(subtitle);
@@ -43,7 +47,11 @@ LoginDialog::LoginDialog(QSqlDatabase database,
     m_usernameEdit->setText(QStringLiteral("admin"));
     m_passwordEdit = new QLineEdit(this);
     m_passwordEdit->setEchoMode(QLineEdit::Password);
+#ifndef NDEBUG
+    m_passwordEdit->setPlaceholderText(QStringLiteral("管理员测试可留空"));
+#else
     m_passwordEdit->setPlaceholderText(QStringLiteral("密码"));
+#endif
     form->addRow(QStringLiteral("用户名"), m_usernameEdit);
     form->addRow(QStringLiteral("密码"), m_passwordEdit);
     root->addLayout(form);
@@ -59,7 +67,11 @@ LoginDialog::LoginDialog(QSqlDatabase database,
     m_loginButton->setDefault(true);
     root->addWidget(m_loginButton);
 
+#ifndef NDEBUG
+    auto *firstUse = new QLabel(QStringLiteral("Debug 测试模式：admin 无需密码；其他账号仍需密码。"), this);
+#else
     auto *firstUse = new QLabel(QStringLiteral("首次使用：admin / Admin@123，登录后请及时修改密码。"), this);
+#endif
     firstUse->setObjectName(QStringLiteral("mutedText"));
     firstUse->setWordWrap(true);
     root->addWidget(firstUse);
@@ -85,8 +97,19 @@ void LoginDialog::authenticate()
 {
     const QString username = m_usernameEdit->text().trimmed();
     const QString password = m_passwordEdit->text();
-    if (username.isEmpty() || password.isEmpty()) {
-        m_errorLabel->setText(QStringLiteral("请输入用户名和密码。"));
+    if (username.isEmpty()) {
+        m_errorLabel->setText(QStringLiteral("请输入用户名。"));
+        m_errorLabel->show();
+        return;
+    }
+#ifndef NDEBUG
+    const bool emptyAdminRequest = password.isEmpty()
+        && username.compare(QStringLiteral("admin"), Qt::CaseInsensitive) == 0;
+#else
+    const bool emptyAdminRequest = false;
+#endif
+    if (password.isEmpty() && !emptyAdminRequest) {
+        m_errorLabel->setText(QStringLiteral("请输入密码。"));
         m_errorLabel->show();
         return;
     }
@@ -104,7 +127,22 @@ void LoginDialog::authenticate()
         m_loginButton->setEnabled(true);
         return;
     }
-    if (!query.next() || !PasswordHasher::verifyPassword(password, query.value(3).toString())) {
+    if (!query.next()) {
+        m_errorLabel->setText(QStringLiteral("用户名或密码错误。"));
+        m_errorLabel->show();
+        m_passwordEdit->selectAll();
+        m_loginButton->setEnabled(true);
+        return;
+    }
+#ifndef NDEBUG
+    const bool allowEmptyAdmin = emptyAdminRequest
+        && query.value(1).toString().compare(QStringLiteral("admin"), Qt::CaseInsensitive) == 0
+        && query.value(4).toString() == QStringLiteral("ADMIN");
+#else
+    const bool allowEmptyAdmin = false;
+#endif
+    if (!allowEmptyAdmin
+        && !PasswordHasher::verifyPassword(password, query.value(3).toString())) {
         m_errorLabel->setText(QStringLiteral("用户名或密码错误。"));
         m_errorLabel->show();
         m_passwordEdit->selectAll();
