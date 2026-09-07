@@ -16,14 +16,18 @@ set(WMS_SOURCES
     src/core/PasswordHasher.cpp
     src/database/DatabaseManager.cpp
     src/database/SchemaMigrator.cpp
+    src/import/LegacyInventoryImporter.cpp
     src/services/InventoryService.cpp
+    src/services/InventoryServiceDocuments.cpp
     src/services/InventoryServiceProduction.cpp
     src/ui/LoginDialog.cpp
     src/ui/MainWindow.cpp
     src/ui/dialogs/MaterialDialog.cpp
     src/ui/pages/DashboardPage.cpp
+    src/ui/pages/ExcelImportPage.cpp
     src/ui/pages/FinishedGoodsInPage.cpp
     src/ui/pages/InventoryPage.cpp
+    src/ui/pages/InventoryCountPage.cpp
     src/ui/pages/LedgerPage.cpp
     src/ui/pages/MaterialPage.cpp
     src/ui/pages/PlaceholderPage.cpp
@@ -31,9 +35,11 @@ set(WMS_SOURCES
     src/ui/pages/ProductionReturnPage.cpp
     src/ui/pages/StockInPage.cpp
     src/ui/pages/StockOutPage.cpp
+    src/ui/pages/TransferPage.cpp
     src/ui/pages/WarehousePage.cpp
     src/ui/widgets/StockLineTable.cpp
     src/core/DatabaseConfig.h
+    src/import/LegacyInventoryImporter.h
     src/core/PasswordHasher.h
     src/core/Session.h
     src/database/DatabaseManager.h
@@ -43,8 +49,10 @@ set(WMS_SOURCES
     src/ui/MainWindow.h
     src/ui/dialogs/MaterialDialog.h
     src/ui/pages/DashboardPage.h
+    src/ui/pages/ExcelImportPage.h
     src/ui/pages/FinishedGoodsInPage.h
     src/ui/pages/InventoryPage.h
+    src/ui/pages/InventoryCountPage.h
     src/ui/pages/LedgerPage.h
     src/ui/pages/MaterialPage.h
     src/ui/pages/PlaceholderPage.h
@@ -52,6 +60,7 @@ set(WMS_SOURCES
     src/ui/pages/ProductionReturnPage.h
     src/ui/pages/StockInPage.h
     src/ui/pages/StockOutPage.h
+    src/ui/pages/TransferPage.h
     src/ui/pages/WarehousePage.h
     src/ui/widgets/StockLineTable.h
 )
@@ -94,6 +103,7 @@ if(BUILD_TESTING)
         src/database/SchemaMigrator.cpp
         src/database/SchemaMigrator.h
         src/services/InventoryService.cpp
+        src/services/InventoryServiceDocuments.cpp
         src/services/InventoryServiceProduction.cpp
         src/services/InventoryService.h
     )
@@ -125,6 +135,22 @@ if(BUILD_TESTING)
     target_include_directories(WmsProductionWorkflowTests PRIVATE src)
     target_link_libraries(WmsProductionWorkflowTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
     add_test(NAME WmsProductionWorkflowTests COMMAND WmsProductionWorkflowTests)
+
+    qt_add_executable(WmsWorkflowExpansionTests
+        tests/WorkflowExpansionTests.cpp
+        src/import/LegacyInventoryImporter.cpp
+        src/import/LegacyInventoryImporter.h
+        ${WMS_DATABASE_TEST_SOURCES}
+    )
+    qt_add_resources(WmsWorkflowExpansionTests "wms_expansion_test_resources"
+        PREFIX "/"
+        FILES
+            database/schema.sql
+            database/migrations/002_production_workflow.sql
+    )
+    target_include_directories(WmsWorkflowExpansionTests PRIVATE src)
+    target_link_libraries(WmsWorkflowExpansionTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+    add_test(NAME WmsWorkflowExpansionTests COMMAND WmsWorkflowExpansionTests)
 
     add_test(NAME WmsAppSmoke
         COMMAND IceBeautyWms --smoke-test --database ${CMAKE_CURRENT_BINARY_DIR}/wms-smoke.db)

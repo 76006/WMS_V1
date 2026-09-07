@@ -166,8 +166,10 @@ bool InventoryService::postTransfer(const TransferRequest &request,
                                     PostedDocument *postedDocument,
                                     QString *errorMessage)
 {
+    StockMovementRequest transferMovement = request;
+    transferMovement.documentType = QStringLiteral("DB");
     const MaterialRules rules = materialRules(request.materialId, errorMessage);
-    if (!rules.valid || !validateMovement(request, rules, errorMessage)
+    if (!rules.valid || !validateMovement(transferMovement, rules, errorMessage)
         || !validateLocation(request.warehouseId, request.locationId, errorMessage)
         || !validateLocation(request.targetWarehouseId, request.targetLocationId, errorMessage)) {
         return false;

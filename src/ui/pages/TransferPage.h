@@ -7,19 +7,16 @@
 
 class QComboBox;
 class QDateEdit;
-class QLabel;
 class QLineEdit;
 class QPushButton;
-class QTableWidget;
 class QTextEdit;
 class StockLineTable;
 
-class StockInPage final : public QWidget
+class TransferPage final : public QWidget
 {
     Q_OBJECT
-
 public:
-    StockInPage(QSqlDatabase database, Session session, QWidget *parent = nullptr);
+    TransferPage(QSqlDatabase database, Session session, QWidget *parent = nullptr);
 
 public slots:
     void refreshReferenceData();
@@ -28,22 +25,17 @@ signals:
     void stockChanged();
 
 private slots:
+    void loadTargetLocations();
     void submit();
 
 private:
-    void resetSubmissionToken();
-    void refreshRecentDocuments();
-
     QSqlDatabase m_database;
     Session m_session;
-    QComboBox *m_typeCombo = nullptr;
     QDateEdit *m_dateEdit = nullptr;
-    QLabel *m_numberLabel = nullptr;
     QLineEdit *m_handlerEdit = nullptr;
-    QLineEdit *m_purposeEdit = nullptr;
     QTextEdit *m_notesEdit = nullptr;
-    StockLineTable *m_lines = nullptr;
+    StockLineTable *m_sourceLine = nullptr;
+    QComboBox *m_targetWarehouse = nullptr;
+    QComboBox *m_targetLocation = nullptr;
     QPushButton *m_submitButton = nullptr;
-    QTableWidget *m_recentTable = nullptr;
-    QString m_submissionToken;
 };

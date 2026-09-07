@@ -6,14 +6,17 @@
 #include <QSqlDatabase>
 
 class DashboardPage;
+class ExcelImportPage;
 class FinishedGoodsInPage;
 class InventoryPage;
+class InventoryCountPage;
 class LedgerPage;
 class MaterialPage;
 class ProductionIssuePage;
 class ProductionReturnPage;
 class StockInPage;
 class StockOutPage;
+class TransferPage;
 class WarehousePage;
 class QLabel;
 class QStackedWidget;
@@ -44,6 +47,7 @@ private:
     DashboardPage *m_dashboardPage = nullptr;
     MaterialPage *m_materialPage = nullptr;
     WarehousePage *m_warehousePage = nullptr;
+    ExcelImportPage *m_excelImportPage = nullptr;
     StockInPage *m_stockInPage = nullptr;
     StockOutPage *m_stockOutPage = nullptr;
     ProductionIssuePage *m_productionIssuePage = nullptr;
@@ -51,4 +55,6 @@ private:
     FinishedGoodsInPage *m_finishedGoodsInPage = nullptr;
     InventoryPage *m_inventoryPage = nullptr;
     LedgerPage *m_ledgerPage = nullptr;
+    TransferPage *m_transferPage = nullptr;
+    InventoryCountPage *m_countPage = nullptr;
 };

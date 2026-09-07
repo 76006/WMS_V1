@@ -82,6 +82,49 @@ struct PostedDocument
     QString documentNumber;
 };
 
+struct InitialInventoryLine
+{
+    QString materialCode;
+    QString materialName;
+    QString specification;
+    QString categoryCode;
+    QString unit = QStringLiteral("个");
+    QString batchNo;
+    double quantity = 0.0;
+    QString notes;
+};
+
+struct InitialInventoryRequest
+{
+    QDate documentDate;
+    QString handlerName;
+    QString sourceFile;
+    QString submissionToken;
+    qlonglong warehouseId = 0;
+    qlonglong locationId = 0;
+    QList<InitialInventoryLine> lines;
+};
+
+struct InventoryCountLine
+{
+    qlonglong materialId = 0;
+    qlonglong warehouseId = 0;
+    qlonglong locationId = 0;
+    QString batchNo;
+    double systemQuantity = 0.0;
+    double actualQuantity = 0.0;
+    QString differenceReason;
+};
+
+struct InventoryCountRequest
+{
+    QDate documentDate;
+    QString handlerName;
+    QString notes;
+    QString submissionToken;
+    QList<InventoryCountLine> lines;
+};
+
 class InventoryService
 {
 public:
@@ -93,6 +136,16 @@ public:
     bool postOutbound(const StockMovementRequest &request,
                       PostedDocument *postedDocument,
                       QString *errorMessage = nullptr);
+    bool postStockDocument(const StockDocumentRequest &request,
+                           bool inbound,
+                           PostedDocument *postedDocument,
+                           QString *errorMessage = nullptr);
+    bool importInitialInventory(const InitialInventoryRequest &request,
+                                PostedDocument *postedDocument,
+                                QString *errorMessage = nullptr);
+    bool postInventoryCount(const InventoryCountRequest &request,
+                            PostedDocument *postedDocument,
+                            QString *errorMessage = nullptr);
     bool postTransfer(const TransferRequest &request,
                       PostedDocument *postedDocument,
                       QString *errorMessage = nullptr);
@@ -165,6 +218,9 @@ private:
                                       qlonglong productionRunId,
                                       const QString &submissionToken,
                                       QString *errorMessage);
+    bool setDocumentSubmissionToken(qlonglong documentId,
+                                    const QString &submissionToken,
+                                    QString *errorMessage);
     qlonglong ensureProductionRun(const ProductionRunRequest &run, QString *errorMessage);
     bool refreshProductionRunStatus(qlonglong productionRunId, QString *errorMessage);
     bool changeBalance(qlonglong materialId,

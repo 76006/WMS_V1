@@ -10,9 +10,11 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSqlQuery>
 #include <QTableWidget>
+#include <QTextEdit>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -33,14 +35,16 @@ constexpr int SerialColumn = 6;
 constexpr int ActionColumn = 7;
 }
 
-StockLineTable::StockLineTable(QSqlDatabase database, QWidget *parent)
-    : QWidget(parent), m_database(std::move(database))
+StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent)
+    : QWidget(parent), m_database(std::move(database)), m_mode(mode)
 {
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(8);
     auto *toolbar = new QHBoxLayout;
-    auto *hint = new QLabel(QStringLiteral("逐行选择实际领用的物料、库存批次和数量"), this);
+    auto *hint = new QLabel(m_mode == Mode::Inbound
+                                ? QStringLiteral("逐行选择入库物料、目标库位、批次和数量")
+                                : QStringLiteral("逐行选择出库物料、库存批次和数量"), this);
     hint->setObjectName(QStringLiteral("mutedText"));
     auto *addButton = new QPushButton(QStringLiteral("添加物料"), this);
     addButton->setProperty("primary", true);
@@ -51,8 +55,10 @@ StockLineTable::StockLineTable(QSqlDatabase database, QWidget *parent)
 
     m_table = new QTableWidget(0, 8, this);
     m_table->setHorizontalHeaderLabels({QStringLiteral("物料"), QStringLiteral("仓库"),
-                                        QStringLiteral("库位"), QStringLiteral("库存批次"),
-                                        QStringLiteral("可用库存"), QStringLiteral("领料数量"),
+                                        QStringLiteral("库位"), QStringLiteral("批次"),
+                                        QStringLiteral("当前库存"),
+                                        m_mode == Mode::Inbound ? QStringLiteral("入库数量")
+                                                                : QStringLiteral("出库数量"),
                                         QStringLiteral("SN"), QStringLiteral("操作")});
     m_table->verticalHeader()->setVisible(false);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -86,11 +92,17 @@ void StockLineTable::loadMaterials(QComboBox *combo, const QVariant &selected)
     combo->blockSignals(true);
     combo->clear();
     QSqlQuery query(m_database);
-    query.exec(QStringLiteral(
-        "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
-        "m.default_warehouse_id,m.default_location_id FROM materials m "
-        "WHERE m.is_active=1 AND EXISTS(SELECT 1 FROM stock_balances s "
-        "WHERE s.material_id=m.id AND s.quantity>0) ORDER BY m.code"));
+    const QString sql = m_mode == Mode::Inbound
+        ? QStringLiteral(
+              "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
+              "m.default_warehouse_id,m.default_location_id FROM materials m "
+              "WHERE m.is_active=1 ORDER BY m.code")
+        : QStringLiteral(
+              "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
+              "m.default_warehouse_id,m.default_location_id FROM materials m "
+              "WHERE m.is_active=1 AND EXISTS(SELECT 1 FROM stock_balances s "
+              "WHERE s.material_id=m.id AND s.quantity>0) ORDER BY m.code");
+    query.exec(sql);
     while (query.next()) {
         const int index = combo->count();
         combo->addItem(QStringLiteral("%1 - %2")
@@ -120,6 +132,8 @@ void StockLineTable::addLine()
     auto *warehouse = new QComboBox(m_table);
     auto *location = new QComboBox(m_table);
     auto *batch = new QComboBox(m_table);
+    batch->setEditable(m_mode == Mode::Inbound);
+    if (m_mode == Mode::Inbound) batch->setInsertPolicy(QComboBox::NoInsert);
     auto *quantity = new QDoubleSpinBox(m_table);
     quantity->setDecimals(6);
     quantity->setRange(0.000001, 999999999999.0);
@@ -161,6 +175,13 @@ void StockLineTable::addLine()
                     updateAvailable(currentRow);
                 }
             });
+    if (m_mode == Mode::Inbound) {
+        connect(batch, &QComboBox::editTextChanged, this,
+                [this, batch] {
+                    const int currentRow = rowForWidget(batch, BatchColumn);
+                    if (currentRow >= 0) updateAvailable(currentRow);
+                });
+    }
     connect(serialButton, &QPushButton::clicked, this,
             [this, serialButton] {
                 const int currentRow = rowForWidget(serialButton, SerialColumn);
@@ -190,6 +211,12 @@ void StockLineTable::refreshReferenceData()
     }
 }
 
+void StockLineTable::clearLines()
+{
+    m_table->setRowCount(0);
+    addLine();
+}
+
 void StockLineTable::loadWarehouses(int row)
 {
     QComboBox *material = comboAt(row, MaterialColumn);
@@ -199,11 +226,16 @@ void StockLineTable::loadWarehouses(int row)
     warehouse->blockSignals(true);
     warehouse->clear();
     QSqlQuery query(m_database);
-    query.prepare(QStringLiteral(
-        "SELECT DISTINCT w.id,w.code,w.name FROM warehouses w "
-        "JOIN stock_balances s ON s.warehouse_id=w.id "
-        "WHERE w.is_active=1 AND s.material_id=? AND s.quantity>0 ORDER BY w.code"));
-    query.addBindValue(material->currentData());
+    if (m_mode == Mode::Inbound) {
+        query.prepare(QStringLiteral(
+            "SELECT id,code,name FROM warehouses WHERE is_active=1 ORDER BY code"));
+    } else {
+        query.prepare(QStringLiteral(
+            "SELECT DISTINCT w.id,w.code,w.name FROM warehouses w "
+            "JOIN stock_balances s ON s.warehouse_id=w.id "
+            "WHERE w.is_active=1 AND s.material_id=? AND s.quantity>0 ORDER BY w.code"));
+        query.addBindValue(material->currentData());
+    }
     query.exec();
     while (query.next()) {
         warehouse->addItem(QStringLiteral("%1 - %2")
@@ -229,13 +261,19 @@ void StockLineTable::loadLocations(int row)
     location->blockSignals(true);
     location->clear();
     QSqlQuery query(m_database);
-    query.prepare(QStringLiteral(
-        "SELECT DISTINCT l.id,l.code,l.name FROM locations l "
-        "JOIN stock_balances s ON s.location_id=l.id "
-        "WHERE l.is_active=1 AND l.warehouse_id=? AND s.material_id=? AND s.quantity>0 "
-        "ORDER BY l.code"));
-    query.addBindValue(warehouse->currentData());
-    query.addBindValue(material->currentData());
+    if (m_mode == Mode::Inbound) {
+        query.prepare(QStringLiteral(
+            "SELECT id,code,name FROM locations WHERE is_active=1 AND warehouse_id=? ORDER BY code"));
+        query.addBindValue(warehouse->currentData());
+    } else {
+        query.prepare(QStringLiteral(
+            "SELECT DISTINCT l.id,l.code,l.name FROM locations l "
+            "JOIN stock_balances s ON s.location_id=l.id "
+            "WHERE l.is_active=1 AND l.warehouse_id=? AND s.material_id=? AND s.quantity>0 "
+            "ORDER BY l.code"));
+        query.addBindValue(warehouse->currentData());
+        query.addBindValue(material->currentData());
+    }
     query.exec();
     while (query.next()) {
         QString label = query.value(1).toString();
@@ -258,13 +296,15 @@ void StockLineTable::loadBatches(int row)
     QComboBox *location = comboAt(row, LocationColumn);
     QComboBox *batch = comboAt(row, BatchColumn);
     if (!material || !warehouse || !location || !batch) return;
-    const QVariant previous = batch->currentData();
+    const QString previous = m_mode == Mode::Inbound
+        ? batch->currentText().trimmed() : batch->currentData().toString();
     batch->blockSignals(true);
     batch->clear();
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT batch_no,quantity FROM stock_balances WHERE material_id=? AND warehouse_id=? "
-        "AND location_id=? AND quantity>0 ORDER BY batch_no"));
+        "AND location_id=? %1 ORDER BY batch_no")
+                      .arg(m_mode == Mode::Inbound ? QString() : QStringLiteral("AND quantity>0")));
     query.addBindValue(material->currentData());
     query.addBindValue(warehouse->currentData());
     query.addBindValue(location->currentData());
@@ -273,9 +313,14 @@ void StockLineTable::loadBatches(int row)
         const QString value = query.value(0).toString();
         batch->addItem(value.isEmpty() ? QStringLiteral("无批次") : value, value);
     }
-    const int selectedIndex = batch->findData(previous);
-    if (selectedIndex >= 0) batch->setCurrentIndex(selectedIndex);
-    else if (batch->count() > 0) batch->setCurrentIndex(0);
+    if (m_mode == Mode::Inbound) {
+        if (batch->findData(QString()) < 0) batch->insertItem(0, QStringLiteral("无批次"), QString());
+        batch->setEditText(previous);
+    } else {
+        const int selectedIndex = batch->findData(previous);
+        if (selectedIndex >= 0) batch->setCurrentIndex(selectedIndex);
+        else if (batch->count() > 0) batch->setCurrentIndex(0);
+    }
     batch->blockSignals(false);
     auto *serialButton = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
     if (serialButton) serialButton->setProperty("serials", QStringList());
@@ -296,14 +341,15 @@ void StockLineTable::updateAvailable(int row)
     query.addBindValue(material->currentData());
     query.addBindValue(warehouse->currentData());
     query.addBindValue(location->currentData());
-    query.addBindValue(batch->currentData().toString());
+    query.addBindValue(m_mode == Mode::Inbound ? batch->currentText().trimmed()
+                                               : batch->currentData().toString());
     double available = 0.0;
     if (query.exec() && query.next()) available = query.value(0).toDouble();
     m_table->item(row, AvailableColumn)->setText(QString::number(available, 'g', 12));
 
     auto *serialButton = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
     const bool requireSerial = material->currentData(RequireSerialRole).toBool();
-    serialButton->setEnabled(requireSerial && available > 0.0);
+    serialButton->setEnabled(requireSerial && (m_mode == Mode::Inbound || available > 0.0));
     if (!requireSerial) {
         serialButton->setProperty("serials", QStringList());
         serialButton->setText(QStringLiteral("无需选择"));
@@ -323,30 +369,43 @@ void StockLineTable::chooseSerials(int row)
     if (!material || !warehouse || !location || !batch || !button) return;
 
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("选择本行领用SN"));
+    dialog.setWindowTitle(m_mode == Mode::Inbound
+                              ? QStringLiteral("填写本行入库SN")
+                              : QStringLiteral("选择本行出库SN"));
     dialog.resize(480, 430);
     auto *layout = new QVBoxLayout(&dialog);
-    auto *label = new QLabel(QStringLiteral("仅显示所选物料、仓库、库位和批次中的可用SN。"), &dialog);
+    auto *label = new QLabel(m_mode == Mode::Inbound
+                                 ? QStringLiteral("每行填写一个SN，也可以用逗号分隔；重复SN会被自动去除。")
+                                 : QStringLiteral("仅显示所选物料、仓库、库位和批次中的可用SN。"),
+                             &dialog);
     label->setWordWrap(true);
     layout->addWidget(label);
-    auto *list = new QListWidget(&dialog);
-    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
     const QStringList previous = button->property("serials").toStringList();
-    const QSet<QString> selected(previous.cbegin(), previous.cend());
-    QSqlQuery query(m_database);
-    query.prepare(QStringLiteral(
-        "SELECT serial_no FROM serial_numbers WHERE material_id=? AND warehouse_id=? "
-        "AND location_id=? AND batch_no=? AND status='IN_STOCK' ORDER BY serial_no"));
-    query.addBindValue(material->currentData());
-    query.addBindValue(warehouse->currentData());
-    query.addBindValue(location->currentData());
-    query.addBindValue(batch->currentData().toString());
-    query.exec();
-    while (query.next()) {
-        auto *item = new QListWidgetItem(query.value(0).toString(), list);
-        item->setSelected(selected.contains(item->text()));
+    QListWidget *list = nullptr;
+    QTextEdit *editor = nullptr;
+    if (m_mode == Mode::Inbound) {
+        editor = new QTextEdit(&dialog);
+        editor->setPlainText(previous.join(QLatin1Char('\n')));
+        layout->addWidget(editor);
+    } else {
+        list = new QListWidget(&dialog);
+        list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        const QSet<QString> selected(previous.cbegin(), previous.cend());
+        QSqlQuery query(m_database);
+        query.prepare(QStringLiteral(
+            "SELECT serial_no FROM serial_numbers WHERE material_id=? AND warehouse_id=? "
+            "AND location_id=? AND batch_no=? AND status='IN_STOCK' ORDER BY serial_no"));
+        query.addBindValue(material->currentData());
+        query.addBindValue(warehouse->currentData());
+        query.addBindValue(location->currentData());
+        query.addBindValue(batch->currentData().toString());
+        query.exec();
+        while (query.next()) {
+            auto *item = new QListWidgetItem(query.value(0).toString(), list);
+            item->setSelected(selected.contains(item->text()));
+        }
+        layout->addWidget(list);
     }
-    layout->addWidget(list);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("确定"));
     buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
@@ -355,7 +414,15 @@ void StockLineTable::chooseSerials(int row)
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (dialog.exec() != QDialog::Accepted) return;
     QStringList serials;
-    for (const QListWidgetItem *item : list->selectedItems()) serials.append(item->text());
+    if (editor) {
+        QSet<QString> unique;
+        const QStringList values = editor->toPlainText().split(
+            QRegularExpression(QStringLiteral("[,，;；\\s]+")), Qt::SkipEmptyParts);
+        for (const QString &value : values) unique.insert(value.trimmed().toUpper());
+        serials = unique.values();
+    } else {
+        for (const QListWidgetItem *item : list->selectedItems()) serials.append(item->text());
+    }
     serials.sort();
     button->setProperty("serials", serials);
     button->setText(QStringLiteral("已选 %1 个").arg(serials.size()));
@@ -396,7 +463,8 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
         StockMovementRequest line;
         line.materialId = material->currentData().toLongLong();
         line.quantity = quantity->value();
-        line.batchNo = batch->currentData().toString();
+        line.batchNo = m_mode == Mode::Inbound ? batch->currentText().trimmed()
+                                               : batch->currentData().toString();
         line.warehouseId = warehouse->currentData().toLongLong();
         line.locationId = location->currentData().toLongLong();
         line.serialNumbers = serialButton ? serialButton->property("serials").toStringList() : QStringList();
@@ -404,14 +472,14 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
             const double roundedQuantity = std::round(line.quantity);
             if (std::abs(line.quantity - roundedQuantity) > 0.0000001
                 || line.serialNumbers.size() != static_cast<int>(roundedQuantity)) {
-                if (errorMessage) *errorMessage = QStringLiteral("第 %1 行的SN数量必须等于整数领料数量。").arg(row + 1);
+                if (errorMessage) *errorMessage = QStringLiteral("第 %1 行的SN数量必须等于整数业务数量。").arg(row + 1);
                 return {};
             }
         }
         result.append(line);
     }
     if (result.isEmpty() && errorMessage) {
-        *errorMessage = QStringLiteral("请至少添加一条领料明细。");
+        *errorMessage = QStringLiteral("请至少添加一条物料明细。");
     }
     return result;
 }

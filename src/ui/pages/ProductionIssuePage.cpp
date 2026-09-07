@@ -68,7 +68,7 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     headerForm->addRow(QStringLiteral("备注"), m_notesEdit);
     panelLayout->addLayout(headerForm);
 
-    m_lines = new StockLineTable(m_database, panel);
+    m_lines = new StockLineTable(m_database, StockLineTable::Mode::Outbound, panel);
     panelLayout->addWidget(m_lines);
     auto *actions = new QHBoxLayout;
     actions->addStretch();

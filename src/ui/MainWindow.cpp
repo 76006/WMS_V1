@@ -1,8 +1,10 @@
 #include "ui/MainWindow.h"
 
 #include "ui/pages/DashboardPage.h"
+#include "ui/pages/ExcelImportPage.h"
 #include "ui/pages/FinishedGoodsInPage.h"
 #include "ui/pages/InventoryPage.h"
+#include "ui/pages/InventoryCountPage.h"
 #include "ui/pages/LedgerPage.h"
 #include "ui/pages/MaterialPage.h"
 #include "ui/pages/PlaceholderPage.h"
@@ -10,6 +12,7 @@
 #include "ui/pages/ProductionReturnPage.h"
 #include "ui/pages/StockInPage.h"
 #include "ui/pages/StockOutPage.h"
+#include "ui/pages/TransferPage.h"
 #include "ui/pages/WarehousePage.h"
 
 #include <QButtonGroup>
@@ -117,6 +120,7 @@ void MainWindow::buildUi()
     m_dashboardPage = new DashboardPage(m_database, m_stack);
     m_materialPage = new MaterialPage(m_database, m_session, m_stack);
     m_warehousePage = new WarehousePage(m_database, m_session, m_stack);
+    m_excelImportPage = new ExcelImportPage(m_database, m_session, m_stack);
     m_stockInPage = new StockInPage(m_database, m_session, m_stack);
     m_stockOutPage = new StockOutPage(m_database, m_session, m_stack);
     m_productionIssuePage = new ProductionIssuePage(m_database, m_session, m_stack);
@@ -124,10 +128,13 @@ void MainWindow::buildUi()
     m_finishedGoodsInPage = new FinishedGoodsInPage(m_database, m_session, m_stack);
     m_inventoryPage = new InventoryPage(m_database, m_stack);
     m_ledgerPage = new LedgerPage(m_database, m_session, m_stack);
+    m_transferPage = new TransferPage(m_database, m_session, m_stack);
+    m_countPage = new InventoryCountPage(m_database, m_session, m_stack);
 
     add(QStringLiteral("首页"), m_dashboardPage);
     add(QStringLiteral("物料管理"), m_materialPage);
     add(QStringLiteral("仓库/库位管理"), m_warehousePage);
+    add(QStringLiteral("库存Excel导入"), m_excelImportPage, m_session.canManageWarehouse());
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
     add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
     add(QStringLiteral("生产领料"), m_productionIssuePage);
@@ -135,10 +142,8 @@ void MainWindow::buildUi()
     add(QStringLiteral("成品入库"), m_finishedGoodsInPage);
     add(QStringLiteral("库存查询"), m_inventoryPage);
     add(QStringLiteral("库存流水"), m_ledgerPage);
-    add(QStringLiteral("库存调拨"), new PlaceholderPage(QStringLiteral("库存调拨"),
-        QStringLiteral("页面已预留。仓库/库位间原子调拨已在库存服务中实现。"), m_stack));
-    add(QStringLiteral("库存盘点"), new PlaceholderPage(QStringLiteral("库存盘点"),
-        QStringLiteral("页面已预留，数据库已包含盘点任务和盘点明细结构。"), m_stack));
+    add(QStringLiteral("库存调拨"), m_transferPage, m_session.canManageWarehouse());
+    add(QStringLiteral("库存盘点"), m_countPage, m_session.canManageWarehouse());
     add(QStringLiteral("批次查询"), new PlaceholderPage(QStringLiteral("批次查询"),
         QStringLiteral("页面已预留，批次库存已经按物料、仓库和库位独立记录。"), m_stack));
     add(QStringLiteral("SN查询"), new PlaceholderPage(QStringLiteral("SN查询"),
@@ -162,8 +167,14 @@ void MainWindow::buildUi()
     connect(m_materialPage, &MaterialPage::dataChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_warehousePage, &WarehousePage::dataChanged, m_stockInPage, &StockInPage::refreshReferenceData);
     connect(m_warehousePage, &WarehousePage::dataChanged, m_stockOutPage, &StockOutPage::refreshReferenceData);
+    connect(m_warehousePage, &WarehousePage::dataChanged, m_excelImportPage, &ExcelImportPage::refreshReferenceData);
+    connect(m_warehousePage, &WarehousePage::dataChanged, m_transferPage, &TransferPage::refreshReferenceData);
+    connect(m_warehousePage, &WarehousePage::dataChanged, m_countPage, &InventoryCountPage::refreshReferenceData);
+    connect(m_excelImportPage, &ExcelImportPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_stockInPage, &StockInPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_stockOutPage, &StockOutPage::stockChanged, this, &MainWindow::refreshInventoryViews);
+    connect(m_transferPage, &TransferPage::stockChanged, this, &MainWindow::refreshInventoryViews);
+    connect(m_countPage, &InventoryCountPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_productionIssuePage, &ProductionIssuePage::stockChanged,
             this, &MainWindow::refreshInventoryViews);
     connect(m_productionReturnPage, &ProductionReturnPage::stockChanged,
@@ -188,6 +199,7 @@ void MainWindow::refreshCurrentPage()
     if (page == m_dashboardPage) m_dashboardPage->refresh();
     else if (page == m_materialPage) m_materialPage->refresh();
     else if (page == m_warehousePage) m_warehousePage->refresh();
+    else if (page == m_excelImportPage) m_excelImportPage->refreshReferenceData();
     else if (page == m_stockInPage) m_stockInPage->refreshReferenceData();
     else if (page == m_stockOutPage) m_stockOutPage->refreshReferenceData();
     else if (page == m_productionIssuePage) m_productionIssuePage->refreshReferenceData();
@@ -195,6 +207,8 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_finishedGoodsInPage) m_finishedGoodsInPage->refreshReferenceData();
     else if (page == m_inventoryPage) m_inventoryPage->refresh();
     else if (page == m_ledgerPage) m_ledgerPage->refresh();
+    else if (page == m_transferPage) m_transferPage->refreshReferenceData();
+    else if (page == m_countPage) m_countPage->refreshReferenceData();
 }
 
 void MainWindow::refreshInventoryViews()
@@ -205,6 +219,9 @@ void MainWindow::refreshInventoryViews()
     m_ledgerPage->refresh();
     m_stockInPage->refreshReferenceData();
     m_stockOutPage->refreshReferenceData();
+    m_excelImportPage->refreshReferenceData();
+    m_transferPage->refreshReferenceData();
+    m_countPage->refreshReferenceData();
     m_productionIssuePage->refreshReferenceData();
     m_productionReturnPage->refreshReferenceData();
     m_finishedGoodsInPage->refreshReferenceData();

@@ -13,13 +13,18 @@ class StockLineTable final : public QWidget
     Q_OBJECT
 
 public:
-    explicit StockLineTable(QSqlDatabase database, QWidget *parent = nullptr);
+    enum class Mode { Inbound, Outbound };
+
+    explicit StockLineTable(QSqlDatabase database,
+                            Mode mode = Mode::Outbound,
+                            QWidget *parent = nullptr);
 
     QList<StockMovementRequest> lines(QString *errorMessage = nullptr) const;
 
 public slots:
     void refreshReferenceData();
     void addLine();
+    void clearLines();
 
 private:
     int rowForWidget(const QWidget *widget, int column) const;
@@ -33,5 +38,6 @@ private:
     void removeLine(int row);
 
     QSqlDatabase m_database;
+    Mode m_mode = Mode::Outbound;
     QTableWidget *m_table = nullptr;
 };
