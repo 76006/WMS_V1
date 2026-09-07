@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDate>
+#include <QList>
 #include <QSqlDatabase>
 #include <QStringList>
 #include <QVariant>
@@ -18,6 +19,45 @@ struct StockMovementRequest
     qlonglong warehouseId = 0;
     qlonglong locationId = 0;
     QStringList serialNumbers;
+};
+
+struct StockDocumentRequest
+{
+    QString documentType;
+    QDate documentDate;
+    QString handlerName;
+    QString purpose;
+    QString notes;
+    QString submissionToken;
+    qlonglong productionRunId = 0;
+    QList<StockMovementRequest> lines;
+};
+
+struct ProductionRunRequest
+{
+    QString batchNo;
+    qlonglong productMaterialId = 0;
+    double plannedQuantity = 0.0;
+};
+
+struct ProductionReturnLine
+{
+    qlonglong sourceItemId = 0;
+    double quantity = 0.0;
+    qlonglong warehouseId = 0;
+    qlonglong locationId = 0;
+    QStringList serialNumbers;
+    QString notes;
+};
+
+struct ProductionReturnRequest
+{
+    qlonglong sourceDocumentId = 0;
+    QDate documentDate;
+    QString handlerName;
+    QString notes;
+    QString submissionToken;
+    QList<ProductionReturnLine> lines;
 };
 
 struct TransferRequest : public StockMovementRequest
@@ -59,6 +99,20 @@ public:
     bool reverseItem(const ReversalRequest &request,
                      PostedDocument *postedDocument,
                      QString *errorMessage = nullptr);
+
+    bool postProductionIssue(const ProductionRunRequest &run,
+                             const StockDocumentRequest &document,
+                             PostedDocument *postedDocument,
+                             qlonglong *productionRunId = nullptr,
+                             QString *errorMessage = nullptr);
+    bool postProductionReturn(const ProductionReturnRequest &request,
+                              PostedDocument *postedDocument,
+                              QString *errorMessage = nullptr);
+    bool postFinishedGoodsInbound(const StockDocumentRequest &document,
+                                  PostedDocument *postedDocument,
+                                  QString *errorMessage = nullptr);
+    double productionRunReceivedQuantity(qlonglong productionRunId,
+                                         QString *errorMessage = nullptr) const;
 
     QStringList previewSerialNumbers(qlonglong materialId,
                                      const QString &prefix,
@@ -102,6 +156,17 @@ private:
                          qlonglong targetWarehouseId,
                          qlonglong targetLocationId,
                          QString *errorMessage);
+    qlonglong createDocumentItem(qlonglong documentId,
+                                 int lineNumber,
+                                 const StockMovementRequest &request,
+                                 const QVariant &sourceItemId,
+                                 QString *errorMessage);
+    bool setDocumentProductionContext(qlonglong documentId,
+                                      qlonglong productionRunId,
+                                      const QString &submissionToken,
+                                      QString *errorMessage);
+    qlonglong ensureProductionRun(const ProductionRunRequest &run, QString *errorMessage);
+    bool refreshProductionRunStatus(qlonglong productionRunId, QString *errorMessage);
     bool changeBalance(qlonglong materialId,
                        qlonglong warehouseId,
                        qlonglong locationId,

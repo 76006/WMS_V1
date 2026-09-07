@@ -274,21 +274,27 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
                                    PostedDocument *postedDocument,
                                    QString *errorMessage)
 {
-    if (request.sourceItemId <= 0 || request.quantity <= QuantityTolerance || !request.documentDate.isValid()) {
+    if (request.sourceItemId <= 0 || request.quantity <= QuantityTolerance
+        || !request.documentDate.isValid()) {
         setError(errorMessage, QStringLiteral("撤销明细、日期或数量无效。"));
+        return false;
+    }
+    if (!beginImmediate(errorMessage)) {
         return false;
     }
 
     QSqlQuery source(m_database);
     source.prepare(QStringLiteral(
-        "SELECT i.document_id, d.document_no, d.stock_direction, d.status, i.material_id, i.quantity, "
-        "i.reversed_quantity, i.batch_no, i.warehouse_id, i.location_id, m.require_serial "
+        "SELECT i.document_id, d.document_no, d.stock_direction, d.status, d.document_type, "
+        "d.production_run_id, i.material_id, i.quantity, i.reversed_quantity, i.returned_quantity, "
+        "i.batch_no, i.warehouse_id, i.location_id, m.require_serial, i.source_item_id "
         "FROM business_document_items i "
-        "JOIN business_documents d ON d.id = i.document_id "
-        "JOIN materials m ON m.id = i.material_id WHERE i.id = ?"));
+        "JOIN business_documents d ON d.id=i.document_id "
+        "JOIN materials m ON m.id=i.material_id WHERE i.id=?"));
     source.addBindValue(request.sourceItemId);
     if (!source.exec() || !source.next()) {
         setError(errorMessage, QStringLiteral("找不到需要撤销的原业务明细。"));
+        rollback();
         return false;
     }
 
@@ -296,33 +302,39 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     const QString sourceNumber = source.value(1).toString();
     const QString direction = source.value(2).toString();
     const QString sourceStatus = source.value(3).toString();
-    const qlonglong materialId = source.value(4).toLongLong();
-    const double originalQuantity = source.value(5).toDouble();
-    const double reversedQuantity = source.value(6).toDouble();
-    const QString batchNo = source.value(7).toString();
-    const qlonglong warehouseId = source.value(8).toLongLong();
-    const qlonglong locationId = source.value(9).toLongLong();
-    const bool requireSerial = source.value(10).toBool();
+    const QString sourceType = source.value(4).toString();
+    const qlonglong productionRunId = source.value(5).toLongLong();
+    const qlonglong materialId = source.value(6).toLongLong();
+    const double originalQuantity = source.value(7).toDouble();
+    const double reversedQuantity = source.value(8).toDouble();
+    const double returnedQuantity = source.value(9).toDouble();
+    const QString batchNo = source.value(10).toString();
+    const qlonglong warehouseId = source.value(11).toLongLong();
+    const qlonglong locationId = source.value(12).toLongLong();
+    const bool requireSerial = source.value(13).toBool();
+    const qlonglong originalSourceItemId = source.value(14).toLongLong();
 
     if (direction != QStringLiteral("IN") && direction != QStringLiteral("OUT")) {
         setError(errorMessage, QStringLiteral("当前版本仅支持入库和出库明细的部分撤销。"));
+        rollback();
         return false;
     }
+    const double unavailableForReversal =
+        reversedQuantity + (sourceType == QStringLiteral("SCLL") ? returnedQuantity : 0.0);
     if (sourceStatus == QStringLiteral("REVERSED")
-        || request.quantity > originalQuantity - reversedQuantity + QuantityTolerance) {
+        || request.quantity > originalQuantity - unavailableForReversal + QuantityTolerance) {
         setError(errorMessage, QStringLiteral("撤销数量超过原明细的剩余可撤销数量。"));
+        rollback();
         return false;
     }
     if (requireSerial
         && (!isWholeNumber(request.quantity)
             || request.serialNumbers.size() != static_cast<int>(std::round(request.quantity)))) {
         setError(errorMessage, QStringLiteral("SN管理物料必须选择与撤销数量一致的SN。"));
+        rollback();
         return false;
     }
 
-    if (!beginImmediate(errorMessage)) {
-        return false;
-    }
     const QString number = nextDocumentNumber(QStringLiteral("CX"), request.documentDate, errorMessage);
     if (number.isEmpty()) {
         rollback();
@@ -331,9 +343,27 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
 
     const bool reversalInbound = direction == QStringLiteral("OUT");
     const qlonglong documentId = createDocument(number, QStringLiteral("CX"),
-                                                 reversalInbound ? QStringLiteral("IN") : QStringLiteral("OUT"),
-                                                 request.documentDate, request.handlerName, QString(), request.notes,
-                                                 sourceDocumentId, errorMessage);
+                                                 reversalInbound ? QStringLiteral("IN")
+                                                                 : QStringLiteral("OUT"),
+                                                 request.documentDate, request.handlerName, QString(),
+                                                 request.notes, sourceDocumentId, errorMessage);
+    if (documentId <= 0) {
+        rollback();
+        return false;
+    }
+    if (productionRunId > 0) {
+        QSqlQuery context(m_database);
+        context.prepare(QStringLiteral(
+            "UPDATE business_documents SET production_run_id=? WHERE id=?"));
+        context.addBindValue(productionRunId);
+        context.addBindValue(documentId);
+        if (!context.exec()) {
+            setError(errorMessage, context.lastError().text());
+            rollback();
+            return false;
+        }
+    }
+
     StockMovementRequest itemRequest;
     itemRequest.documentType = QStringLiteral("CX");
     itemRequest.documentDate = request.documentDate;
@@ -344,7 +374,7 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     itemRequest.locationId = locationId;
     itemRequest.notes = request.notes;
     itemRequest.serialNumbers = request.serialNumbers;
-    const qlonglong itemId = documentId > 0 ? createItem(documentId, itemRequest, 0, 0, errorMessage) : 0;
+    const qlonglong itemId = createItem(documentId, itemRequest, 0, 0, errorMessage);
     if (itemId <= 0) {
         rollback();
         return false;
@@ -353,16 +383,18 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     double before = 0.0;
     double after = 0.0;
     const double delta = reversalInbound ? request.quantity : -request.quantity;
-    if (!changeBalance(materialId, warehouseId, locationId, batchNo, delta, &before, &after, errorMessage)) {
+    if (!changeBalance(materialId, warehouseId, locationId, batchNo, delta,
+                       &before, &after, errorMessage)) {
         rollback();
         return false;
     }
-    const qlonglong ledgerId = createLedger(documentId, itemId, QStringLiteral("CX"), materialId, batchNo,
-                                             reversalInbound ? request.quantity : 0.0,
-                                             reversalInbound ? 0.0 : request.quantity,
-                                             before, after, warehouseId, locationId,
-                                             QStringLiteral("撤销原单 %1；%2").arg(sourceNumber, request.notes),
-                                             errorMessage);
+    const qlonglong ledgerId = createLedger(
+        documentId, itemId, QStringLiteral("CX"), materialId, batchNo,
+        reversalInbound ? request.quantity : 0.0,
+        reversalInbound ? 0.0 : request.quantity,
+        before, after, warehouseId, locationId,
+        QStringLiteral("撤销原单 %1；%2").arg(sourceNumber, request.notes),
+        errorMessage);
     if (ledgerId <= 0) {
         rollback();
         return false;
@@ -370,18 +402,27 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
 
     for (const QString &serial : request.serialNumbers) {
         QSqlQuery find(m_database);
-        if (reversalInbound) {
+        if (reversalInbound && sourceType == QStringLiteral("SCLL")) {
             find.prepare(QStringLiteral(
-                "SELECT id FROM serial_numbers WHERE serial_no = ? AND material_id = ? "
-                "AND status = 'OUTBOUND' AND last_document_id = ?"));
+                "SELECT sn.id FROM serial_numbers sn "
+                "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
+                "JOIN inventory_ledger l ON l.id=ils.ledger_id "
+                "WHERE sn.serial_no=? AND sn.material_id=? AND sn.status='OUTBOUND' "
+                "AND l.document_item_id=? AND l.business_type='SCLL'"));
+        } else if (reversalInbound) {
+            find.prepare(QStringLiteral(
+                "SELECT id FROM serial_numbers WHERE serial_no=? AND material_id=? "
+                "AND status='OUTBOUND' AND last_document_id=?"));
         } else {
             find.prepare(QStringLiteral(
-                "SELECT id FROM serial_numbers WHERE serial_no = ? AND material_id = ? "
-                "AND status = 'IN_STOCK' AND warehouse_id = ? AND location_id = ? AND batch_no = ?"));
+                "SELECT id FROM serial_numbers WHERE serial_no=? AND material_id=? "
+                "AND status='IN_STOCK' AND warehouse_id=? AND location_id=? AND batch_no=?"));
         }
-        find.addBindValue(serial.trimmed());
+        find.addBindValue(serial.trimmed().toUpper());
         find.addBindValue(materialId);
-        if (reversalInbound) {
+        if (reversalInbound && sourceType == QStringLiteral("SCLL")) {
+            find.addBindValue(request.sourceItemId);
+        } else if (reversalInbound) {
             find.addBindValue(sourceDocumentId);
         } else {
             find.addBindValue(warehouseId);
@@ -393,19 +434,35 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
             rollback();
             return false;
         }
+
         const qlonglong serialId = find.value(0).toLongLong();
         QSqlQuery update(m_database);
-        update.prepare(reversalInbound
-                           ? QStringLiteral("UPDATE serial_numbers SET status='IN_STOCK', warehouse_id=?, location_id=?, outbound_at=NULL, last_document_id=? WHERE id=?")
-                           : QStringLiteral("UPDATE serial_numbers SET status='VOIDED', warehouse_id=NULL, location_id=NULL, last_document_id=? WHERE id=?"));
         if (reversalInbound) {
+            update.prepare(QStringLiteral(
+                "UPDATE serial_numbers SET status='IN_STOCK', warehouse_id=?, location_id=?, "
+                "outbound_at=NULL, last_document_id=? WHERE id=?"));
             update.addBindValue(warehouseId);
             update.addBindValue(locationId);
+            update.addBindValue(documentId);
+            update.addBindValue(serialId);
+        } else if (sourceType == QStringLiteral("SCTL")) {
+            update.prepare(QStringLiteral(
+                "UPDATE serial_numbers SET status='OUTBOUND', warehouse_id=NULL, location_id=NULL, "
+                "outbound_at=?, last_document_id=? WHERE id=?"));
+            update.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+            update.addBindValue(documentId);
+            update.addBindValue(serialId);
+        } else {
+            update.prepare(QStringLiteral(
+                "UPDATE serial_numbers SET status='VOIDED', warehouse_id=NULL, location_id=NULL, "
+                "last_document_id=? WHERE id=?"));
+            update.addBindValue(documentId);
+            update.addBindValue(serialId);
         }
-        update.addBindValue(documentId);
-        update.addBindValue(serialId);
         if (!update.exec() || !linkLedgerSerial(ledgerId, serialId, errorMessage)) {
-            setError(errorMessage, update.lastError().text());
+            if (errorMessage && errorMessage->isEmpty()) {
+                *errorMessage = update.lastError().text();
+            }
             rollback();
             return false;
         }
@@ -413,20 +470,41 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
 
     QSqlQuery updateItem(m_database);
     updateItem.prepare(QStringLiteral(
-        "UPDATE business_document_items SET reversed_quantity = reversed_quantity + ? WHERE id = ?"));
+        "UPDATE business_document_items SET reversed_quantity=reversed_quantity+? "
+        "WHERE id=? AND reversed_quantity+?<=quantity-CASE WHEN ?='SCLL' "
+        "THEN returned_quantity ELSE 0 END+0.0000001"));
     updateItem.addBindValue(request.quantity);
     updateItem.addBindValue(request.sourceItemId);
-    if (!updateItem.exec()) {
-        setError(errorMessage, updateItem.lastError().text());
+    updateItem.addBindValue(request.quantity);
+    updateItem.addBindValue(sourceType);
+    if (!updateItem.exec() || updateItem.numRowsAffected() != 1) {
+        setError(errorMessage, QStringLiteral("可撤销数量已发生变化，请刷新后重试。"));
         rollback();
         return false;
     }
 
+    if (sourceType == QStringLiteral("SCTL") && originalSourceItemId > 0) {
+        QSqlQuery updateReturned(m_database);
+        updateReturned.prepare(QStringLiteral(
+            "UPDATE business_document_items SET returned_quantity=returned_quantity-? "
+            "WHERE id=? AND returned_quantity>=?"));
+        updateReturned.addBindValue(request.quantity);
+        updateReturned.addBindValue(originalSourceItemId);
+        updateReturned.addBindValue(request.quantity);
+        if (!updateReturned.exec() || updateReturned.numRowsAffected() != 1) {
+            setError(errorMessage, QStringLiteral("原领料明细的已退数量更新失败。"));
+            rollback();
+            return false;
+        }
+    }
+
     QSqlQuery remaining(m_database);
     remaining.prepare(QStringLiteral(
-        "SELECT COUNT(*) FROM business_document_items WHERE document_id = ? "
-        "AND reversed_quantity < quantity - 0.0000001"));
+        "SELECT COUNT(*) FROM business_document_items WHERE document_id=? "
+        "AND reversed_quantity<quantity-CASE WHEN ?='SCLL' "
+        "THEN returned_quantity ELSE 0 END-0.0000001"));
     remaining.addBindValue(sourceDocumentId);
+    remaining.addBindValue(sourceType);
     if (!remaining.exec() || !remaining.next()) {
         setError(errorMessage, remaining.lastError().text());
         rollback();
@@ -435,21 +513,27 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     const QString newStatus = remaining.value(0).toInt() == 0
         ? QStringLiteral("REVERSED") : QStringLiteral("PARTIALLY_REVERSED");
     QSqlQuery updateSource(m_database);
-    updateSource.prepare(QStringLiteral("UPDATE business_documents SET status=?, updated_at=? WHERE id=?"));
+    updateSource.prepare(QStringLiteral(
+        "UPDATE business_documents SET status=?, updated_at=? WHERE id=?"));
     updateSource.addBindValue(newStatus);
     updateSource.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
     updateSource.addBindValue(sourceDocumentId);
 
     if (!updateSource.exec() || !finalizeDocument(documentId, errorMessage)
-        || !writeAudit(QStringLiteral("REVERSE"), QStringLiteral("business_document"), sourceDocumentId,
+        || (sourceType == QStringLiteral("CPRK")
+            && !refreshProductionRunStatus(productionRunId, errorMessage))
+        || !writeAudit(QStringLiteral("REVERSE"), QStringLiteral("business_document"),
+                       sourceDocumentId,
                        QStringLiteral("%1 -> %2").arg(sourceNumber, number), errorMessage)
         || !commit(errorMessage)) {
-        if (!updateSource.lastError().text().isEmpty()) {
-            setError(errorMessage, updateSource.lastError().text());
+        if (errorMessage && errorMessage->isEmpty()
+            && !updateSource.lastError().text().isEmpty()) {
+            *errorMessage = updateSource.lastError().text();
         }
         rollback();
         return false;
     }
+
     if (postedDocument) {
         postedDocument->documentId = documentId;
         postedDocument->documentNumber = number;

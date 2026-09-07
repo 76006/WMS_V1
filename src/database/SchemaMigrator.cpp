@@ -20,21 +20,56 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     if (!executeSchema(database, errorMessage)) {
         return false;
     }
+    if (!applyProductionWorkflowMigration(database, errorMessage)) {
+        return false;
+    }
     return ensureDefaultAdministrator(database, errorMessage);
 }
 
 bool SchemaMigrator::executeSchema(QSqlDatabase database, QString *errorMessage)
 {
-    QFile file(QStringLiteral(":/database/schema.sql"));
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/schema.sql"),
+                              QStringLiteral("建表"),
+                              errorMessage);
+}
+
+bool SchemaMigrator::applyProductionWorkflowMigration(QSqlDatabase database,
+                                                       QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=2"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) {
+        return true;
+    }
+
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/002_production_workflow.sql"),
+                              QStringLiteral("升级数据库到版本2"),
+                              errorMessage);
+}
+
+bool SchemaMigrator::executeSqlResource(QSqlDatabase database,
+                                        const QString &resourcePath,
+                                        const QString &operationName,
+                                        QString *errorMessage)
+{
+    QFile file(resourcePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("无法读取内置数据库结构文件。");
+            *errorMessage = QStringLiteral("无法读取数据库脚本：%1").arg(resourcePath);
         }
         return false;
     }
 
     QString schema = QString::fromUtf8(file.readAll());
-    schema.remove(QRegularExpression(QStringLiteral("--[^\\n]*")));
+    schema.remove(QRegularExpression(QStringLiteral("--[^\n]*")));
     const QStringList statements = schema.split(QLatin1Char(';'), Qt::SkipEmptyParts);
 
     if (!database.transaction()) {
@@ -53,8 +88,8 @@ bool SchemaMigrator::executeSchema(QSqlDatabase database, QString *errorMessage)
         if (!query.exec(statement)) {
             database.rollback();
             if (errorMessage) {
-                *errorMessage = QStringLiteral("建表失败：%1\n%2")
-                                    .arg(query.lastError().text(), statement.left(160));
+                *errorMessage = QStringLiteral("%1失败：%2；语句：%3")
+                                    .arg(operationName, query.lastError().text(), statement.left(160));
             }
             return false;
         }
@@ -62,7 +97,8 @@ bool SchemaMigrator::executeSchema(QSqlDatabase database, QString *errorMessage)
 
     if (!database.commit()) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("提交数据库结构失败：%1").arg(database.lastError().text());
+            *errorMessage = QStringLiteral("提交%1失败：%2")
+                                .arg(operationName, database.lastError().text());
         }
         return false;
     }

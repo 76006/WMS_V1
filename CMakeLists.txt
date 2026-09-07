@@ -17,17 +17,22 @@ set(WMS_SOURCES
     src/database/DatabaseManager.cpp
     src/database/SchemaMigrator.cpp
     src/services/InventoryService.cpp
+    src/services/InventoryServiceProduction.cpp
     src/ui/LoginDialog.cpp
     src/ui/MainWindow.cpp
     src/ui/dialogs/MaterialDialog.cpp
     src/ui/pages/DashboardPage.cpp
+    src/ui/pages/FinishedGoodsInPage.cpp
     src/ui/pages/InventoryPage.cpp
     src/ui/pages/LedgerPage.cpp
     src/ui/pages/MaterialPage.cpp
     src/ui/pages/PlaceholderPage.cpp
+    src/ui/pages/ProductionIssuePage.cpp
+    src/ui/pages/ProductionReturnPage.cpp
     src/ui/pages/StockInPage.cpp
     src/ui/pages/StockOutPage.cpp
     src/ui/pages/WarehousePage.cpp
+    src/ui/widgets/StockLineTable.cpp
     src/core/DatabaseConfig.h
     src/core/PasswordHasher.h
     src/core/Session.h
@@ -38,13 +43,17 @@ set(WMS_SOURCES
     src/ui/MainWindow.h
     src/ui/dialogs/MaterialDialog.h
     src/ui/pages/DashboardPage.h
+    src/ui/pages/FinishedGoodsInPage.h
     src/ui/pages/InventoryPage.h
     src/ui/pages/LedgerPage.h
     src/ui/pages/MaterialPage.h
     src/ui/pages/PlaceholderPage.h
+    src/ui/pages/ProductionIssuePage.h
+    src/ui/pages/ProductionReturnPage.h
     src/ui/pages/StockInPage.h
     src/ui/pages/StockOutPage.h
     src/ui/pages/WarehousePage.h
+    src/ui/widgets/StockLineTable.h
 )
 
 qt_add_executable(IceBeautyWms WIN32 ${WMS_SOURCES})
@@ -52,6 +61,7 @@ qt_add_resources(IceBeautyWms "wms_resources"
     PREFIX "/"
     FILES
         database/schema.sql
+        database/migrations/002_production_workflow.sql
         resources/styles.qss
 )
 
@@ -76,8 +86,7 @@ if(BUILD_TESTING)
     target_link_libraries(WmsCoreTests PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME WmsCoreTests COMMAND WmsCoreTests)
 
-    qt_add_executable(WmsDatabaseTests
-        tests/DatabaseTests.cpp
+    set(WMS_DATABASE_TEST_SOURCES
         src/core/PasswordHasher.cpp
         src/core/PasswordHasher.h
         src/database/DatabaseManager.cpp
@@ -85,15 +94,41 @@ if(BUILD_TESTING)
         src/database/SchemaMigrator.cpp
         src/database/SchemaMigrator.h
         src/services/InventoryService.cpp
+        src/services/InventoryServiceProduction.cpp
         src/services/InventoryService.h
+    )
+
+    qt_add_executable(WmsDatabaseTests
+        tests/DatabaseTests.cpp
+        ${WMS_DATABASE_TEST_SOURCES}
     )
     qt_add_resources(WmsDatabaseTests "wms_test_resources"
         PREFIX "/"
-        FILES database/schema.sql
+        FILES
+            database/schema.sql
+            database/migrations/002_production_workflow.sql
     )
     target_include_directories(WmsDatabaseTests PRIVATE src)
     target_link_libraries(WmsDatabaseTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
     add_test(NAME WmsDatabaseTests COMMAND WmsDatabaseTests)
+
+    qt_add_executable(WmsProductionWorkflowTests
+        tests/ProductionWorkflowTests.cpp
+        ${WMS_DATABASE_TEST_SOURCES}
+    )
+    qt_add_resources(WmsProductionWorkflowTests "wms_production_test_resources"
+        PREFIX "/"
+        FILES
+            database/schema.sql
+            database/migrations/002_production_workflow.sql
+    )
+    target_include_directories(WmsProductionWorkflowTests PRIVATE src)
+    target_link_libraries(WmsProductionWorkflowTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+    add_test(NAME WmsProductionWorkflowTests COMMAND WmsProductionWorkflowTests)
+
     add_test(NAME WmsAppSmoke
         COMMAND IceBeautyWms --smoke-test --database ${CMAKE_CURRENT_BINARY_DIR}/wms-smoke.db)
+    add_test(NAME WmsUiSmoke
+        COMMAND IceBeautyWms -platform offscreen --ui-smoke-test
+                --database ${CMAKE_CURRENT_BINARY_DIR}/wms-ui-smoke.db)
 endif()

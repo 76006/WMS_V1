@@ -56,6 +56,8 @@ LedgerPage::LedgerPage(QSqlDatabase database, Session session, QWidget *parent)
     m_typeCombo->addItem(QStringLiteral("其他入库"), QStringLiteral("QTRK"));
     m_typeCombo->addItem(QStringLiteral("期初入库"), QStringLiteral("QC"));
     m_typeCombo->addItem(QStringLiteral("生产领料"), QStringLiteral("SCLL"));
+    m_typeCombo->addItem(QStringLiteral("生产退料"), QStringLiteral("SCTL"));
+    m_typeCombo->addItem(QStringLiteral("成品入库"), QStringLiteral("CPRK"));
     m_typeCombo->addItem(QStringLiteral("销售出库"), QStringLiteral("XSCK"));
     m_typeCombo->addItem(QStringLiteral("其他出库"), QStringLiteral("QTCK"));
     m_typeCombo->addItem(QStringLiteral("库存调拨"), QStringLiteral("DB"));
@@ -133,7 +135,8 @@ void LedgerPage::refresh()
         " JOIN serial_numbers sn ON sn.id=ils.serial_id WHERE ils.ledger_id=l.id), ''), "
         "l.quantity_in, l.quantity_out, l.quantity_before, l.quantity_after, "
         "w.name, loc.code, u.display_name, d.stock_direction, d.status, "
-        "i.quantity-i.reversed_quantity, m.require_serial, d.created_by "
+        "i.quantity-i.reversed_quantity-CASE WHEN d.document_type='SCLL' THEN i.returned_quantity ELSE 0 END, "
+        "m.require_serial, d.created_by "
         "FROM inventory_ledger l "
         "JOIN business_documents d ON d.id=l.document_id "
         "JOIN business_document_items i ON i.id=l.document_item_id "

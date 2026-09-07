@@ -1,0 +1,406 @@
+#include "ui/pages/ProductionReturnPage.h"
+
+#include "services/InventoryService.h"
+
+#include <QAbstractItemView>
+#include <QComboBox>
+#include <QDateEdit>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QFrame>
+#include <QHeaderView>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QSet>
+#include <QSqlQuery>
+#include <QTableWidget>
+#include <QTextEdit>
+#include <QUuid>
+#include <QVBoxLayout>
+
+#include <cmath>
+#include <utility>
+
+namespace {
+constexpr int SelectColumn = 0;
+constexpr int MaterialColumn = 1;
+constexpr int BatchColumn = 2;
+constexpr int OriginalColumn = 3;
+constexpr int ReturnedColumn = 4;
+constexpr int ReversedColumn = 5;
+constexpr int RemainingColumn = 6;
+constexpr int QuantityColumn = 7;
+constexpr int WarehouseColumn = 8;
+constexpr int LocationColumn = 9;
+constexpr int SerialColumn = 10;
+constexpr int SourceItemRole = Qt::UserRole;
+constexpr int MaterialIdRole = Qt::UserRole + 1;
+constexpr int RequireSerialRole = Qt::UserRole + 2;
+}
+
+ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
+                                           Session session,
+                                           QWidget *parent)
+    : QWidget(parent), m_database(std::move(database)), m_session(std::move(session))
+{
+    setObjectName(QStringLiteral("pageRoot"));
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(20, 20, 20, 20);
+    root->setSpacing(12);
+    auto *panel = new QFrame(this);
+    panel->setObjectName(QStringLiteral("panel"));
+    auto *panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(20, 18, 20, 20);
+    auto *heading = new QLabel(QStringLiteral("生产退料"), panel);
+    heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
+    panelLayout->addWidget(heading);
+
+    auto *form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    m_runCombo = new QComboBox(panel);
+    m_documentCombo = new QComboBox(panel);
+    m_dateEdit = new QDateEdit(QDate::currentDate(), panel);
+    m_dateEdit->setCalendarPopup(true);
+    m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    m_handlerEdit = new QLineEdit(m_session.displayName, panel);
+    m_notesEdit = new QTextEdit(panel);
+    m_notesEdit->setMaximumHeight(60);
+    form->addRow(QStringLiteral("生产批次 *"), m_runCombo);
+    form->addRow(QStringLiteral("原领料单 *"), m_documentCombo);
+    form->addRow(QStringLiteral("退料日期 *"), m_dateEdit);
+    form->addRow(QStringLiteral("退料人员"), m_handlerEdit);
+    form->addRow(QStringLiteral("备注"), m_notesEdit);
+    panelLayout->addLayout(form);
+
+    auto *hint = new QLabel(QStringLiteral("勾选需要退回的原领料明细，并填写本次数量和退回库位。"), panel);
+    hint->setObjectName(QStringLiteral("mutedText"));
+    panelLayout->addWidget(hint);
+    m_linesTable = new QTableWidget(0, 11, panel);
+    m_linesTable->setHorizontalHeaderLabels({QStringLiteral("选择"), QStringLiteral("物料"),
+                                             QStringLiteral("批次"), QStringLiteral("原领"),
+                                             QStringLiteral("已退"), QStringLiteral("已撤销"),
+                                             QStringLiteral("可退"), QStringLiteral("本次退料"),
+                                             QStringLiteral("退回仓库"), QStringLiteral("退回库位"),
+                                             QStringLiteral("SN")});
+    m_linesTable->verticalHeader()->setVisible(false);
+    m_linesTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_linesTable->horizontalHeader()->setSectionResizeMode(MaterialColumn, QHeaderView::Stretch);
+    m_linesTable->setMinimumHeight(230);
+    panelLayout->addWidget(m_linesTable);
+    auto *actions = new QHBoxLayout;
+    actions->addStretch();
+    m_submitButton = new QPushButton(QStringLiteral("确认并退料"), panel);
+    m_submitButton->setProperty("primary", true);
+    m_submitButton->setEnabled(m_session.canManageWarehouse());
+    actions->addWidget(m_submitButton);
+    panelLayout->addLayout(actions);
+    root->addWidget(panel);
+
+    auto *recentPanel = new QFrame(this);
+    recentPanel->setObjectName(QStringLiteral("panel"));
+    auto *recentLayout = new QVBoxLayout(recentPanel);
+    recentLayout->addWidget(new QLabel(QStringLiteral("近期生产退料单"), recentPanel));
+    m_recentTable = new QTableWidget(0, 4, recentPanel);
+    m_recentTable->setHorizontalHeaderLabels({QStringLiteral("退料单号"), QStringLiteral("日期"),
+                                              QStringLiteral("生产批次"), QStringLiteral("原领料单")});
+    m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_recentTable->horizontalHeader()->setStretchLastSection(true);
+    recentLayout->addWidget(m_recentTable);
+    root->addWidget(recentPanel, 1);
+
+    connect(m_runCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &ProductionReturnPage::loadDocuments);
+    connect(m_documentCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &ProductionReturnPage::loadSourceLines);
+    connect(m_submitButton, &QPushButton::clicked, this, &ProductionReturnPage::submit);
+    resetSubmissionToken();
+    refreshReferenceData();
+}
+
+void ProductionReturnPage::resetSubmissionToken()
+{
+    m_submissionToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+int ProductionReturnPage::rowForWidget(const QWidget *widget, int column) const
+{
+    for (int row = 0; row < m_linesTable->rowCount(); ++row) {
+        if (m_linesTable->cellWidget(row, column) == widget) return row;
+    }
+    return -1;
+}
+
+void ProductionReturnPage::refreshReferenceData()
+{
+    const QVariant selected = m_runCombo->currentData();
+    m_runCombo->blockSignals(true);
+    m_runCombo->clear();
+    QSqlQuery runs(m_database);
+    runs.exec(QStringLiteral(
+        "SELECT p.id,p.batch_no,p.product_name FROM production_runs p "
+        "WHERE EXISTS(SELECT 1 FROM business_documents d JOIN business_document_items i "
+        "ON i.document_id=d.id WHERE d.production_run_id=p.id AND d.document_type='SCLL' "
+        "AND d.status IN ('POSTED','PARTIALLY_REVERSED') "
+        "AND i.quantity-i.returned_quantity-i.reversed_quantity>0.0000001) "
+        "ORDER BY p.id DESC"));
+    while (runs.next()) {
+        m_runCombo->addItem(QStringLiteral("%1 - %2")
+                                .arg(runs.value(1).toString(), runs.value(2).toString()),
+                            runs.value(0));
+    }
+    const int index = m_runCombo->findData(selected);
+    if (index >= 0) m_runCombo->setCurrentIndex(index);
+    m_runCombo->blockSignals(false);
+    loadDocuments();
+    refreshRecentDocuments();
+}
+
+void ProductionReturnPage::loadDocuments()
+{
+    const QVariant selected = m_documentCombo->currentData();
+    m_documentCombo->blockSignals(true);
+    m_documentCombo->clear();
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT d.id,d.document_no,d.document_date FROM business_documents d "
+        "WHERE d.production_run_id=? AND d.document_type='SCLL' "
+        "AND d.status IN ('POSTED','PARTIALLY_REVERSED') "
+        "AND EXISTS(SELECT 1 FROM business_document_items i WHERE i.document_id=d.id "
+        "AND i.quantity-i.returned_quantity-i.reversed_quantity>0.0000001) "
+        "ORDER BY d.id DESC"));
+    query.addBindValue(m_runCombo->currentData());
+    query.exec();
+    while (query.next()) {
+        m_documentCombo->addItem(QStringLiteral("%1（%2）")
+                                     .arg(query.value(1).toString(), query.value(2).toString()),
+                                 query.value(0));
+    }
+    const int index = m_documentCombo->findData(selected);
+    if (index >= 0) m_documentCombo->setCurrentIndex(index);
+    m_documentCombo->blockSignals(false);
+    loadSourceLines();
+}
+
+void ProductionReturnPage::loadSourceLines()
+{
+    m_linesTable->setRowCount(0);
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT i.id,m.id,m.code,m.name,i.batch_no,i.quantity,i.returned_quantity,"
+        "i.reversed_quantity,i.quantity-i.returned_quantity-i.reversed_quantity,"
+        "m.require_serial,i.warehouse_id,i.location_id FROM business_document_items i "
+        "JOIN materials m ON m.id=i.material_id WHERE i.document_id=? "
+        "AND i.quantity-i.returned_quantity-i.reversed_quantity>0.0000001 ORDER BY i.line_number"));
+    query.addBindValue(m_documentCombo->currentData());
+    query.exec();
+    while (query.next()) {
+        const int row = m_linesTable->rowCount();
+        m_linesTable->insertRow(row);
+        auto *selection = new QTableWidgetItem;
+        selection->setCheckState(Qt::Unchecked);
+        selection->setData(SourceItemRole, query.value(0));
+        selection->setData(MaterialIdRole, query.value(1));
+        selection->setData(RequireSerialRole, query.value(9));
+        m_linesTable->setItem(row, SelectColumn, selection);
+        m_linesTable->setItem(row, MaterialColumn,
+                              new QTableWidgetItem(QStringLiteral("%1 - %2")
+                                                       .arg(query.value(2).toString(),
+                                                            query.value(3).toString())));
+        for (int column = BatchColumn; column <= RemainingColumn; ++column) {
+            m_linesTable->setItem(row, column,
+                                  new QTableWidgetItem(query.value(column + 2).toString()));
+        }
+        auto *quantity = new QDoubleSpinBox(m_linesTable);
+        quantity->setDecimals(6);
+        quantity->setRange(0.000001, query.value(8).toDouble());
+        quantity->setValue(query.value(8).toDouble());
+        auto *warehouse = new QComboBox(m_linesTable);
+        QSqlQuery warehouses(m_database);
+        warehouses.exec(QStringLiteral(
+            "SELECT id,code,name FROM warehouses WHERE is_active=1 ORDER BY code"));
+        while (warehouses.next()) {
+            warehouse->addItem(QStringLiteral("%1 - %2")
+                                   .arg(warehouses.value(1).toString(),
+                                        warehouses.value(2).toString()),
+                               warehouses.value(0));
+        }
+        const int warehouseIndex = warehouse->findData(query.value(10));
+        if (warehouseIndex >= 0) warehouse->setCurrentIndex(warehouseIndex);
+        auto *location = new QComboBox(m_linesTable);
+        location->setProperty("preferredLocation", query.value(11));
+        auto *serial = new QPushButton(query.value(9).toBool()
+                                           ? QStringLiteral("选择SN")
+                                           : QStringLiteral("无需选择"),
+                                       m_linesTable);
+        serial->setEnabled(query.value(9).toBool());
+        m_linesTable->setCellWidget(row, QuantityColumn, quantity);
+        m_linesTable->setCellWidget(row, WarehouseColumn, warehouse);
+        m_linesTable->setCellWidget(row, LocationColumn, location);
+        m_linesTable->setCellWidget(row, SerialColumn, serial);
+        connect(warehouse, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                [this, warehouse] {
+                    const int currentRow = rowForWidget(warehouse, WarehouseColumn);
+                    if (currentRow >= 0) loadReturnLocations(currentRow);
+                });
+        connect(serial, &QPushButton::clicked, this,
+                [this, serial] {
+                    const int currentRow = rowForWidget(serial, SerialColumn);
+                    if (currentRow >= 0) chooseSerials(currentRow);
+                });
+        loadReturnLocations(row);
+    }
+    m_submitButton->setEnabled(m_session.canManageWarehouse()
+                               && m_linesTable->rowCount() > 0);
+}
+
+void ProductionReturnPage::loadReturnLocations(int row)
+{
+    auto *warehouse = qobject_cast<QComboBox *>(m_linesTable->cellWidget(row, WarehouseColumn));
+    auto *location = qobject_cast<QComboBox *>(m_linesTable->cellWidget(row, LocationColumn));
+    if (!warehouse || !location) return;
+    const QVariant preferred = location->property("preferredLocation");
+    location->clear();
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT id,code,name FROM locations WHERE warehouse_id=? AND is_active=1 ORDER BY code"));
+    query.addBindValue(warehouse->currentData());
+    query.exec();
+    while (query.next()) {
+        QString text = query.value(1).toString();
+        if (!query.value(2).toString().isEmpty()) text += QStringLiteral(" - ") + query.value(2).toString();
+        location->addItem(text, query.value(0));
+    }
+    const int index = location->findData(preferred);
+    if (index >= 0) location->setCurrentIndex(index);
+    location->setProperty("preferredLocation", QVariant());
+}
+
+void ProductionReturnPage::chooseSerials(int row)
+{
+    QTableWidgetItem *source = m_linesTable->item(row, SelectColumn);
+    auto *button = qobject_cast<QPushButton *>(m_linesTable->cellWidget(row, SerialColumn));
+    if (!source || !button) return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("选择退料SN"));
+    dialog.resize(480, 430);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(QStringLiteral("仅显示由该原领料明细发出且尚未退回的SN。"), &dialog));
+    auto *list = new QListWidget(&dialog);
+    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    const QStringList previous = button->property("serials").toStringList();
+    const QSet<QString> selected(previous.cbegin(), previous.cend());
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT DISTINCT sn.serial_no FROM serial_numbers sn "
+        "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
+        "JOIN inventory_ledger l ON l.id=ils.ledger_id "
+        "WHERE l.document_item_id=? AND l.business_type='SCLL' AND sn.status='OUTBOUND' "
+        "ORDER BY sn.serial_no"));
+    query.addBindValue(source->data(SourceItemRole));
+    query.exec();
+    while (query.next()) {
+        auto *item = new QListWidgetItem(query.value(0).toString(), list);
+        item->setSelected(selected.contains(item->text()));
+    }
+    layout->addWidget(list);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    QStringList serials;
+    for (const QListWidgetItem *item : list->selectedItems()) serials.append(item->text());
+    serials.sort();
+    button->setProperty("serials", serials);
+    button->setText(QStringLiteral("已选 %1 个").arg(serials.size()));
+}
+
+void ProductionReturnPage::refreshRecentDocuments()
+{
+    m_recentTable->setRowCount(0);
+    QSqlQuery query(m_database);
+    query.exec(QStringLiteral(
+        "SELECT d.document_no,d.document_date,p.batch_no,s.document_no "
+        "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
+        "JOIN business_documents s ON s.id=d.source_document_id "
+        "WHERE d.document_type='SCTL' ORDER BY d.id DESC LIMIT 20"));
+    while (query.next()) {
+        const int row = m_recentTable->rowCount();
+        m_recentTable->insertRow(row);
+        for (int column = 0; column < 4; ++column) {
+            m_recentTable->setItem(row, column,
+                                   new QTableWidgetItem(query.value(column).toString()));
+        }
+    }
+}
+
+void ProductionReturnPage::submit()
+{
+    ProductionReturnRequest request;
+    request.sourceDocumentId = m_documentCombo->currentData().toLongLong();
+    request.documentDate = m_dateEdit->date();
+    request.handlerName = m_handlerEdit->text().trimmed();
+    request.notes = m_notesEdit->toPlainText().trimmed();
+    request.submissionToken = m_submissionToken;
+    for (int row = 0; row < m_linesTable->rowCount(); ++row) {
+        QTableWidgetItem *source = m_linesTable->item(row, SelectColumn);
+        if (!source || source->checkState() != Qt::Checked) continue;
+        auto *quantity = qobject_cast<QDoubleSpinBox *>(m_linesTable->cellWidget(row, QuantityColumn));
+        auto *warehouse = qobject_cast<QComboBox *>(m_linesTable->cellWidget(row, WarehouseColumn));
+        auto *location = qobject_cast<QComboBox *>(m_linesTable->cellWidget(row, LocationColumn));
+        auto *serial = qobject_cast<QPushButton *>(m_linesTable->cellWidget(row, SerialColumn));
+        if (!quantity || !warehouse || !location || location->currentIndex() < 0) {
+            QMessageBox::warning(this, QStringLiteral("资料不完整"),
+                                 QStringLiteral("第 %1 行缺少退回仓库或库位。").arg(row + 1));
+            return;
+        }
+        ProductionReturnLine line;
+        line.sourceItemId = source->data(SourceItemRole).toLongLong();
+        line.quantity = quantity->value();
+        line.warehouseId = warehouse->currentData().toLongLong();
+        line.locationId = location->currentData().toLongLong();
+        line.serialNumbers = serial ? serial->property("serials").toStringList() : QStringList();
+        if (source->data(RequireSerialRole).toBool()) {
+            const double roundedQuantity = std::round(line.quantity);
+            if (std::abs(line.quantity - roundedQuantity) > 0.0000001
+                || line.serialNumbers.size() != static_cast<int>(roundedQuantity)) {
+                QMessageBox::warning(this, QStringLiteral("SN数量不一致"),
+                                     QStringLiteral("第 %1 行SN数量必须与整数退料数量一致。").arg(row + 1));
+                return;
+            }
+        }
+        request.lines.append(line);
+    }
+    if (request.sourceDocumentId <= 0 || request.lines.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("未选择退料明细"),
+                             QStringLiteral("请选择原领料单并勾选至少一条退料明细。"));
+        return;
+    }
+    if (QMessageBox::question(this, QStringLiteral("确认生产退料"),
+        QStringLiteral("确认提交 %1 条退料明细？库存将整单增加并生成流水。")
+            .arg(request.lines.size())) != QMessageBox::Yes) {
+        return;
+    }
+    m_submitButton->setEnabled(false);
+    InventoryService service(m_database, m_session.userId);
+    PostedDocument posted;
+    QString error;
+    const bool ok = service.postProductionReturn(request, &posted, &error);
+    m_submitButton->setEnabled(m_session.canManageWarehouse());
+    if (!ok) {
+        QMessageBox::warning(this, QStringLiteral("生产退料失败"), error);
+        return;
+    }
+    QMessageBox::information(this, QStringLiteral("生产退料完成"),
+                             QStringLiteral("退料单 %1 已生效。").arg(posted.documentNumber));
+    resetSubmissionToken();
+    m_notesEdit->clear();
+    emit stockChanged();
+    refreshReferenceData();
+}

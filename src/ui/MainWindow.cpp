@@ -1,10 +1,13 @@
 #include "ui/MainWindow.h"
 
 #include "ui/pages/DashboardPage.h"
+#include "ui/pages/FinishedGoodsInPage.h"
 #include "ui/pages/InventoryPage.h"
 #include "ui/pages/LedgerPage.h"
 #include "ui/pages/MaterialPage.h"
 #include "ui/pages/PlaceholderPage.h"
+#include "ui/pages/ProductionIssuePage.h"
+#include "ui/pages/ProductionReturnPage.h"
 #include "ui/pages/StockInPage.h"
 #include "ui/pages/StockOutPage.h"
 #include "ui/pages/WarehousePage.h"
@@ -114,6 +117,9 @@ void MainWindow::buildUi()
     m_warehousePage = new WarehousePage(m_database, m_session, m_stack);
     m_stockInPage = new StockInPage(m_database, m_session, m_stack);
     m_stockOutPage = new StockOutPage(m_database, m_session, m_stack);
+    m_productionIssuePage = new ProductionIssuePage(m_database, m_session, m_stack);
+    m_productionReturnPage = new ProductionReturnPage(m_database, m_session, m_stack);
+    m_finishedGoodsInPage = new FinishedGoodsInPage(m_database, m_session, m_stack);
     m_inventoryPage = new InventoryPage(m_database, m_stack);
     m_ledgerPage = new LedgerPage(m_database, m_session, m_stack);
 
@@ -122,12 +128,9 @@ void MainWindow::buildUi()
     add(QStringLiteral("仓库/库位管理"), m_warehousePage);
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
     add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
-    add(QStringLiteral("生产领料"), new PlaceholderPage(QStringLiteral("生产领料"),
-        QStringLiteral("页面已预留，将关联产品、生产批次及实际领料明细。"), m_stack));
-    add(QStringLiteral("生产退料"), new PlaceholderPage(QStringLiteral("生产退料"),
-        QStringLiteral("页面已预留，将支持关联原领料明细和部分退料。"), m_stack));
-    add(QStringLiteral("成品入库"), new PlaceholderPage(QStringLiteral("成品入库"),
-        QStringLiteral("页面已预留，将复用入库事务并补充产品、生产批次和SN信息。"), m_stack));
+    add(QStringLiteral("生产领料"), m_productionIssuePage);
+    add(QStringLiteral("生产退料"), m_productionReturnPage);
+    add(QStringLiteral("成品入库"), m_finishedGoodsInPage);
     add(QStringLiteral("库存查询"), m_inventoryPage);
     add(QStringLiteral("库存流水"), m_ledgerPage);
     add(QStringLiteral("库存调拨"), new PlaceholderPage(QStringLiteral("库存调拨"),
@@ -159,6 +162,12 @@ void MainWindow::buildUi()
     connect(m_warehousePage, &WarehousePage::dataChanged, m_stockOutPage, &StockOutPage::refreshReferenceData);
     connect(m_stockInPage, &StockInPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_stockOutPage, &StockOutPage::stockChanged, this, &MainWindow::refreshInventoryViews);
+    connect(m_productionIssuePage, &ProductionIssuePage::stockChanged,
+            this, &MainWindow::refreshInventoryViews);
+    connect(m_productionReturnPage, &ProductionReturnPage::stockChanged,
+            this, &MainWindow::refreshInventoryViews);
+    connect(m_finishedGoodsInPage, &FinishedGoodsInPage::stockChanged,
+            this, &MainWindow::refreshInventoryViews);
     connect(m_ledgerPage, &LedgerPage::stockChanged, this, &MainWindow::refreshInventoryViews);
 }
 
@@ -179,6 +188,9 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_warehousePage) m_warehousePage->refresh();
     else if (page == m_stockInPage) m_stockInPage->refreshReferenceData();
     else if (page == m_stockOutPage) m_stockOutPage->refreshReferenceData();
+    else if (page == m_productionIssuePage) m_productionIssuePage->refreshReferenceData();
+    else if (page == m_productionReturnPage) m_productionReturnPage->refreshReferenceData();
+    else if (page == m_finishedGoodsInPage) m_finishedGoodsInPage->refreshReferenceData();
     else if (page == m_inventoryPage) m_inventoryPage->refresh();
     else if (page == m_ledgerPage) m_ledgerPage->refresh();
 }
@@ -191,4 +203,7 @@ void MainWindow::refreshInventoryViews()
     m_ledgerPage->refresh();
     m_stockInPage->refreshReferenceData();
     m_stockOutPage->refreshReferenceData();
+    m_productionIssuePage->refreshReferenceData();
+    m_productionReturnPage->refreshReferenceData();
+    m_finishedGoodsInPage->refreshReferenceData();
 }

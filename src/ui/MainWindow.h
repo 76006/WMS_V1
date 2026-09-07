@@ -6,9 +6,12 @@
 #include <QSqlDatabase>
 
 class DashboardPage;
+class FinishedGoodsInPage;
 class InventoryPage;
 class LedgerPage;
 class MaterialPage;
+class ProductionIssuePage;
+class ProductionReturnPage;
 class StockInPage;
 class StockOutPage;
 class WarehousePage;
@@ -32,7 +35,6 @@ private slots:
 
 private:
     void buildUi();
-    void addNavigationItem(const QString &title, QWidget *page, bool enabled = true);
 
     QSqlDatabase m_database;
     Session m_session;
@@ -44,6 +46,9 @@ private:
     WarehousePage *m_warehousePage = nullptr;
     StockInPage *m_stockInPage = nullptr;
     StockOutPage *m_stockOutPage = nullptr;
+    ProductionIssuePage *m_productionIssuePage = nullptr;
+    ProductionReturnPage *m_productionReturnPage = nullptr;
+    FinishedGoodsInPage *m_finishedGoodsInPage = nullptr;
     InventoryPage *m_inventoryPage = nullptr;
     LedgerPage *m_ledgerPage = nullptr;
 };

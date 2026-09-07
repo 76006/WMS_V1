@@ -9,6 +9,7 @@
 #include <QCommandLineParser>
 #include <QFile>
 #include <QMessageBox>
+#include <QSqlQuery>
 
 int main(int argc, char *argv[])
 {
@@ -31,8 +32,11 @@ int main(int argc, char *argv[])
                                       QStringLiteral("path"));
     QCommandLineOption smokeOption(QStringLiteral("smoke-test"),
                                    QStringLiteral("完成数据库初始化后直接退出，用于部署检查。"));
+    QCommandLineOption uiSmokeOption(QStringLiteral("ui-smoke-test"),
+                                     QStringLiteral("构造主界面并处理一次事件后退出。"));
     parser.addOption(databaseOption);
     parser.addOption(smokeOption);
+    parser.addOption(uiSmokeOption);
     parser.process(application);
 
     DatabaseConfig config = DatabaseConfig::load();
@@ -57,6 +61,25 @@ int main(int argc, char *argv[])
         return 2;
     }
     if (parser.isSet(smokeOption)) {
+        return 0;
+    }
+    if (parser.isSet(uiSmokeOption)) {
+        QSqlQuery user(databaseManager.database());
+        if (!user.exec(QStringLiteral(
+                "SELECT id,username,display_name FROM users WHERE username='admin'"))
+            || !user.next()) {
+            return 3;
+        }
+        Session session;
+        session.userId = user.value(0).toLongLong();
+        session.username = user.value(1).toString();
+        session.displayName = user.value(2).toString();
+        session.roleCode = QStringLiteral("ADMIN");
+        MainWindow window(databaseManager.database(), session,
+                          databaseManager.databaseFilePath());
+        window.show();
+        application.processEvents();
+        window.close();
         return 0;
     }
 
