@@ -19,7 +19,9 @@ class ProductionReturnPage;
 class SerialTracePage;
 class StockInPage;
 class StockOutPage;
+class SystemSettingsPage;
 class TransferPage;
+class UserManagementPage;
 class WarehousePage;
 class QLabel;
 class QStackedWidget;
@@ -61,6 +63,8 @@ private:
     BatchTracePage *m_batchTracePage = nullptr;
     SerialTracePage *m_serialTracePage = nullptr;
     AttachmentPage *m_attachmentPage = nullptr;
+    UserManagementPage *m_userManagementPage = nullptr;
+    SystemSettingsPage *m_systemSettingsPage = nullptr;
     TransferPage *m_transferPage = nullptr;
     InventoryCountPage *m_countPage = nullptr;
 };

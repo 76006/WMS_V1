@@ -15,7 +15,9 @@
 #include "ui/pages/SerialTracePage.h"
 #include "ui/pages/StockInPage.h"
 #include "ui/pages/StockOutPage.h"
+#include "ui/pages/SystemSettingsPage.h"
 #include "ui/pages/TransferPage.h"
+#include "ui/pages/UserManagementPage.h"
 #include "ui/pages/WarehousePage.h"
 
 #include <QButtonGroup>
@@ -136,6 +138,9 @@ void MainWindow::buildUi()
     m_batchTracePage = new BatchTracePage(m_database, m_stack);
     m_serialTracePage = new SerialTracePage(m_database, m_stack);
     m_attachmentPage = new AttachmentPage(m_database, m_session, m_stack);
+    m_userManagementPage = new UserManagementPage(m_database, m_session, m_stack);
+    m_systemSettingsPage = new SystemSettingsPage(m_database, m_session,
+                                                   m_databaseFilePath, m_stack);
 
     add(QStringLiteral("首页"), m_dashboardPage);
     add(QStringLiteral("物料管理"), m_materialPage);
@@ -153,11 +158,8 @@ void MainWindow::buildUi()
     add(QStringLiteral("批次查询"), m_batchTracePage);
     add(QStringLiteral("SN查询"), m_serialTracePage);
     add(QStringLiteral("附件管理"), m_attachmentPage);
-    add(QStringLiteral("用户管理"), new PlaceholderPage(QStringLiteral("用户管理"),
-        QStringLiteral("页面已预留，仅管理员可以维护账号和角色。"), m_stack), m_session.isAdministrator());
-    add(QStringLiteral("系统设置"), new PlaceholderPage(QStringLiteral("系统设置"),
-        QStringLiteral("当前数据库文件：%1").arg(QFileInfo(m_databaseFilePath).absoluteFilePath()), m_stack),
-        m_session.isAdministrator());
+    add(QStringLiteral("用户管理"), m_userManagementPage, m_session.isAdministrator());
+    add(QStringLiteral("系统设置"), m_systemSettingsPage);
 
     navLayout->addStretch();
     scroll->setWidget(navWidget);
@@ -215,6 +217,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_batchTracePage) m_batchTracePage->refresh();
     else if (page == m_serialTracePage) m_serialTracePage->refresh();
     else if (page == m_attachmentPage) m_attachmentPage->refresh();
+    else if (page == m_userManagementPage) m_userManagementPage->refresh();
 }
 
 void MainWindow::refreshInventoryViews()

@@ -21,6 +21,7 @@ set(WMS_SOURCES
     src/services/InventoryService.cpp
     src/services/InventoryServiceDocuments.cpp
     src/services/InventoryServiceProduction.cpp
+    src/services/UserService.cpp
     src/ui/LoginDialog.cpp
     src/ui/MainWindow.cpp
     src/ui/dialogs/MaterialDialog.cpp
@@ -39,7 +40,9 @@ set(WMS_SOURCES
     src/ui/pages/SerialTracePage.cpp
     src/ui/pages/StockInPage.cpp
     src/ui/pages/StockOutPage.cpp
+    src/ui/pages/SystemSettingsPage.cpp
     src/ui/pages/TransferPage.cpp
+    src/ui/pages/UserManagementPage.cpp
     src/ui/pages/WarehousePage.cpp
     src/ui/widgets/StockLineTable.cpp
     src/core/DatabaseConfig.h
@@ -50,6 +53,7 @@ set(WMS_SOURCES
     src/database/SchemaMigrator.h
     src/services/AttachmentService.h
     src/services/InventoryService.h
+    src/services/UserService.h
     src/ui/LoginDialog.h
     src/ui/MainWindow.h
     src/ui/dialogs/MaterialDialog.h
@@ -68,7 +72,9 @@ set(WMS_SOURCES
     src/ui/pages/SerialTracePage.h
     src/ui/pages/StockInPage.h
     src/ui/pages/StockOutPage.h
+    src/ui/pages/SystemSettingsPage.h
     src/ui/pages/TransferPage.h
+    src/ui/pages/UserManagementPage.h
     src/ui/pages/WarehousePage.h
     src/ui/widgets/StockLineTable.h
 )
@@ -180,6 +186,27 @@ if(BUILD_TESTING)
     target_include_directories(WmsTraceabilityAttachmentTests PRIVATE src)
     target_link_libraries(WmsTraceabilityAttachmentTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
     add_test(NAME WmsTraceabilityAttachmentTests COMMAND WmsTraceabilityAttachmentTests)
+
+    qt_add_executable(WmsUserServiceTests
+        tests/UserServiceTests.cpp
+        src/services/UserService.cpp
+        src/services/UserService.h
+        src/core/PasswordHasher.cpp
+        src/core/PasswordHasher.h
+        src/database/DatabaseManager.cpp
+        src/database/DatabaseManager.h
+        src/database/SchemaMigrator.cpp
+        src/database/SchemaMigrator.h
+    )
+    qt_add_resources(WmsUserServiceTests "wms_user_test_resources"
+        PREFIX "/"
+        FILES
+            database/schema.sql
+            database/migrations/002_production_workflow.sql
+    )
+    target_include_directories(WmsUserServiceTests PRIVATE src)
+    target_link_libraries(WmsUserServiceTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+    add_test(NAME WmsUserServiceTests COMMAND WmsUserServiceTests)
 
     add_test(NAME WmsAppSmoke
         COMMAND IceBeautyWms --smoke-test --database ${CMAKE_CURRENT_BINARY_DIR}/wms-smoke.db)
