@@ -2,11 +2,13 @@
 
 #include <QRegularExpression>
 #include <QSet>
+#include <QDateTime>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QVariant>
 
 #include <cmath>
+#include <utility>
 
 namespace {
 constexpr double QuantityTolerance = 0.0000001;
@@ -21,6 +23,12 @@ void setError(QString *target, const QString &message)
 bool isWholeNumber(double value)
 {
     return std::abs(value - std::round(value)) < QuantityTolerance;
+}
+
+QString databaseText(const QString &value)
+{
+    const QString trimmed = value.trimmed();
+    return trimmed.isNull() ? QString::fromLatin1("", 0) : trimmed;
 }
 }
 
@@ -127,7 +135,7 @@ bool InventoryService::postMovement(const StockMovementRequest &request,
         batch.prepare(QStringLiteral(
             "INSERT OR IGNORE INTO batches(material_id, batch_no, first_in_at) VALUES(?, ?, ?)"));
         batch.addBindValue(request.materialId);
-        batch.addBindValue(request.batchNo.trimmed());
+        batch.addBindValue(databaseText(request.batchNo));
         batch.addBindValue(inbound ? QDateTime::currentDateTime().toString(Qt::ISODateWithMs) : QVariant());
         if (!batch.exec()) {
             setError(errorMessage, QStringLiteral("批次记录失败：%1").arg(batch.lastError().text()));
@@ -225,7 +233,7 @@ bool InventoryService::postTransfer(const TransferRequest &request,
         serialQuery.addBindValue(request.materialId);
         serialQuery.addBindValue(request.warehouseId);
         serialQuery.addBindValue(request.locationId);
-        serialQuery.addBindValue(request.batchNo.trimmed());
+        serialQuery.addBindValue(databaseText(request.batchNo));
         if (!serialQuery.exec() || !serialQuery.next()) {
             setError(errorMessage, QStringLiteral("SN %1 不在所选源库位中。").arg(serial));
             rollback();
@@ -378,7 +386,7 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
         } else {
             find.addBindValue(warehouseId);
             find.addBindValue(locationId);
-            find.addBindValue(batchNo);
+            find.addBindValue(databaseText(batchNo));
         }
         if (!find.exec() || !find.next()) {
             setError(errorMessage, QStringLiteral("SN %1 当前状态不允许撤销。").arg(serial));
@@ -661,9 +669,9 @@ qlonglong InventoryService::createDocument(const QString &number,
     query.addBindValue(direction);
     query.addBindValue(date.toString(Qt::ISODate));
     query.addBindValue(sourceDocumentId);
-    query.addBindValue(handler.trimmed());
-    query.addBindValue(purpose.trimmed());
-    query.addBindValue(notes.trimmed());
+    query.addBindValue(databaseText(handler));
+    query.addBindValue(databaseText(purpose));
+    query.addBindValue(databaseText(notes));
     query.addBindValue(m_operatorId);
     if (!query.exec()) {
         setError(errorMessage, QStringLiteral("创建业务单据失败：%1").arg(query.lastError().text()));
@@ -686,12 +694,12 @@ qlonglong InventoryService::createItem(qlonglong documentId,
     query.addBindValue(documentId);
     query.addBindValue(request.materialId);
     query.addBindValue(request.quantity);
-    query.addBindValue(request.batchNo.trimmed());
+    query.addBindValue(databaseText(request.batchNo));
     query.addBindValue(request.warehouseId);
     query.addBindValue(request.locationId);
     query.addBindValue(targetWarehouseId > 0 ? QVariant(targetWarehouseId) : QVariant());
     query.addBindValue(targetLocationId > 0 ? QVariant(targetLocationId) : QVariant());
-    query.addBindValue(request.notes.trimmed());
+    query.addBindValue(databaseText(request.notes));
     if (!query.exec()) {
         setError(errorMessage, QStringLiteral("创建业务明细失败：%1").arg(query.lastError().text()));
         return 0;
@@ -715,7 +723,7 @@ bool InventoryService::changeBalance(qlonglong materialId,
     select.addBindValue(materialId);
     select.addBindValue(warehouseId);
     select.addBindValue(locationId);
-    select.addBindValue(batchNo);
+    select.addBindValue(databaseText(batchNo));
     if (!select.exec()) {
         setError(errorMessage, select.lastError().text());
         return false;
@@ -752,7 +760,7 @@ bool InventoryService::changeBalance(qlonglong materialId,
         update.addBindValue(materialId);
         update.addBindValue(warehouseId);
         update.addBindValue(locationId);
-        update.addBindValue(batchNo);
+        update.addBindValue(databaseText(batchNo));
         update.addBindValue(after);
     }
     if (!update.exec()) {
@@ -791,7 +799,7 @@ qlonglong InventoryService::createLedger(qlonglong documentId,
     query.addBindValue(documentId);
     query.addBindValue(itemId);
     query.addBindValue(materialId);
-    query.addBindValue(batchNo);
+    query.addBindValue(databaseText(batchNo));
     query.addBindValue(quantityIn);
     query.addBindValue(quantityOut);
     query.addBindValue(quantityBefore);
@@ -799,7 +807,7 @@ qlonglong InventoryService::createLedger(qlonglong documentId,
     query.addBindValue(warehouseId);
     query.addBindValue(locationId);
     query.addBindValue(m_operatorId);
-    query.addBindValue(notes.trimmed());
+    query.addBindValue(databaseText(notes));
     if (!query.exec()) {
         setError(errorMessage, QStringLiteral("生成库存流水失败：%1").arg(query.lastError().text()));
         return 0;
@@ -819,7 +827,7 @@ bool InventoryService::attachSerialsToInbound(const StockMovementRequest &reques
             "inbound_at, last_document_id) VALUES(?, ?, ?, 'IN_STOCK', ?, ?, ?, ?)"));
         insert.addBindValue(request.materialId);
         insert.addBindValue(serial.trimmed().toUpper());
-        insert.addBindValue(request.batchNo.trimmed());
+        insert.addBindValue(databaseText(request.batchNo));
         insert.addBindValue(request.warehouseId);
         insert.addBindValue(request.locationId);
         insert.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
@@ -848,7 +856,7 @@ bool InventoryService::attachSerialsToOutbound(const StockMovementRequest &reque
             "AND status='IN_STOCK' AND warehouse_id=? AND location_id=?"));
         select.addBindValue(serial.trimmed().toUpper());
         select.addBindValue(request.materialId);
-        select.addBindValue(request.batchNo.trimmed());
+        select.addBindValue(databaseText(request.batchNo));
         select.addBindValue(request.warehouseId);
         select.addBindValue(request.locationId);
         if (!select.exec() || !select.next()) {
@@ -919,11 +927,10 @@ bool InventoryService::writeAudit(const QString &action,
     query.addBindValue(action);
     query.addBindValue(entityType);
     query.addBindValue(entityId);
-    query.addBindValue(detail);
+    query.addBindValue(databaseText(detail));
     if (!query.exec()) {
         setError(errorMessage, QStringLiteral("记录操作日志失败：%1").arg(query.lastError().text()));
         return false;
     }
     return true;
 }
-

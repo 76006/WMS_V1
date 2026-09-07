@@ -10,6 +10,7 @@ class InventoryPage;
 class LedgerPage;
 class MaterialPage;
 class StockInPage;
+class StockOutPage;
 class WarehousePage;
 class QLabel;
 class QStackedWidget;
@@ -42,7 +43,7 @@ private:
     MaterialPage *m_materialPage = nullptr;
     WarehousePage *m_warehousePage = nullptr;
     StockInPage *m_stockInPage = nullptr;
+    StockOutPage *m_stockOutPage = nullptr;
     InventoryPage *m_inventoryPage = nullptr;
     LedgerPage *m_ledgerPage = nullptr;
 };
-

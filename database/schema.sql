@@ -261,6 +261,8 @@ INSERT OR IGNORE INTO number_rules(document_type, prefix, sequence_width) VALUES
     ('SCTL', 'SCTL', 4),
     ('CPRK', 'CPRK', 4),
     ('XSCK', 'XSCK', 4),
+    ('WXLY', 'WXLY', 4),
+    ('YPLY', 'YPLY', 4),
     ('QTCK', 'QTCK', 4),
     ('DB', 'DB', 4),
     ('PD', 'PD', 4),

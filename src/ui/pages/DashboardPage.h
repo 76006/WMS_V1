@@ -4,6 +4,7 @@
 #include <QWidget>
 
 class QLabel;
+class QFrame;
 class QTableWidget;
 
 class DashboardPage final : public QWidget
@@ -29,4 +30,3 @@ private:
     QLabel *m_lowStock = nullptr;
     QTableWidget *m_recentTable = nullptr;
 };
-

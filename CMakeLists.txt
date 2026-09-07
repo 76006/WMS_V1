@@ -26,6 +26,7 @@ set(WMS_SOURCES
     src/ui/pages/MaterialPage.cpp
     src/ui/pages/PlaceholderPage.cpp
     src/ui/pages/StockInPage.cpp
+    src/ui/pages/StockOutPage.cpp
     src/ui/pages/WarehousePage.cpp
     src/core/DatabaseConfig.h
     src/core/PasswordHasher.h
@@ -42,6 +43,7 @@ set(WMS_SOURCES
     src/ui/pages/MaterialPage.h
     src/ui/pages/PlaceholderPage.h
     src/ui/pages/StockInPage.h
+    src/ui/pages/StockOutPage.h
     src/ui/pages/WarehousePage.h
 )
 
@@ -73,4 +75,25 @@ if(BUILD_TESTING)
     target_include_directories(WmsCoreTests PRIVATE src)
     target_link_libraries(WmsCoreTests PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME WmsCoreTests COMMAND WmsCoreTests)
+
+    qt_add_executable(WmsDatabaseTests
+        tests/DatabaseTests.cpp
+        src/core/PasswordHasher.cpp
+        src/core/PasswordHasher.h
+        src/database/DatabaseManager.cpp
+        src/database/DatabaseManager.h
+        src/database/SchemaMigrator.cpp
+        src/database/SchemaMigrator.h
+        src/services/InventoryService.cpp
+        src/services/InventoryService.h
+    )
+    qt_add_resources(WmsDatabaseTests "wms_test_resources"
+        PREFIX "/"
+        FILES database/schema.sql
+    )
+    target_include_directories(WmsDatabaseTests PRIVATE src)
+    target_link_libraries(WmsDatabaseTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+    add_test(NAME WmsDatabaseTests COMMAND WmsDatabaseTests)
+    add_test(NAME WmsAppSmoke
+        COMMAND IceBeautyWms --smoke-test --database ${CMAKE_CURRENT_BINARY_DIR}/wms-smoke.db)
 endif()

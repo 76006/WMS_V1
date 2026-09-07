@@ -2,6 +2,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -12,6 +13,8 @@
 #include <QSqlQuery>
 #include <QTextEdit>
 #include <QVBoxLayout>
+
+#include <utility>
 
 MaterialDialog::MaterialDialog(QSqlDatabase database,
                                qlonglong materialId,
@@ -222,4 +225,3 @@ void MaterialDialog::showError(const QString &message)
     m_errorLabel->setText(message);
     m_errorLabel->show();
 }
-

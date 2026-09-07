@@ -5,10 +5,9 @@
 class SchemaMigrator
 {
 public:
-    static bool migrate(const QSqlDatabase &database, QString *errorMessage = nullptr);
+    static bool migrate(QSqlDatabase database, QString *errorMessage = nullptr);
 
 private:
-    static bool executeSchema(const QSqlDatabase &database, QString *errorMessage);
-    static bool ensureDefaultAdministrator(const QSqlDatabase &database, QString *errorMessage);
+    static bool executeSchema(QSqlDatabase database, QString *errorMessage);
+    static bool ensureDefaultAdministrator(QSqlDatabase database, QString *errorMessage);
 };
-

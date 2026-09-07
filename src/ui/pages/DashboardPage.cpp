@@ -4,10 +4,13 @@
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QVBoxLayout>
+
+#include <utility>
 
 DashboardPage::DashboardPage(QSqlDatabase database, QWidget *parent)
     : QWidget(parent), m_database(std::move(database))
@@ -126,4 +129,3 @@ void DashboardPage::refresh()
     }
     m_recentTable->resizeColumnsToContents();
 }
-

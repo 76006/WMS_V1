@@ -19,6 +19,7 @@
 #include <QVBoxLayout>
 
 #include <cmath>
+#include <utility>
 
 namespace {
 constexpr int RequireBatchRole = Qt::UserRole + 1;
@@ -345,4 +346,3 @@ void StockInPage::submit()
     updateAvailableStock();
     emit stockChanged();
 }
-

@@ -6,6 +6,7 @@
 #include "ui/pages/MaterialPage.h"
 #include "ui/pages/PlaceholderPage.h"
 #include "ui/pages/StockInPage.h"
+#include "ui/pages/StockOutPage.h"
 #include "ui/pages/WarehousePage.h"
 
 #include <QButtonGroup>
@@ -18,6 +19,8 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QVBoxLayout>
+
+#include <utility>
 
 MainWindow::MainWindow(QSqlDatabase database,
                        Session session,
@@ -110,6 +113,7 @@ void MainWindow::buildUi()
     m_materialPage = new MaterialPage(m_database, m_session, m_stack);
     m_warehousePage = new WarehousePage(m_database, m_session, m_stack);
     m_stockInPage = new StockInPage(m_database, m_session, m_stack);
+    m_stockOutPage = new StockOutPage(m_database, m_session, m_stack);
     m_inventoryPage = new InventoryPage(m_database, m_stack);
     m_ledgerPage = new LedgerPage(m_database, m_session, m_stack);
 
@@ -117,8 +121,7 @@ void MainWindow::buildUi()
     add(QStringLiteral("物料管理"), m_materialPage);
     add(QStringLiteral("仓库/库位管理"), m_warehousePage);
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
-    add(QStringLiteral("出库管理"), new PlaceholderPage(QStringLiteral("出库管理"),
-        QStringLiteral("页面已预留。库存扣减、负库存拦截和手动批次选择已在核心服务中实现。"), m_stack));
+    add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
     add(QStringLiteral("生产领料"), new PlaceholderPage(QStringLiteral("生产领料"),
         QStringLiteral("页面已预留，将关联产品、生产批次及实际领料明细。"), m_stack));
     add(QStringLiteral("生产退料"), new PlaceholderPage(QStringLiteral("生产退料"),
@@ -153,7 +156,9 @@ void MainWindow::buildUi()
     connect(refreshButton, &QPushButton::clicked, this, &MainWindow::refreshCurrentPage);
     connect(m_materialPage, &MaterialPage::dataChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_warehousePage, &WarehousePage::dataChanged, m_stockInPage, &StockInPage::refreshReferenceData);
+    connect(m_warehousePage, &WarehousePage::dataChanged, m_stockOutPage, &StockOutPage::refreshReferenceData);
     connect(m_stockInPage, &StockInPage::stockChanged, this, &MainWindow::refreshInventoryViews);
+    connect(m_stockOutPage, &StockOutPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_ledgerPage, &LedgerPage::stockChanged, this, &MainWindow::refreshInventoryViews);
 }
 
@@ -173,6 +178,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_materialPage) m_materialPage->refresh();
     else if (page == m_warehousePage) m_warehousePage->refresh();
     else if (page == m_stockInPage) m_stockInPage->refreshReferenceData();
+    else if (page == m_stockOutPage) m_stockOutPage->refreshReferenceData();
     else if (page == m_inventoryPage) m_inventoryPage->refresh();
     else if (page == m_ledgerPage) m_ledgerPage->refresh();
 }
@@ -184,5 +190,5 @@ void MainWindow::refreshInventoryViews()
     m_inventoryPage->refresh();
     m_ledgerPage->refresh();
     m_stockInPage->refreshReferenceData();
+    m_stockOutPage->refreshReferenceData();
 }
-

@@ -3,6 +3,7 @@
 #include <QDate>
 #include <QSqlDatabase>
 #include <QStringList>
+#include <QVariant>
 
 struct StockMovementRequest
 {
@@ -141,4 +142,3 @@ private:
     QSqlDatabase m_database;
     qlonglong m_operatorId = 0;
 };
-

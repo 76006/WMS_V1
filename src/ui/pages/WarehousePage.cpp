@@ -16,6 +16,8 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include <utility>
+
 WarehousePage::WarehousePage(QSqlDatabase database, Session session, QWidget *parent)
     : QWidget(parent), m_database(std::move(database)), m_session(std::move(session))
 {
@@ -194,4 +196,3 @@ void WarehousePage::addLocation()
     loadLocations();
     emit dataChanged();
 }
-

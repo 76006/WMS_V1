@@ -3,6 +3,7 @@
 #include "core/PasswordHasher.h"
 
 #include <QFileInfo>
+#include <QDateTime>
 #include <QFormLayout>
 #include <QFrame>
 #include <QLabel>
@@ -11,6 +12,8 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QVBoxLayout>
+
+#include <utility>
 
 LoginDialog::LoginDialog(QSqlDatabase database,
                          const QString &databaseFilePath,
@@ -129,4 +132,3 @@ void LoginDialog::authenticate()
     audit.exec();
     accept();
 }
-

@@ -5,6 +5,8 @@
 #include "ui/MainWindow.h"
 
 #include <QApplication>
+#include <QCommandLineOption>
+#include <QCommandLineParser>
 #include <QFile>
 #include <QMessageBox>
 
@@ -20,11 +22,29 @@ int main(int argc, char *argv[])
         application.setStyleSheet(QString::fromUtf8(styleFile.readAll()));
     }
 
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("冰美肌库存管理系统"));
+    parser.addHelpOption();
+    parser.addVersionOption();
+    QCommandLineOption databaseOption({QStringLiteral("d"), QStringLiteral("database")},
+                                      QStringLiteral("使用指定的 SQLite 数据库文件。"),
+                                      QStringLiteral("path"));
+    QCommandLineOption smokeOption(QStringLiteral("smoke-test"),
+                                   QStringLiteral("完成数据库初始化后直接退出，用于部署检查。"));
+    parser.addOption(databaseOption);
+    parser.addOption(smokeOption);
+    parser.process(application);
+
     DatabaseConfig config = DatabaseConfig::load();
+    if (parser.isSet(databaseOption)) {
+        config.filePath = parser.value(databaseOption);
+    }
     if (config.filePath.isEmpty()) {
         config.filePath = DatabaseConfig::defaultFilePath();
     }
-    config.save();
+    if (!parser.isSet(databaseOption)) {
+        config.save();
+    }
 
     DatabaseManager databaseManager;
     QString errorMessage;
@@ -36,6 +56,9 @@ int main(int argc, char *argv[])
         QMessageBox::critical(nullptr, QStringLiteral("数据库初始化失败"), errorMessage);
         return 2;
     }
+    if (parser.isSet(smokeOption)) {
+        return 0;
+    }
 
     LoginDialog login(databaseManager.database(), databaseManager.databaseFilePath());
     if (login.exec() != QDialog::Accepted) {
@@ -46,4 +69,3 @@ int main(int argc, char *argv[])
     mainWindow.show();
     return application.exec();
 }
-

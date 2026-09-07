@@ -8,7 +8,7 @@
 #include <QSqlQuery>
 #include <QVariant>
 
-bool SchemaMigrator::migrate(const QSqlDatabase &database, QString *errorMessage)
+bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
 {
     if (!database.isOpen()) {
         if (errorMessage) {
@@ -23,7 +23,7 @@ bool SchemaMigrator::migrate(const QSqlDatabase &database, QString *errorMessage
     return ensureDefaultAdministrator(database, errorMessage);
 }
 
-bool SchemaMigrator::executeSchema(const QSqlDatabase &database, QString *errorMessage)
+bool SchemaMigrator::executeSchema(QSqlDatabase database, QString *errorMessage)
 {
     QFile file(QStringLiteral(":/database/schema.sql"));
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -69,7 +69,7 @@ bool SchemaMigrator::executeSchema(const QSqlDatabase &database, QString *errorM
     return true;
 }
 
-bool SchemaMigrator::ensureDefaultAdministrator(const QSqlDatabase &database, QString *errorMessage)
+bool SchemaMigrator::ensureDefaultAdministrator(QSqlDatabase database, QString *errorMessage)
 {
     QSqlQuery countQuery(database);
     if (!countQuery.exec(QStringLiteral("SELECT COUNT(*) FROM users")) || !countQuery.next()) {
@@ -106,4 +106,3 @@ bool SchemaMigrator::ensureDefaultAdministrator(const QSqlDatabase &database, QS
     }
     return true;
 }
-
