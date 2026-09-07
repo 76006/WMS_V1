@@ -1,0 +1,17 @@
+/build*/
+/.qt/
+/.vs/
+/.vscode/
+*.user
+*.autosave
+*.log
+
+# 本地库存数据和 SQLite 运行文件不进入版本库
+/冰美肌库存-0629.xlsx
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+/data/
+
