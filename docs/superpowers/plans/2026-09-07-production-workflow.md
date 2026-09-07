@@ -16,7 +16,7 @@
 - Batch and SN rules remain enforced at service level.
 - Posted records are corrected by reversal or production return, never direct deletion.
 - No BOM calculation, approvals, financial data, scanning, attachments, or backup work in this increment.
-- The current archive checkout has no `.git`; commit steps run only after Git metadata is restored.
+- The original archive checkout had no `.git`; Git history was restored after implementation and the completed workflow was recorded in consolidated commit `9af2fbf`.
 
 ---
 
