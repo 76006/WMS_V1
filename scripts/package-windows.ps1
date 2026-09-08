@@ -1,7 +1,8 @@
 param(
     [string]$QtRoot = '',
     [string]$BuildDirectory = 'build-release',
-    [string]$OutputDirectory = 'dist'
+    [string]$OutputDirectory = 'dist',
+    [switch]$ZipOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,6 +94,12 @@ try {
 
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 Compress-Archive -Path "$appPath\*" -DestinationPath $zipPath -CompressionLevel Optimal
+
+if ($ZipOnly) {
+    Write-Host "发布目录: $appPath"
+    Write-Host "免安装包: $zipPath"
+    return
+}
 
 $stagingPath = Join-Path $outputPath 'installer-staging'
 if (Test-Path -LiteralPath $stagingPath) { Remove-Item -LiteralPath $stagingPath -Recurse -Force }

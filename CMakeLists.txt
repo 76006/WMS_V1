@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(IceBeautyWms VERSION 1.3.0 LANGUAGES CXX)
+project(IceBeautyWms VERSION 1.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -100,6 +100,9 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/003_final_features.sql
         database/migrations/004_material_numbering.sql
         database/migrations/005_inventory_reporting.sql
+        database/migrations/006_material_operations.sql
+        database/migrations/007_production_issue_number.sql
+        database/migrations/008_sales_outbound_details.sql
         resources/PdfPreview.qml
         resources/styles.qss
 )

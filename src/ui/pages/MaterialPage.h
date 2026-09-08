@@ -27,6 +27,7 @@ signals:
 private slots:
     void addMaterial();
     void editMaterial();
+    void batchEditMaterials();
     void importMaterials();
     void exportMaterials();
     void manageProjects();
@@ -39,8 +40,10 @@ private:
     Session m_session;
     QLineEdit *m_searchEdit = nullptr;
     QComboBox *m_categoryCombo = nullptr;
+    QComboBox *m_statusCombo = nullptr;
     QPushButton *m_addButton = nullptr;
     QPushButton *m_editButton = nullptr;
+    QPushButton *m_batchEditButton = nullptr;
     QPushButton *m_importButton = nullptr;
     QPushButton *m_exportButton = nullptr;
     QPushButton *m_projectButton = nullptr;

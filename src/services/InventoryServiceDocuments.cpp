@@ -74,9 +74,16 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         setDocumentError(errorMessage, QStringLiteral("出入库单头、明细或当前用户无效。"));
         return false;
     }
+    const QString type = request.documentType.trimmed().toUpper();
+    if (!inbound && type == QStringLiteral("XSCK")
+        && (request.customerCompany.trimmed().isEmpty()
+            || request.destination.trimmed().isEmpty())) {
+        setDocumentError(errorMessage,
+                         QStringLiteral("销售出库必须填写客户公司名称和销售目的地/收货地址。"));
+        return false;
+    }
     if (!beginImmediate(errorMessage)) return false;
 
-    const QString type = request.documentType.trimmed().toUpper();
     const QString number = nextDocumentNumber(type, request.documentDate, errorMessage);
     const qlonglong documentId = number.isEmpty()
         ? 0
@@ -96,6 +103,28 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         if (!supplier.exec()) {
             setDocumentError(errorMessage,
                              QStringLiteral("保存供应商失败：%1").arg(supplier.lastError().text()));
+            rollback();
+            return false;
+        }
+    }
+    if (!inbound && type == QStringLiteral("XSCK")) {
+        QSqlQuery sales(m_database);
+        sales.prepare(QStringLiteral(
+            "INSERT INTO sales_outbound_details(document_id,customer_company,destination,"
+            "contact_name,contact_phone,sales_order_no,logistics_company,tracking_no) "
+            "VALUES(?,?,?,?,?,?,?,?)"));
+        sales.addBindValue(documentId);
+        sales.addBindValue(normalizedText(request.customerCompany));
+        sales.addBindValue(normalizedText(request.destination));
+        sales.addBindValue(normalizedText(request.customerContact));
+        sales.addBindValue(normalizedText(request.customerPhone));
+        sales.addBindValue(normalizedText(request.salesOrderNumber));
+        sales.addBindValue(normalizedText(request.logisticsCompany));
+        sales.addBindValue(normalizedText(request.trackingNumber));
+        if (!sales.exec()) {
+            setDocumentError(errorMessage,
+                             QStringLiteral("保存销售出库信息失败：%1")
+                                 .arg(sales.lastError().text()));
             rollback();
             return false;
         }
@@ -319,6 +348,7 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
         movement.batchNo = batchNo;
         movement.warehouseId = request.warehouseId;
         movement.locationId = request.locationId;
+        movement.serialNumbers = source.serialNumbers;
         movement.notes = source.notes;
         QString detail;
         const MaterialRules rules = materialRules(materialId, &detail);
@@ -338,9 +368,12 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
             rollback();
             return false;
         }
-        if (createLedger(documentId, itemId, QStringLiteral("QTRK"), materialId, batchNo,
-                         source.quantity, 0.0, before, after, request.warehouseId,
-                         request.locationId, source.notes, &detail) <= 0) {
+        const qlonglong ledgerId = createLedger(
+            documentId, itemId, QStringLiteral("QTRK"), materialId, batchNo,
+            source.quantity, 0.0, before, after, request.warehouseId,
+            request.locationId, source.notes, &detail);
+        if (ledgerId <= 0
+            || !attachSerialsToInbound(movement, documentId, ledgerId, &detail)) {
             setDocumentError(errorMessage, lineError(index + 1, detail));
             rollback();
             return false;

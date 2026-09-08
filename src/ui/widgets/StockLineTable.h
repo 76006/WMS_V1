@@ -27,6 +27,8 @@ public slots:
     void addLine();
     void clearLines();
     void setPurchaseMode(bool enabled);
+    void setProductionUsageMode(bool enabled);
+    void setProductionQuantity(double quantity);
 
 private:
     int rowForWidget(const QWidget *widget, int column) const;
@@ -36,11 +38,15 @@ private:
     void loadLocations(int row);
     void loadBatches(int row);
     void updateAvailable(int row);
+    void loadUnitUsage(int row);
+    void updateProductionQuantity(int row);
     void chooseSerials(int row);
     void removeLine(int row);
 
     QSqlDatabase m_database;
     Mode m_mode = Mode::Outbound;
     bool m_purchaseMode = false;
+    bool m_productionUsageMode = false;
+    double m_productionQuantity = 1.0;
     QTableWidget *m_table = nullptr;
 };

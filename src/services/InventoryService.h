@@ -31,6 +31,13 @@ struct StockDocumentRequest
     QString handlerName;
     QString purpose;
     QString supplier;
+    QString customerCompany;
+    QString destination;
+    QString customerContact;
+    QString customerPhone;
+    QString salesOrderNumber;
+    QString logisticsCompany;
+    QString trackingNumber;
     QString notes;
     QString submissionToken;
     qlonglong productionRunId = 0;
@@ -96,6 +103,7 @@ struct InitialInventoryLine
     QString unit = QStringLiteral("个");
     QString batchNo;
     double quantity = 0.0;
+    QStringList serialNumbers;
     QString notes;
 };
 

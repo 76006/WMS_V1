@@ -65,6 +65,15 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     m_brandEdit = new QLineEdit(this);
     m_unitEdit = new QLineEdit(this);
     m_unitEdit->setMaxLength(20);
+    m_unitUsageSpin = new QDoubleSpinBox(this);
+    m_unitUsageSpin->setDecimals(6);
+    m_unitUsageSpin->setRange(0, 999999999999.0);
+    m_processingMethodCombo = new QComboBox(this);
+    m_processingMethodCombo->setEditable(true);
+    m_processingMethodCombo->addItem(QStringLiteral("未设置"), QString());
+    m_processingMethodCombo->addItem(QStringLiteral("外购"), QStringLiteral("外购"));
+    m_processingMethodCombo->addItem(QStringLiteral("自制"), QStringLiteral("自制"));
+    m_processingMethodCombo->addItem(QStringLiteral("委外加工"), QStringLiteral("委外加工"));
     m_minimumStockSpin = new QDoubleSpinBox(this);
     m_minimumStockSpin->setDecimals(6);
     m_minimumStockSpin->setRange(0, 999999999999.0);
@@ -72,6 +81,9 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     m_locationCombo = new QComboBox(this);
     m_batchCheck = new QCheckBox(QStringLiteral("启用批次管理"), this);
     m_serialCheck = new QCheckBox(QStringLiteral("启用SN序列号管理"), this);
+    m_statusCombo = new QComboBox(this);
+    m_statusCombo->addItem(QStringLiteral("正常"), true);
+    m_statusCombo->addItem(QStringLiteral("停用"), false);
     m_notesEdit = new QTextEdit(this);
     m_notesEdit->setMaximumHeight(85);
     m_imagePreview = new QLabel(QStringLiteral("暂无图片"), this);
@@ -105,10 +117,13 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     form->addRow(QStringLiteral("物料分类 *"), m_categoryCombo);
     form->addRow(QStringLiteral("品牌"), m_brandEdit);
     form->addRow(QStringLiteral("单位 *"), m_unitEdit);
+    form->addRow(QStringLiteral("单台用量"), m_unitUsageSpin);
+    form->addRow(QStringLiteral("加工方式"), m_processingMethodCombo);
     form->addRow(QStringLiteral("最低库存"), m_minimumStockSpin);
     form->addRow(QStringLiteral("默认仓库"), m_warehouseCombo);
     form->addRow(QStringLiteral("默认库位"), m_locationCombo);
     form->addRow(QStringLiteral("追溯方式"), trackingLayout);
+    form->addRow(QStringLiteral("物料状态"), m_statusCombo);
     form->addRow(QStringLiteral("物料图片"), imageRow);
     form->addRow(QStringLiteral("备注"), m_notesEdit);
     root->addLayout(form);
@@ -254,8 +269,9 @@ void MaterialDialog::loadMaterial()
 {
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT code, name, specification, category_id, brand, unit, minimum_stock, "
-        "default_warehouse_id, default_location_id, require_batch, require_serial, notes "
+        "SELECT code, name, specification, category_id, brand, unit, unit_usage, "
+        "processing_method, minimum_stock, default_warehouse_id, default_location_id, "
+        "require_batch, require_serial, notes, is_active "
         "FROM materials WHERE id=?"));
     query.addBindValue(m_materialId);
     if (!query.exec() || !query.next()) {
@@ -281,14 +297,23 @@ void MaterialDialog::loadMaterial()
     m_categoryCombo->setCurrentIndex(m_categoryCombo->findData(query.value(3)));
     m_brandEdit->setText(query.value(4).toString());
     m_unitEdit->setText(query.value(5).toString());
-    m_minimumStockSpin->setValue(query.value(6).toDouble());
-    m_pendingLocationId = query.value(8).toLongLong();
-    const int warehouseIndex = m_warehouseCombo->findData(query.value(7));
+    m_unitUsageSpin->setValue(query.value(6).toDouble());
+    const QString processingMethod = query.value(7).toString();
+    int processingIndex = m_processingMethodCombo->findData(processingMethod);
+    if (processingIndex < 0 && !processingMethod.isEmpty()) {
+        m_processingMethodCombo->addItem(processingMethod, processingMethod);
+        processingIndex = m_processingMethodCombo->count() - 1;
+    }
+    m_processingMethodCombo->setCurrentIndex(qMax(0, processingIndex));
+    m_minimumStockSpin->setValue(query.value(8).toDouble());
+    m_pendingLocationId = query.value(10).toLongLong();
+    const int warehouseIndex = m_warehouseCombo->findData(query.value(9));
     m_warehouseCombo->setCurrentIndex(warehouseIndex >= 0 ? warehouseIndex : 0);
     loadLocations();
-    m_batchCheck->setChecked(query.value(9).toBool());
-    m_serialCheck->setChecked(query.value(10).toBool());
-    m_notesEdit->setPlainText(query.value(11).toString());
+    m_batchCheck->setChecked(query.value(11).toBool());
+    m_serialCheck->setChecked(query.value(12).toBool());
+    m_notesEdit->setPlainText(query.value(13).toString());
+    m_statusCombo->setCurrentIndex(query.value(14).toBool() ? 0 : 1);
 
     QSqlQuery image(m_database);
     image.prepare(QStringLiteral(
@@ -371,9 +396,23 @@ void MaterialDialog::save()
     }
     const qlonglong warehouseId = m_warehouseCombo->currentData().toLongLong();
     const qlonglong locationId = m_locationCombo->currentData().toLongLong();
-    if ((warehouseId <= 0) != (locationId <= 0)) {
-        showError(QStringLiteral("默认仓库和默认库位必须同时设置，或同时留空。"));
+    if (warehouseId <= 0 && locationId > 0) {
+        showError(QStringLiteral("设置默认库位前必须先选择默认仓库。"));
         return;
+    }
+    if (!m_statusCombo->currentData().toBool() && m_materialId > 0) {
+        QSqlQuery stock(m_database);
+        stock.prepare(QStringLiteral(
+            "SELECT COALESCE(SUM(quantity),0) FROM stock_balances WHERE material_id=?"));
+        stock.addBindValue(m_materialId);
+        if (!stock.exec() || !stock.next()) {
+            showError(QStringLiteral("检查物料库存失败：%1").arg(stock.lastError().text()));
+            return;
+        }
+        if (stock.value(0).toDouble() > 0.0000001) {
+            showError(QStringLiteral("该物料仍有库存，不能停用。请先完成库存处理。"));
+            return;
+        }
     }
 
     QSqlQuery begin(m_database);
@@ -398,13 +437,15 @@ void MaterialDialog::save()
     if (m_materialId > 0) {
         query.prepare(QStringLiteral(
             "UPDATE materials SET code=?, name=?, specification=?, category_id=?, brand=?, unit=?, "
-            "minimum_stock=?, default_warehouse_id=?, default_location_id=?, require_batch=?, "
-            "require_serial=?, notes=?, updated_at=? WHERE id=?"));
+            "unit_usage=?, processing_method=?, minimum_stock=?, default_warehouse_id=?, "
+            "default_location_id=?, require_batch=?, require_serial=?, notes=?, is_active=?, "
+            "updated_at=? WHERE id=?"));
     } else {
         query.prepare(QStringLiteral(
-            "INSERT INTO materials(code, name, specification, category_id, brand, unit, minimum_stock, "
-            "default_warehouse_id, default_location_id, require_batch, require_serial, notes) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+            "INSERT INTO materials(code, name, specification, category_id, brand, unit, unit_usage, "
+            "processing_method, minimum_stock, default_warehouse_id, default_location_id, "
+            "require_batch, require_serial, notes, is_active) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     }
     query.addBindValue(code);
     query.addBindValue(name);
@@ -412,12 +453,16 @@ void MaterialDialog::save()
     query.addBindValue(m_categoryCombo->currentData());
     query.addBindValue(m_brandEdit->text().trimmed());
     query.addBindValue(unit);
+    query.addBindValue(m_unitUsageSpin->value());
+    query.addBindValue(m_processingMethodCombo->currentText() == QStringLiteral("未设置")
+                           ? QString() : m_processingMethodCombo->currentText().trimmed());
     query.addBindValue(m_minimumStockSpin->value());
     query.addBindValue(warehouseId > 0 ? QVariant(warehouseId) : QVariant());
     query.addBindValue(locationId > 0 ? QVariant(locationId) : QVariant());
     query.addBindValue(m_batchCheck->isChecked());
     query.addBindValue(m_serialCheck->isChecked());
     query.addBindValue(m_notesEdit->toPlainText().trimmed());
+    query.addBindValue(m_statusCombo->currentData().toBool());
     if (m_materialId > 0) {
         query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
         query.addBindValue(m_materialId);

@@ -48,11 +48,14 @@ private:
     QComboBox *m_categoryCombo = nullptr;
     QLineEdit *m_brandEdit = nullptr;
     QLineEdit *m_unitEdit = nullptr;
+    QDoubleSpinBox *m_unitUsageSpin = nullptr;
+    QComboBox *m_processingMethodCombo = nullptr;
     QDoubleSpinBox *m_minimumStockSpin = nullptr;
     QComboBox *m_warehouseCombo = nullptr;
     QComboBox *m_locationCombo = nullptr;
     QCheckBox *m_batchCheck = nullptr;
     QCheckBox *m_serialCheck = nullptr;
+    QComboBox *m_statusCombo = nullptr;
     QTextEdit *m_notesEdit = nullptr;
     QLabel *m_imagePreview = nullptr;
     QByteArray m_imageData;

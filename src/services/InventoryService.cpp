@@ -1036,6 +1036,16 @@ QString InventoryService::nextDocumentNumber(const QString &documentType,
 
     const QString isoDate = documentDate.toString(Qt::ISODate);
     sequence = sequenceDate == isoDate ? sequence + 1 : 1;
+    int maximumSequence = 1;
+    for (int digit = 0; digit < width; ++digit) maximumSequence *= 10;
+    --maximumSequence;
+    if (sequence > maximumSequence) {
+        setError(errorMessage,
+                 QStringLiteral("%1 在 %2 的%3位流水号已用完。")
+                     .arg(type, documentDate.toString(QStringLiteral("yyyy-MM-dd")))
+                     .arg(width));
+        return {};
+    }
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral(
         "UPDATE number_rules SET sequence_date=?, current_sequence=? WHERE document_type=?"));
@@ -1046,9 +1056,13 @@ QString InventoryService::nextDocumentNumber(const QString &documentType,
         setError(errorMessage, update.lastError().text());
         return {};
     }
-    return QStringLiteral("%1-%2-%3")
-        .arg(prefix, documentDate.toString(QStringLiteral("yyyyMMdd")),
-             QStringLiteral("%1").arg(sequence, width, 10, QLatin1Char('0')));
+    const QString datePart = documentDate.toString(QStringLiteral("yyyyMMdd"));
+    const QString sequencePart = QStringLiteral("%1").arg(
+        sequence, width, 10, QLatin1Char('0'));
+    if (type == QStringLiteral("SCLL")) {
+        return prefix + datePart + sequencePart;
+    }
+    return QStringLiteral("%1-%2-%3").arg(prefix, datePart, sequencePart);
 }
 
 qlonglong InventoryService::createDocument(const QString &number,

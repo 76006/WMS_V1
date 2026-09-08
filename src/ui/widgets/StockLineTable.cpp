@@ -3,6 +3,7 @@
 #include "ui/widgets/ComboBoxSearch.h"
 
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -14,6 +15,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -27,16 +29,18 @@ constexpr int RequireBatchRole = Qt::UserRole + 1;
 constexpr int RequireSerialRole = Qt::UserRole + 2;
 constexpr int DefaultWarehouseRole = Qt::UserRole + 3;
 constexpr int DefaultLocationRole = Qt::UserRole + 4;
+constexpr int UnitUsageRole = Qt::UserRole + 5;
 constexpr int MaterialColumn = 0;
 constexpr int WarehouseColumn = 1;
 constexpr int LocationColumn = 2;
 constexpr int BatchColumn = 3;
 constexpr int AvailableColumn = 4;
-constexpr int OrderedColumn = 5;
-constexpr int QuantityColumn = 6;
-constexpr int GiftColumn = 7;
-constexpr int SerialColumn = 8;
-constexpr int ActionColumn = 9;
+constexpr int UnitUsageColumn = 5;
+constexpr int OrderedColumn = 6;
+constexpr int QuantityColumn = 7;
+constexpr int GiftColumn = 8;
+constexpr int SerialColumn = 9;
+constexpr int ActionColumn = 10;
 constexpr double QuantityTolerance = 0.0000001;
 }
 
@@ -59,10 +63,11 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     toolbar->addWidget(addButton);
     root->addLayout(toolbar);
 
-    m_table = new QTableWidget(0, 10, this);
+    m_table = new QTableWidget(0, 11, this);
     m_table->setHorizontalHeaderLabels({QStringLiteral("物料"), QStringLiteral("仓库"),
                                         QStringLiteral("库位"), QStringLiteral("批次"),
                                         QStringLiteral("当前库存"),
+                                        QStringLiteral("单台用量"),
                                         QStringLiteral("采购数量"),
                                         m_mode == Mode::Inbound ? QStringLiteral("入库数量")
                                                                 : QStringLiteral("出库数量"),
@@ -74,6 +79,7 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(MaterialColumn, QHeaderView::Stretch);
     m_table->setMinimumHeight(240);
+    m_table->setColumnHidden(UnitUsageColumn, true);
     if (m_mode == Mode::Outbound) {
         m_table->setColumnHidden(OrderedColumn, true);
         m_table->setColumnHidden(GiftColumn, true);
@@ -107,12 +113,12 @@ void StockLineTable::loadMaterials(QComboBox *combo, const QVariant &selected)
     const QString sql = m_mode == Mode::Inbound
         ? QStringLiteral(
               "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
-              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit "
+              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
               "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
               "WHERE m.is_active=1 ORDER BY m.code")
         : QStringLiteral(
               "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
-              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit "
+              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
               "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
               "WHERE m.is_active=1 AND EXISTS(SELECT 1 FROM stock_balances s "
               "WHERE s.material_id=m.id AND s.quantity>0) ORDER BY m.code");
@@ -126,11 +132,13 @@ void StockLineTable::loadMaterials(QComboBox *combo, const QVariant &selected)
         combo->setItemData(index, query.value(4), RequireSerialRole);
         combo->setItemData(index, query.value(5), DefaultWarehouseRole);
         combo->setItemData(index, query.value(6), DefaultLocationRole);
+        combo->setItemData(index, query.value(10), UnitUsageRole);
         combo->setItemData(index,
-            QStringLiteral("编码：%1\n名称：%2\n规格：%3\n分类：%4\n单位：%5")
+            QStringLiteral("编码：%1\n名称：%2\n规格：%3\n分类：%4\n单位：%5\n单台用量：%6")
                 .arg(query.value(1).toString(), query.value(2).toString(),
                      query.value(7).toString(), query.value(8).toString(),
-                     query.value(9).toString()),
+                     query.value(9).toString(),
+                     QString::number(query.value(10).toDouble(), 'g', 12)),
             Qt::ToolTipRole);
     }
     const int selectedIndex = combo->findData(selected);
@@ -158,6 +166,10 @@ void StockLineTable::addLine()
     quantity->setDecimals(6);
     quantity->setRange(0.000001, 999999999999.0);
     quantity->setValue(1.0);
+    auto *unitUsage = new QDoubleSpinBox(m_table);
+    unitUsage->setDecimals(6);
+    unitUsage->setRange(0.0, 999999999999.0);
+    unitUsage->setValue(0.0);
     auto *ordered = new QDoubleSpinBox(m_table);
     ordered->setDecimals(6);
     ordered->setRange(0.0, 999999999999.0);
@@ -174,6 +186,7 @@ void StockLineTable::addLine()
     m_table->setCellWidget(row, LocationColumn, location);
     m_table->setCellWidget(row, BatchColumn, batch);
     m_table->setItem(row, AvailableColumn, new QTableWidgetItem(QStringLiteral("0")));
+    m_table->setCellWidget(row, UnitUsageColumn, unitUsage);
     m_table->setCellWidget(row, OrderedColumn, ordered);
     m_table->setCellWidget(row, QuantityColumn, quantity);
     m_table->setCellWidget(row, GiftColumn, gift);
@@ -183,7 +196,10 @@ void StockLineTable::addLine()
     connect(material, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this, material] {
                 const int currentRow = rowForWidget(material, MaterialColumn);
-                if (currentRow >= 0) loadWarehouses(currentRow);
+                if (currentRow >= 0) {
+                    loadUnitUsage(currentRow);
+                    loadWarehouses(currentRow);
+                }
             });
     connect(warehouse, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this, warehouse] {
@@ -224,6 +240,11 @@ void StockLineTable::addLine()
             [updateGiftMaximum](double) { updateGiftMaximum(); });
     connect(ordered, qOverload<double>(&QDoubleSpinBox::valueChanged), gift,
             [updateGiftMaximum](double) { updateGiftMaximum(); });
+    connect(unitUsage, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [this, unitUsage](double) {
+                const int currentRow = rowForWidget(unitUsage, UnitUsageColumn);
+                if (currentRow >= 0) updateProductionQuantity(currentRow);
+            });
     connect(removeButton, &QPushButton::clicked, this,
             [this, removeButton] {
                 const int currentRow = rowForWidget(removeButton, ActionColumn);
@@ -231,7 +252,72 @@ void StockLineTable::addLine()
             });
 
     loadMaterials(material);
+    loadUnitUsage(row);
+    quantity->setReadOnly(m_productionUsageMode);
+    quantity->setButtonSymbols(m_productionUsageMode ? QAbstractSpinBox::NoButtons
+                                                      : QAbstractSpinBox::UpDownArrows);
     loadWarehouses(row);
+}
+
+void StockLineTable::setProductionUsageMode(bool enabled)
+{
+    m_productionUsageMode = m_mode == Mode::Outbound && enabled;
+    m_table->setColumnHidden(UnitUsageColumn, !m_productionUsageMode);
+    m_table->setHorizontalHeaderItem(
+        QuantityColumn,
+        new QTableWidgetItem(m_productionUsageMode ? QStringLiteral("总用量")
+                                                   : (m_mode == Mode::Inbound
+                                                          ? QStringLiteral("入库数量")
+                                                          : QStringLiteral("出库数量"))));
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
+            m_table->cellWidget(row, UnitUsageColumn));
+        auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, QuantityColumn));
+        if (unitUsage) unitUsage->setEnabled(m_productionUsageMode);
+        if (quantity) {
+            quantity->setReadOnly(m_productionUsageMode);
+            quantity->setButtonSymbols(m_productionUsageMode ? QAbstractSpinBox::NoButtons
+                                                              : QAbstractSpinBox::UpDownArrows);
+        }
+        loadUnitUsage(row);
+    }
+}
+
+void StockLineTable::setProductionQuantity(double quantity)
+{
+    m_productionQuantity = qMax(0.0, quantity);
+    if (!m_productionUsageMode) return;
+    for (int row = 0; row < m_table->rowCount(); ++row) updateProductionQuantity(row);
+}
+
+void StockLineTable::updateProductionQuantity(int row)
+{
+    auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
+        m_table->cellWidget(row, UnitUsageColumn));
+    auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, QuantityColumn));
+    QComboBox *material = comboAt(row, MaterialColumn);
+    if (!material || !unitUsage || !quantity) return;
+    if (!m_productionUsageMode) return;
+    quantity->setMinimum(0.0);
+    quantity->setValue(unitUsage->value() * m_productionQuantity);
+    auto *serialButton = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
+    if (serialButton) {
+        serialButton->setProperty("serials", QStringList());
+        serialButton->setText(material->currentData(RequireSerialRole).toBool()
+                                  ? QStringLiteral("已选 0 个")
+                                  : QStringLiteral("无需选择"));
+    }
+}
+
+void StockLineTable::loadUnitUsage(int row)
+{
+    QComboBox *material = comboAt(row, MaterialColumn);
+    auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
+        m_table->cellWidget(row, UnitUsageColumn));
+    if (!material || !unitUsage) return;
+    const QSignalBlocker blocker(unitUsage);
+    unitUsage->setValue(material->currentData(UnitUsageRole).toDouble());
+    updateProductionQuantity(row);
 }
 
 void StockLineTable::setPurchaseMode(bool enabled)
@@ -296,6 +382,7 @@ void StockLineTable::refreshReferenceData()
         QComboBox *material = comboAt(row, MaterialColumn);
         const QVariant selected = material ? material->currentData() : QVariant();
         if (material) loadMaterials(material, selected);
+        loadUnitUsage(row);
         loadWarehouses(row);
     }
 }
@@ -533,6 +620,8 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
         QComboBox *batch = comboAt(row, BatchColumn);
         auto *ordered = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, OrderedColumn));
         auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, QuantityColumn));
+        auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
+            m_table->cellWidget(row, UnitUsageColumn));
         auto *gift = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, GiftColumn));
         auto *serialButton = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
         if (!material || !warehouse || !location || !batch || !ordered || !quantity || !gift
@@ -540,6 +629,17 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
             || location->currentIndex() < 0
             || (m_mode == Mode::Outbound && batch->currentIndex() < 0)) {
             if (errorMessage) *errorMessage = QStringLiteral("第 %1 行资料不完整。").arg(row + 1);
+            return {};
+        }
+        if (m_productionUsageMode
+            && (!unitUsage || unitUsage->value() <= QuantityTolerance)) {
+            if (errorMessage) *errorMessage = QStringLiteral("第 %1 行物料未设置单台用量。")
+                                                  .arg(row + 1);
+            return {};
+        }
+        if (quantity->value() <= QuantityTolerance) {
+            if (errorMessage) *errorMessage = QStringLiteral("第 %1 行数量必须大于0。")
+                                                  .arg(row + 1);
             return {};
         }
         const QString batchNumber = m_mode == Mode::Inbound ? batch->currentText().trimmed()

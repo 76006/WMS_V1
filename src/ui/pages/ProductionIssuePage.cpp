@@ -49,8 +49,8 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_batchEdit = new QLineEdit(panel);
     m_batchEdit->setPlaceholderText(QStringLiteral("例如 PROD-202609-001"));
     m_plannedQuantity = new QDoubleSpinBox(panel);
-    m_plannedQuantity->setDecimals(6);
-    m_plannedQuantity->setRange(0.000001, 999999999999.0);
+    m_plannedQuantity->setDecimals(0);
+    m_plannedQuantity->setRange(1, 999999999999.0);
     m_plannedQuantity->setValue(1.0);
     m_dateEdit = new QDateEdit(QDate::currentDate(), panel);
     m_dateEdit->setCalendarPopup(true);
@@ -62,7 +62,7 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_notesEdit->setMaximumHeight(65);
     headerForm->addRow(QStringLiteral("成品物料 *"), m_productCombo);
     headerForm->addRow(QStringLiteral("生产批次 *"), m_batchEdit);
-    headerForm->addRow(QStringLiteral("计划生产数量 *"), m_plannedQuantity);
+    headerForm->addRow(QStringLiteral("生产台数 *"), m_plannedQuantity);
     headerForm->addRow(QStringLiteral("领料日期 *"), m_dateEdit);
     headerForm->addRow(QStringLiteral("领料人员"), m_handlerEdit);
     headerForm->addRow(QStringLiteral("领料单号"), m_numberLabel);
@@ -70,6 +70,14 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     panelLayout->addLayout(headerForm);
 
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Outbound, panel);
+    m_lines->setProductionUsageMode(true);
+    m_lines->setProductionQuantity(m_plannedQuantity->value());
+    auto *usageHint = new QLabel(
+        QStringLiteral("单台用量默认从物料档案带出，也可在本次领料中调整；总用量按“生产台数 × 单台用量”自动计算，批次仍由用户指定。"),
+        panel);
+    usageHint->setObjectName(QStringLiteral("mutedText"));
+    usageHint->setWordWrap(true);
+    panelLayout->addWidget(usageHint);
     panelLayout->addWidget(m_lines);
     auto *actions = new QHBoxLayout;
     actions->addStretch();
@@ -94,6 +102,8 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     root->addWidget(recentPanel, 1);
 
     connect(m_submitButton, &QPushButton::clicked, this, &ProductionIssuePage::submit);
+    connect(m_plannedQuantity, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            m_lines, &StockLineTable::setProductionQuantity);
     resetSubmissionToken();
     refreshReferenceData();
 }
@@ -160,7 +170,8 @@ void ProductionIssuePage::submit()
     }
     if (QMessageBox::question(
             this, QStringLiteral("确认生产领料"),
-            QStringLiteral("确认提交 %1 条领料明细？库存将整单扣减并生成库存流水。")
+            QStringLiteral("确认按 %1 台提交 %2 条领料明细？库存将整单扣减并生成库存流水。")
+                .arg(m_plannedQuantity->value(), 0, 'f', 0)
                 .arg(movementLines.size())) != QMessageBox::Yes) {
         return;
     }

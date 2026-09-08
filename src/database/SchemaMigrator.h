@@ -13,6 +13,9 @@ private:
     static bool applyFinalFeaturesMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyMaterialNumberingMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyInventoryReportingMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applyMaterialOperationsMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applyProductionIssueNumberMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applySalesOutboundDetailsMigration(QSqlDatabase database, QString *errorMessage);
     static bool executeSqlResource(QSqlDatabase database,
                                    const QString &resourcePath,
                                    const QString &operationName,

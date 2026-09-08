@@ -41,7 +41,8 @@ enum class MaterialImportStatus
 {
     Ready,
     Warning,
-    Error
+    Error,
+    Skipped
 };
 
 struct MaterialImportRow
@@ -52,12 +53,24 @@ struct MaterialImportRow
     QString materialName;
     QString specification;
     QString categoryCode;
+    QString categoryName;
+    QString processingMethod;
+    bool processingMethodProvided = false;
     QString unit;
+    double unitUsage = 0.0;
+    bool unitUsageProvided = false;
+    double currentStock = 0.0;
+    bool currentStockProvided = false;
+    bool importCurrentStock = false;
     double minimumStock = 0.0;
     QString defaultWarehouseCode;
     QString defaultLocationCode;
     bool requireBatch = false;
     bool requireSerial = false;
+    QString inventoryBatch;
+    QStringList inventorySerialNumbers;
+    bool isActive = true;
+    bool isActiveProvided = false;
     QString brand;
     QString notes;
     QString message;
