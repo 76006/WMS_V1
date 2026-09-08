@@ -122,13 +122,16 @@ void ExcelImportPage::exportMaterialTemplate()
     QString error;
     const QList<QList<QVariant>> example = {{QStringLiteral("MAT-001"), QStringLiteral("示例物料"),
         QStringLiteral("规格型号"), QStringLiteral("RAW"), QStringLiteral("个"), 0,
-        QStringLiteral("仓库编码"), QStringLiteral("库位编码"), QStringLiteral("否"), QStringLiteral("否")}};
+        QStringLiteral("仓库编码"), QStringLiteral("库位编码"), QStringLiteral("否"),
+        QStringLiteral("否"), QStringLiteral("示例品牌"), QStringLiteral("备注")}};
     if (!XlsxExporter::writeSingleSheet(path, QStringLiteral("物料导入"),
         {QStringLiteral("物料编码"), QStringLiteral("物料名称"), QStringLiteral("规格"),
          QStringLiteral("分类编码"), QStringLiteral("单位"), QStringLiteral("最低库存"),
          QStringLiteral("默认仓库编码"), QStringLiteral("默认库位编码"),
-         QStringLiteral("批次管理"), QStringLiteral("SN管理")}, example, &error))
+         QStringLiteral("批次管理"), QStringLiteral("SN管理"), QStringLiteral("品牌"),
+         QStringLiteral("备注")}, example, &error))
         QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+    else QMessageBox::information(this, QStringLiteral("导出完成"), QStringLiteral("物料导入模板已保存。"));
 }
 
 void ExcelImportPage::exportInitialTemplate()

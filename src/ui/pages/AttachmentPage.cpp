@@ -1,5 +1,6 @@
 #include "ui/pages/AttachmentPage.h"
 
+#include "import/LegacyInventoryImporter.h"
 #include "services/AttachmentService.h"
 
 #include <QAbstractItemView>
@@ -22,11 +23,14 @@
 #include <QPushButton>
 #include <QPixmap>
 #include <QQuickWidget>
+#include <QQmlContext>
 #include <QScrollArea>
 #include <QRegularExpression>
 #include <QSqlQuery>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QStandardPaths>
+#include <QTextBrowser>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -266,6 +270,67 @@ void AttachmentPage::openAttachment()
         return;
     }
     file.close();
+    if (payload.fileName.endsWith(QStringLiteral(".xlsx"), Qt::CaseInsensitive)) {
+        QList<SpreadsheetPreviewSheet> sheets;
+        QString previewError;
+        if (OfficePreviewExtractor::previewXlsx(path, &sheets, &previewError)) {
+            QDialog preview(this);
+            preview.setWindowTitle(QStringLiteral("Excel 预览 - %1").arg(payload.fileName));
+            preview.resize(1100, 720);
+            auto *layout = new QVBoxLayout(&preview);
+            auto *tabs = new QTabWidget(&preview);
+            for (const SpreadsheetPreviewSheet &sheet : std::as_const(sheets)) {
+                int columnCount = 0;
+                for (const QStringList &row : sheet.rows) columnCount = qMax(columnCount, row.size());
+                auto *table = new QTableWidget(qMax(0, sheet.rows.size() - 1), columnCount, tabs);
+                table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+                table->verticalHeader()->setVisible(false);
+                if (!sheet.rows.isEmpty()) table->setHorizontalHeaderLabels(sheet.rows.first());
+                for (int row = 1; row < sheet.rows.size(); ++row) {
+                    for (int column = 0; column < sheet.rows.at(row).size(); ++column)
+                        table->setItem(row - 1, column,
+                                       new QTableWidgetItem(sheet.rows.at(row).at(column)));
+                }
+                table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+                tabs->addTab(table, sheet.name);
+            }
+            layout->addWidget(tabs, 1);
+            auto *hint = new QLabel(QStringLiteral("预览最多显示每个工作表前200行、30列；下载后可查看完整内容。"),
+                                    &preview);
+            hint->setObjectName(QStringLiteral("mutedText"));
+            layout->addWidget(hint);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &preview);
+            buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+            connect(buttons, &QDialogButtonBox::rejected, &preview, &QDialog::reject);
+            layout->addWidget(buttons);
+            preview.exec();
+            return;
+        }
+    }
+    if (payload.fileName.endsWith(QStringLiteral(".docx"), Qt::CaseInsensitive)) {
+        QString documentText;
+        QString previewError;
+        if (OfficePreviewExtractor::previewDocx(path, &documentText, &previewError)) {
+            QDialog preview(this);
+            preview.setWindowTitle(QStringLiteral("Word 预览 - %1").arg(payload.fileName));
+            preview.resize(900, 700);
+            auto *layout = new QVBoxLayout(&preview);
+            auto *text = new QTextBrowser(&preview);
+            text->setPlainText(documentText.isEmpty() ? QStringLiteral("文档没有可提取的文字内容。")
+                                                       : documentText);
+            layout->addWidget(text, 1);
+            auto *hint = new QLabel(QStringLiteral("此处显示文档文字预览；复杂排版、表格和图片请下载后查看。"),
+                                    &preview);
+            hint->setObjectName(QStringLiteral("mutedText"));
+            layout->addWidget(hint);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &preview);
+            buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+            connect(buttons, &QDialogButtonBox::rejected, &preview, &QDialog::reject);
+            layout->addWidget(buttons);
+            preview.exec();
+            return;
+        }
+    }
     if (payload.mimeType == QStringLiteral("application/pdf")
         || payload.fileName.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
         QDialog preview(this);
@@ -274,7 +339,8 @@ void AttachmentPage::openAttachment()
         auto *layout = new QVBoxLayout(&preview);
         auto *viewer = new QQuickWidget(&preview);
         viewer->setResizeMode(QQuickWidget::SizeRootObjectToView);
-        viewer->setInitialProperties({{QStringLiteral("previewUrl"), QUrl::fromLocalFile(path)}});
+        viewer->rootContext()->setContextProperty(QStringLiteral("pdfPreviewUrl"),
+                                                  QUrl::fromLocalFile(path));
         viewer->setSource(QUrl(QStringLiteral("qrc:/resources/PdfPreview.qml")));
         layout->addWidget(viewer, 1);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &preview);

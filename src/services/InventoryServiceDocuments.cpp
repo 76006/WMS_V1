@@ -141,9 +141,12 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         if (inbound && !movement.batchNo.trimmed().isEmpty()) {
             QSqlQuery batch(m_database);
             batch.prepare(QStringLiteral(
-                "INSERT OR IGNORE INTO batches(material_id,batch_no,first_in_at) VALUES(?,?,?)"));
+                "INSERT INTO batches(material_id,batch_no,supplier,first_in_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(material_id,batch_no) DO UPDATE SET supplier="
+                "CASE WHEN excluded.supplier<>'' THEN excluded.supplier ELSE batches.supplier END"));
             batch.addBindValue(movement.materialId);
             batch.addBindValue(normalizedText(movement.batchNo));
+            batch.addBindValue(normalizedText(request.supplier));
             batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
             if (!batch.exec()) {
                 setDocumentError(errorMessage, lineError(index + 1, batch.lastError().text()));

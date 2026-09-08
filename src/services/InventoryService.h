@@ -12,6 +12,7 @@ struct StockMovementRequest
     QDate documentDate;
     QString handlerName;
     QString purpose;
+    QString supplier;
     QString notes;
     qlonglong materialId = 0;
     double quantity = 0.0;
@@ -27,6 +28,7 @@ struct StockDocumentRequest
     QDate documentDate;
     QString handlerName;
     QString purpose;
+    QString supplier;
     QString notes;
     QString submissionToken;
     qlonglong productionRunId = 0;
@@ -149,6 +151,9 @@ public:
     bool postTransfer(const TransferRequest &request,
                       PostedDocument *postedDocument,
                       QString *errorMessage = nullptr);
+    bool reverseTransfer(const ReversalRequest &request,
+                         PostedDocument *postedDocument,
+                         QString *errorMessage = nullptr);
     bool reverseItem(const ReversalRequest &request,
                      PostedDocument *postedDocument,
                      QString *errorMessage = nullptr);

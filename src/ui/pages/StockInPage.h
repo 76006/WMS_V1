@@ -41,6 +41,7 @@ private:
     QLabel *m_numberLabel = nullptr;
     QLineEdit *m_handlerEdit = nullptr;
     QLineEdit *m_purposeEdit = nullptr;
+    QLineEdit *m_supplierEdit = nullptr;
     QTextEdit *m_notesEdit = nullptr;
     StockLineTable *m_lines = nullptr;
     QPushButton *m_submitButton = nullptr;

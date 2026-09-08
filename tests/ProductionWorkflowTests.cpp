@@ -100,9 +100,13 @@ void ProductionWorkflowTests::completeProductionInventoryLoop()
     inboundRaw.materialId = rawId;
     inboundRaw.quantity = 10.0;
     inboundRaw.batchNo = QStringLiteral("RAW-B01");
+    inboundRaw.supplier = QStringLiteral("供应商A");
     inboundRaw.warehouseId = warehouseId;
     inboundRaw.locationId = locationId;
     QVERIFY2(service.postInbound(inboundRaw, nullptr, &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT supplier FROM batches WHERE material_id=%1 AND batch_no='RAW-B01'").arg(rawId)).toString(),
+        QStringLiteral("供应商A"));
 
     StockMovementRequest inboundSerial = inboundRaw;
     inboundSerial.materialId = serialRawId;
@@ -137,6 +141,9 @@ void ProductionWorkflowTests::completeProductionInventoryLoop()
         "SELECT quantity FROM stock_balances WHERE material_id=%1").arg(rawId)).toDouble(), 6.0);
     QCOMPARE(scalar(manager.database(), QStringLiteral(
         "SELECT quantity FROM stock_balances WHERE material_id=%1").arg(serialRawId)).toDouble(), 1.0);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT production_batch FROM serial_numbers WHERE serial_no='KEY-0001'")).toString(),
+        run.batchNo);
 
     QVERIFY(!service.postProductionIssue(run, issue, nullptr, nullptr, &error));
     QVERIFY(error.contains(QStringLiteral("重复")) || error.contains(QStringLiteral("已经提交")));

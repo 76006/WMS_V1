@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(IceBeautyWms VERSION 1.0.0 LANGUAGES CXX)
+project(IceBeautyWms VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -223,13 +223,26 @@ if(BUILD_TESTING)
 
     qt_add_executable(WmsExcelDataExchangeTests
         tests/ExcelDataExchangeTests.cpp
+        src/core/PasswordHasher.cpp
+        src/core/PasswordHasher.h
+        src/database/DatabaseManager.cpp
+        src/database/DatabaseManager.h
+        src/database/SchemaMigrator.cpp
+        src/database/SchemaMigrator.h
         src/import/LegacyInventoryImporter.cpp
         src/import/LegacyInventoryImporter.h
         src/import/XlsxExporter.cpp
         src/import/XlsxExporter.h
     )
+    qt_add_resources(WmsExcelDataExchangeTests "wms_excel_test_resources"
+        PREFIX "/"
+        FILES
+            database/schema.sql
+            database/migrations/002_production_workflow.sql
+            database/migrations/003_final_features.sql
+    )
     target_include_directories(WmsExcelDataExchangeTests PRIVATE src)
-    target_link_libraries(WmsExcelDataExchangeTests PRIVATE Qt6::Core Qt6::Test)
+    target_link_libraries(WmsExcelDataExchangeTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
     add_test(NAME WmsExcelDataExchangeTests COMMAND WmsExcelDataExchangeTests)
 
     qt_add_executable(WmsFinalFeaturesTests

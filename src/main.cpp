@@ -18,7 +18,7 @@ int main(int argc, char *argv[])
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("IceBeauty"));
     QCoreApplication::setApplicationName(QStringLiteral("IceBeautyWms"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.0.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("1.1.0"));
 
     QFile styleFile(QStringLiteral(":/resources/styles.qss"));
     if (styleFile.open(QIODevice::ReadOnly | QIODevice::Text)) {

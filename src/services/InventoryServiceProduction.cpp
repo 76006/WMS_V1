@@ -243,6 +243,17 @@ bool InventoryService::postProductionIssue(const ProductionRunRequest &run,
         }
     }
 
+    QSqlQuery serialProductionBatch(m_database);
+    serialProductionBatch.prepare(QStringLiteral(
+        "UPDATE serial_numbers SET production_batch=? WHERE last_document_id=?"));
+    serialProductionBatch.addBindValue(run.batchNo.trimmed().toUpper());
+    serialProductionBatch.addBindValue(documentId);
+
+    if (!serialProductionBatch.exec()) {
+        setProductionError(errorMessage, serialProductionBatch.lastError().text());
+        rollback();
+        return false;
+    }
     if (!finalizeDocument(documentId, errorMessage)
         || !writeAudit(QStringLiteral("POST"), QStringLiteral("business_document"),
                        documentId, number, errorMessage)

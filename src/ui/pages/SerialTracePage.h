@@ -4,6 +4,7 @@
 #include <QWidget>
 
 class QComboBox;
+class QLabel;
 class QLineEdit;
 class QTableWidget;
 
@@ -26,5 +27,7 @@ private:
     QComboBox *m_statusCombo = nullptr;
     QComboBox *m_warehouseCombo = nullptr;
     QTableWidget *m_serialTable = nullptr;
+    QLabel *m_relationLabel = nullptr;
+    QTableWidget *m_attachmentTable = nullptr;
     QTableWidget *m_historyTable = nullptr;
 };

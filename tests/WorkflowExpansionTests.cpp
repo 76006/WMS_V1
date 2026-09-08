@@ -137,7 +137,8 @@ void WorkflowExpansionTests::multiLineImportTransferAndCount()
     transfer.locationId = locationId;
     transfer.targetWarehouseId = warehouseId;
     transfer.targetLocationId = location2Id;
-    QVERIFY2(service.postTransfer(transfer, nullptr, &error), qPrintable(error));
+    PostedDocument transferDocument;
+    QVERIFY2(service.postTransfer(transfer, &transferDocument, &error), qPrintable(error));
     QCOMPARE(scalar(manager.database(), QStringLiteral(
         "SELECT quantity FROM stock_balances WHERE material_id=%1 AND location_id=%2")
         .arg(materialA).arg(location2Id)).toDouble(), 1.0);
@@ -175,6 +176,36 @@ void WorkflowExpansionTests::multiLineImportTransferAndCount()
     count.submissionToken = QStringLiteral("count-stale");
     QVERIFY(!service.postInventoryCount(count, nullptr, &error));
     QVERIFY(error.contains(QStringLiteral("已变化")));
+
+    const qlonglong transferItemId = scalar(manager.database(), QStringLiteral(
+        "SELECT id FROM business_document_items WHERE document_id=%1")
+        .arg(transferDocument.documentId)).toLongLong();
+    ReversalRequest partialTransfer;
+    partialTransfer.sourceItemId = transferItemId;
+    partialTransfer.documentDate = QDate::currentDate();
+    partialTransfer.quantity = 0.4;
+    partialTransfer.notes = QStringLiteral("部分撤销调拨");
+    QVERIFY2(service.reverseTransfer(partialTransfer, nullptr, &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT quantity FROM stock_balances WHERE material_id=%1 AND location_id=%2")
+        .arg(materialA).arg(location2Id)).toDouble(), 0.6);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT status FROM business_documents WHERE id=%1").arg(transferDocument.documentId)).toString(),
+        QStringLiteral("PARTIALLY_REVERSED"));
+
+    partialTransfer.quantity = 0.6;
+    partialTransfer.notes = QStringLiteral("撤销剩余调拨");
+    QVERIFY2(service.reverseTransfer(partialTransfer, nullptr, &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT quantity FROM stock_balances WHERE material_id=%1 AND location_id=%2")
+        .arg(materialA).arg(location2Id)).toDouble(), 0.0);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT quantity FROM stock_balances WHERE material_id=%1 AND location_id=%2")
+        .arg(materialA).arg(locationId)).toDouble(), 7.0);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT status FROM business_documents WHERE id=%1").arg(transferDocument.documentId)).toString(),
+        QStringLiteral("REVERSED"));
+    QVERIFY(!service.reverseTransfer(partialTransfer, nullptr, &error));
 }
 
 void WorkflowExpansionTests::parseProvidedLegacyWorkbook()

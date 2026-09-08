@@ -1,18 +1,53 @@
 param(
-    [string]$QtRoot = 'C:\Qt\6.10.2\mingw_64',
+    [string]$QtRoot = '',
     [string]$BuildDirectory = 'build-release',
     [string]$OutputDirectory = 'dist'
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$qtInstallRoots = @('D:\Qt', 'C:\Qt')
+if ([string]::IsNullOrWhiteSpace($QtRoot)) {
+    $qtCandidates = foreach ($root in $qtInstallRoots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^6\.' } |
+            ForEach-Object {
+                $candidate = Join-Path $_.FullName 'mingw_64'
+                if ((Test-Path -LiteralPath (Join-Path $candidate 'bin\windeployqt.exe')) -and
+                    (Test-Path -LiteralPath (Join-Path $candidate 'mkspecs\qconfig.pri'))) {
+                    [PSCustomObject]@{ Path = $candidate; Version = [version]$_.Name }
+                }
+            }
+    }
+    $selectedQt = $qtCandidates | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $selectedQt) { throw '未找到 Qt 6 MinGW 64 位环境，请通过 -QtRoot 指定路径。' }
+    $QtRoot = $selectedQt.Path
+}
+$QtRoot = (Resolve-Path -LiteralPath $QtRoot).Path
+$qconfigPath = Join-Path $QtRoot 'mkspecs\qconfig.pri'
+if (-not (Test-Path -LiteralPath $qconfigPath)) { throw "Qt 配置不存在: $qconfigPath" }
+$qconfig = Get-Content -LiteralPath $qconfigPath
+$gccMajor = [regex]::Match(($qconfig -join "`n"), 'QT_GCC_MAJOR_VERSION\s*=\s*(\d+)').Groups[1].Value
+$gccMinor = [regex]::Match(($qconfig -join "`n"), 'QT_GCC_MINOR_VERSION\s*=\s*(\d+)').Groups[1].Value
+if (-not $gccMajor -or -not $gccMinor) { throw '无法从 Qt 配置识别匹配的 MinGW 版本。' }
+$qtBase = Split-Path -Parent (Split-Path -Parent $QtRoot)
+$mingwDirectory = Get-ChildItem -LiteralPath (Join-Path $qtBase 'Tools') -Directory `
+    -Filter "mingw$gccMajor$gccMinor*_64" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $mingwDirectory) { throw "未找到与 Qt 匹配的 MinGW $gccMajor.$gccMinor 工具链。" }
+$cmakePath = Join-Path $qtBase 'Tools\CMake_64\bin\cmake.exe'
+if (-not (Test-Path -LiteralPath $cmakePath)) {
+    $cmakeCommand = Get-Command cmake.exe -ErrorAction SilentlyContinue
+    if (-not $cmakeCommand) { throw '未找到 CMake。' }
+    $cmakePath = $cmakeCommand.Source
+}
 $buildPath = Join-Path $projectRoot $BuildDirectory
 $outputPath = Join-Path $projectRoot $OutputDirectory
 $appPath = Join-Path $outputPath 'IceBeautyWms'
 $zipPath = Join-Path $outputPath 'IceBeautyWms-Windows-x64.zip'
 $setupPath = Join-Path $outputPath 'IceBeautyWms-Setup.exe'
-$cmake = 'C:\Qt\Tools\CMake_64\bin\cmake.exe'
-$mingwBin = 'C:\Qt\Tools\mingw1310_64\bin'
+$cmake = $cmakePath
+$mingwBin = Join-Path $mingwDirectory.FullName 'bin'
 $env:Path = "$mingwBin;$QtRoot\bin;$env:Path"
 
 & $cmake -S $projectRoot -B $buildPath -G 'MinGW Makefiles' `
@@ -25,10 +60,36 @@ if (Test-Path -LiteralPath $appPath) { Remove-Item -LiteralPath $appPath -Recurs
 New-Item -ItemType Directory -Path $appPath -Force | Out-Null
 & $cmake --install $buildPath --prefix $appPath
 if ($LASTEXITCODE -ne 0) { throw '安装文件整理失败。' }
-& "$QtRoot\bin\windeployqt.exe" --release --compiler-runtime --no-opengl-sw $appPath\IceBeautyWms.exe
+& "$QtRoot\bin\windeployqt.exe" --compiler-runtime --no-opengl-sw `
+    --qtpaths "$QtRoot\bin\qtpaths6.exe" $appPath\IceBeautyWms.exe
 if ($LASTEXITCODE -ne 0) { throw 'Qt 运行依赖部署失败。' }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $appPath
 Copy-Item -LiteralPath (Join-Path $projectRoot 'DEVELOPMENT_STATUS.md') -Destination $appPath
+
+$requiredFiles = @(
+    (Join-Path $appPath 'IceBeautyWms.exe'),
+    (Join-Path $appPath 'platforms\qwindows.dll'),
+    (Join-Path $appPath 'sqldrivers\qsqlite.dll')
+)
+foreach ($requiredFile in $requiredFiles) {
+    if (-not (Test-Path -LiteralPath $requiredFile)) {
+        throw "发布包缺少运行依赖: $requiredFile"
+    }
+}
+$smokeDatabase = Join-Path $outputPath "package-smoke-$PID.db"
+$savedPath = $env:Path
+try {
+    $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+    $smoke = Start-Process -FilePath (Join-Path $appPath 'IceBeautyWms.exe') `
+        -ArgumentList @('--smoke-test', '--database', $smokeDatabase) -WorkingDirectory $appPath `
+        -Wait -PassThru -WindowStyle Hidden
+    if ($smoke.ExitCode -ne 0) { throw "发布版独立启动检查失败，退出码: $($smoke.ExitCode)" }
+} finally {
+    $env:Path = $savedPath
+    foreach ($databaseFile in @($smokeDatabase, "$smokeDatabase-wal", "$smokeDatabase-shm")) {
+        if (Test-Path -LiteralPath $databaseFile) { Remove-Item -LiteralPath $databaseFile -Force }
+    }
+}
 
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 Compress-Archive -Path "$appPath\*" -DestinationPath $zipPath -CompressionLevel Optimal

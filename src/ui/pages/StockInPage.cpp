@@ -49,6 +49,8 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     m_handlerEdit = new QLineEdit(m_session.displayName, panel);
+    m_supplierEdit = new QLineEdit(panel);
+    m_supplierEdit->setPlaceholderText(QStringLiteral("采购入库时填写，可用于批次追溯"));
     m_purposeEdit = new QLineEdit(panel);
     m_numberLabel = new QLabel(QStringLiteral("提交时自动生成"), panel);
     m_numberLabel->setObjectName(QStringLiteral("mutedText"));
@@ -57,6 +59,7 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     form->addRow(QStringLiteral("入库类型 *"), m_typeCombo);
     form->addRow(QStringLiteral("入库日期 *"), m_dateEdit);
     form->addRow(QStringLiteral("经办人员"), m_handlerEdit);
+    form->addRow(QStringLiteral("供应商"), m_supplierEdit);
     form->addRow(QStringLiteral("业务用途"), m_purposeEdit);
     form->addRow(QStringLiteral("入库单号"), m_numberLabel);
     form->addRow(QStringLiteral("备注"), m_notesEdit);
@@ -132,6 +135,7 @@ void StockInPage::submit()
     request.documentType = m_typeCombo->currentData().toString();
     request.documentDate = m_dateEdit->date();
     request.handlerName = m_handlerEdit->text().trimmed();
+    request.supplier = m_supplierEdit->text().trimmed();
     request.purpose = m_purposeEdit->text().trimmed();
     request.notes = m_notesEdit->toPlainText().trimmed();
     request.submissionToken = m_submissionToken;
@@ -149,6 +153,7 @@ void StockInPage::submit()
     QMessageBox::information(this, QStringLiteral("入库完成"),
                              QStringLiteral("入库单 %1 已生效。").arg(posted.documentNumber));
     resetSubmissionToken();
+    m_supplierEdit->clear();
     m_notesEdit->clear();
     m_lines->clearLines();
     emit stockChanged();

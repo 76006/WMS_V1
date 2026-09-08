@@ -198,6 +198,41 @@ void DatabaseTests::serialNumberFlow()
     invalid.quantity = 2.0;
     QVERIFY(!service.postOutbound(invalid, nullptr, &error));
     QVERIFY(error.contains(QStringLiteral("SN数量")));
+
+    QSqlQuery secondLocation(manager.database());
+    secondLocation.prepare(QStringLiteral(
+        "INSERT INTO locations(warehouse_id,code,name) VALUES(?,'L02','SN目标库位')"));
+    secondLocation.addBindValue(warehouseId);
+    QVERIFY(secondLocation.exec());
+    const qlonglong targetLocationId = secondLocation.lastInsertId().toLongLong();
+    TransferRequest transfer;
+    transfer.documentDate = QDate::currentDate();
+    transfer.materialId = materialId;
+    transfer.quantity = 1.0;
+    transfer.batchNo = QStringLiteral("PROD-001");
+    transfer.warehouseId = warehouseId;
+    transfer.locationId = locationId;
+    transfer.targetWarehouseId = warehouseId;
+    transfer.targetLocationId = targetLocationId;
+    transfer.serialNumbers = {serials.at(1)};
+    PostedDocument transferDocument;
+    QVERIFY2(service.postTransfer(transfer, &transferDocument, &error), qPrintable(error));
+    const qlonglong transferItemId = scalar(manager.database(), QStringLiteral(
+        "SELECT id FROM business_document_items WHERE document_id=%1")
+        .arg(transferDocument.documentId)).toLongLong();
+    ReversalRequest reverseTransfer;
+    reverseTransfer.sourceItemId = transferItemId;
+    reverseTransfer.documentDate = QDate::currentDate();
+    reverseTransfer.quantity = 1.0;
+    reverseTransfer.notes = QStringLiteral("SN调拨撤销测试");
+    reverseTransfer.serialNumbers = {serials.at(1)};
+    QVERIFY2(service.reverseTransfer(reverseTransfer, nullptr, &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT location_id FROM serial_numbers WHERE serial_no='%1'").arg(serials.at(1))).toLongLong(),
+        locationId);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT quantity FROM stock_balances WHERE material_id=%1 AND location_id=%2")
+        .arg(materialId).arg(locationId)).toDouble(), 1.0);
 }
 
 QTEST_GUILESS_MAIN(DatabaseTests)

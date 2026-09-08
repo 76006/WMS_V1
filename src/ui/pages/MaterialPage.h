@@ -27,6 +27,8 @@ signals:
 private slots:
     void addMaterial();
     void editMaterial();
+    void importMaterials();
+    void exportMaterials();
     void loadCategories();
 
 private:
@@ -38,7 +40,8 @@ private:
     QComboBox *m_categoryCombo = nullptr;
     QPushButton *m_addButton = nullptr;
     QPushButton *m_editButton = nullptr;
+    QPushButton *m_importButton = nullptr;
+    QPushButton *m_exportButton = nullptr;
     QTableView *m_table = nullptr;
     QSqlQueryModel *m_model = nullptr;
 };
-

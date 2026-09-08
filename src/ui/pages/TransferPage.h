@@ -9,6 +9,7 @@ class QComboBox;
 class QDateEdit;
 class QLineEdit;
 class QPushButton;
+class QTableWidget;
 class QTextEdit;
 class StockLineTable;
 
@@ -26,7 +27,10 @@ signals:
 
 private slots:
     void loadTargetLocations();
+    void refreshTransfers();
+    void updateReversalState();
     void submit();
+    void reverseSelectedTransfer();
 
 private:
     QSqlDatabase m_database;
@@ -38,4 +42,6 @@ private:
     QComboBox *m_targetWarehouse = nullptr;
     QComboBox *m_targetLocation = nullptr;
     QPushButton *m_submitButton = nullptr;
+    QTableWidget *m_transferTable = nullptr;
+    QPushButton *m_reverseButton = nullptr;
 };

@@ -40,10 +40,11 @@ BatchTracePage::BatchTracePage(QSqlDatabase database, QWidget *parent)
     filters->addWidget(m_warehouseCombo);
     filters->addWidget(search);
     summaryLayout->addLayout(filters);
-    m_batchTable = new QTableWidget(0, 8, summaryPanel);
+    m_batchTable = new QTableWidget(0, 10, summaryPanel);
     m_batchTable->setHorizontalHeaderLabels({QStringLiteral("物料编码"), QStringLiteral("物料名称"),
                                              QStringLiteral("批次号"), QStringLiteral("当前库存"),
                                              QStringLiteral("库存库位数"), QStringLiteral("首次入库"),
+                                             QStringLiteral("供应商"), QStringLiteral("使用生产批次"),
                                              QStringLiteral("最后变动"), QStringLiteral("状态")});
     m_batchTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_batchTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -58,12 +59,12 @@ BatchTracePage::BatchTracePage(QSqlDatabase database, QWidget *parent)
     historyPanel->setObjectName(QStringLiteral("panel"));
     auto *historyLayout = new QVBoxLayout(historyPanel);
     historyLayout->addWidget(new QLabel(QStringLiteral("所选批次库存流水"), historyPanel));
-    m_historyTable = new QTableWidget(0, 9, historyPanel);
+    m_historyTable = new QTableWidget(0, 10, historyPanel);
     m_historyTable->setHorizontalHeaderLabels({QStringLiteral("时间"), QStringLiteral("单据号"),
                                                QStringLiteral("业务类型"), QStringLiteral("入库"),
                                                QStringLiteral("出库"), QStringLiteral("变动前"),
                                                QStringLiteral("变动后"), QStringLiteral("仓库/库位"),
-                                               QStringLiteral("操作人")});
+                                               QStringLiteral("生产批次"), QStringLiteral("操作人")});
     m_historyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_historyTable->verticalHeader()->setVisible(false);
     m_historyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -110,12 +111,19 @@ void BatchTracePage::loadBatches()
         "AND s.batch_no=b.batch_no AND (?=0 OR s.warehouse_id=?)),0),"
         "(SELECT COUNT(*) FROM stock_balances s WHERE s.material_id=b.material_id "
         "AND s.batch_no=b.batch_no AND s.quantity>0 AND (?=0 OR s.warehouse_id=?)),"
-        "b.first_in_at,(SELECT MAX(l.occurred_at) FROM inventory_ledger l "
+        "b.first_in_at,b.supplier,(SELECT MAX(l.occurred_at) FROM inventory_ledger l "
         "WHERE l.material_id=b.material_id AND l.batch_no=b.batch_no "
-        "AND (?=0 OR l.warehouse_id=?)) "
+        "AND (?=0 OR l.warehouse_id=?)),"
+        "COALESCE((SELECT GROUP_CONCAT(DISTINCT pr.batch_no) "
+        "FROM business_document_items i JOIN business_documents d ON d.id=i.document_id "
+        "JOIN production_runs pr ON pr.id=d.production_run_id "
+        "WHERE i.material_id=b.material_id AND i.batch_no=b.batch_no AND d.document_type='SCLL' "
+        "AND (?=0 OR i.warehouse_id=?)),'') "
         "FROM batches b JOIN materials m ON m.id=b.material_id "
         "WHERE (m.code LIKE ? OR m.name LIKE ? OR b.batch_no LIKE ?) "
         "ORDER BY m.code,b.batch_no"));
+    query.addBindValue(warehouseId);
+    query.addBindValue(warehouseId);
     query.addBindValue(warehouseId);
     query.addBindValue(warehouseId);
     query.addBindValue(warehouseId);
@@ -139,7 +147,9 @@ void BatchTracePage::loadBatches()
         m_batchTable->setItem(row, 4, new QTableWidgetItem(query.value(5).toString()));
         m_batchTable->setItem(row, 5, new QTableWidgetItem(query.value(6).toString()));
         m_batchTable->setItem(row, 6, new QTableWidgetItem(query.value(7).toString()));
-        m_batchTable->setItem(row, 7, new QTableWidgetItem(query.value(4).toDouble() > 0.0000001
+        m_batchTable->setItem(row, 7, new QTableWidgetItem(query.value(9).toString()));
+        m_batchTable->setItem(row, 8, new QTableWidgetItem(query.value(8).toString()));
+        m_batchTable->setItem(row, 9, new QTableWidgetItem(query.value(4).toDouble() > 0.0000001
                                                               ? QStringLiteral("有库存")
                                                               : QStringLiteral("已用完")));
     }
@@ -155,10 +165,11 @@ void BatchTracePage::loadHistory()
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT l.occurred_at,d.document_no,l.business_type,l.quantity_in,l.quantity_out,"
-        "l.quantity_before,l.quantity_after,w.code||' / '||loc.code,u.display_name "
+        "l.quantity_before,l.quantity_after,w.code||' / '||loc.code,COALESCE(pr.batch_no,''),u.display_name "
         "FROM inventory_ledger l JOIN business_documents d ON d.id=l.document_id "
         "JOIN warehouses w ON w.id=l.warehouse_id JOIN locations loc ON loc.id=l.location_id "
-        "JOIN users u ON u.id=l.operator_id WHERE l.material_id=? AND l.batch_no=? "
+        "JOIN users u ON u.id=l.operator_id LEFT JOIN production_runs pr ON pr.id=d.production_run_id "
+        "WHERE l.material_id=? AND l.batch_no=? "
         "AND (?=0 OR l.warehouse_id=?) ORDER BY l.id DESC"));
     query.addBindValue(code->data(MaterialIdRole));
     query.addBindValue(code->data(BatchNoRole));
@@ -168,7 +179,7 @@ void BatchTracePage::loadHistory()
     while (query.next()) {
         const int target = m_historyTable->rowCount();
         m_historyTable->insertRow(target);
-        for (int column = 0; column < 9; ++column)
+        for (int column = 0; column < 10; ++column)
             m_historyTable->setItem(target, column,
                                     new QTableWidgetItem(query.value(column).toString()));
     }
