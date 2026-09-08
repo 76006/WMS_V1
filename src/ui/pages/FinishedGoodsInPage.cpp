@@ -218,7 +218,7 @@ void FinishedGoodsInPage::loadRunDetails()
     m_serialEdit->setEnabled(m_requireSerial);
     m_generateButton->setEnabled(m_requireSerial);
     if (!m_requireSerial) m_serialEdit->clear();
-    m_submitButton->setEnabled(m_session.canManageWarehouse()
+    m_submitButton->setEnabled(m_session.canPostProduction()
                                && m_warehouseCombo->count() > 0
                                && m_locationCombo->count() > 0);
 }
@@ -342,7 +342,7 @@ void FinishedGoodsInPage::submit()
     PostedDocument posted;
     QString error;
     const bool ok = service.postFinishedGoodsInbound(document, &posted, &error);
-    m_submitButton->setEnabled(m_session.canManageWarehouse());
+    m_submitButton->setEnabled(m_session.canPostProduction());
     if (!ok) {
         QMessageBox::warning(this, QStringLiteral("成品入库失败"), error);
         return;

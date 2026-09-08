@@ -35,11 +35,11 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     m_addButton = new QPushButton(QStringLiteral("新增物料"), this);
     m_addButton->setProperty("primary", true);
     m_editButton = new QPushButton(QStringLiteral("编辑"), this);
-    const bool canEdit = m_session.isAdministrator();
+    const bool canEdit = m_session.canManageMaterials();
     m_addButton->setEnabled(canEdit);
     m_editButton->setEnabled(canEdit);
     if (!canEdit) {
-        m_addButton->setToolTip(QStringLiteral("只有管理员可以维护物料资料"));
+        m_addButton->setToolTip(QStringLiteral("当前角色没有物料维护权限"));
         m_editButton->setToolTip(m_addButton->toolTip());
     }
     toolbar->addWidget(m_searchEdit, 1);
@@ -72,7 +72,7 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     connect(m_addButton, &QPushButton::clicked, this, &MaterialPage::addMaterial);
     connect(m_editButton, &QPushButton::clicked, this, &MaterialPage::editMaterial);
     connect(m_table, &QTableView::doubleClicked, this, [this] {
-        if (m_session.isAdministrator()) editMaterial();
+        if (m_session.canManageMaterials()) editMaterial();
     });
     loadCategories();
     refresh();
@@ -140,7 +140,7 @@ qlonglong MaterialPage::selectedMaterialId() const
 
 void MaterialPage::addMaterial()
 {
-    MaterialDialog dialog(m_database, 0, this);
+    MaterialDialog dialog(m_database, 0, m_session.userId, this);
     if (dialog.exec() == QDialog::Accepted) {
         refresh();
         emit dataChanged();
@@ -154,10 +154,9 @@ void MaterialPage::editMaterial()
         QMessageBox::information(this, QStringLiteral("请选择物料"), QStringLiteral("请先在表格中选择一条物料记录。"));
         return;
     }
-    MaterialDialog dialog(m_database, id, this);
+    MaterialDialog dialog(m_database, id, m_session.userId, this);
     if (dialog.exec() == QDialog::Accepted) {
         refresh();
         emit dataChanged();
     }
 }
-

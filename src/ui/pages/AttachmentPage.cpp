@@ -4,6 +4,11 @@
 
 #include <QAbstractItemView>
 #include <QCheckBox>
+#include <QCryptographicHash>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -15,8 +20,14 @@
 #include <QMessageBox>
 #include <QMimeDatabase>
 #include <QPushButton>
+#include <QPixmap>
+#include <QQuickWidget>
+#include <QScrollArea>
+#include <QRegularExpression>
 #include <QSqlQuery>
 #include <QTableWidget>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <utility>
@@ -68,10 +79,12 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     m_uploadButton = new QPushButton(QStringLiteral("上传附件"), attachmentPanel);
     m_uploadButton->setProperty("primary", true);
     m_downloadButton = new QPushButton(QStringLiteral("下载"), attachmentPanel);
+    m_openButton = new QPushButton(QStringLiteral("预览/打开"), attachmentPanel);
     m_deleteButton = new QPushButton(QStringLiteral("删除"), attachmentPanel);
     m_deleteButton->setProperty("danger", true);
     toolbar->addWidget(m_showDeleted);
     toolbar->addWidget(m_uploadButton);
+    toolbar->addWidget(m_openButton);
     toolbar->addWidget(m_downloadButton);
     toolbar->addWidget(m_deleteButton);
     attachmentLayout->addLayout(toolbar);
@@ -99,6 +112,8 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     connect(m_showDeleted, &QCheckBox::toggled, this, &AttachmentPage::loadAttachments);
     connect(m_uploadButton, &QPushButton::clicked, this, &AttachmentPage::upload);
     connect(m_downloadButton, &QPushButton::clicked, this, &AttachmentPage::download);
+    connect(m_openButton, &QPushButton::clicked, this, &AttachmentPage::openAttachment);
+    connect(m_attachmentTable, &QTableWidget::doubleClicked, this, &AttachmentPage::openAttachment);
     connect(m_deleteButton, &QPushButton::clicked, this, &AttachmentPage::deleteOrRestore);
     refresh();
 }
@@ -189,17 +204,90 @@ void AttachmentPage::loadAttachments()
 
 void AttachmentPage::updateActions()
 {
-    const bool canManage = m_session.canManageWarehouse();
+    const bool canManage = m_session.canManageAttachments();
     m_uploadButton->setEnabled(canManage && selectedDocumentId() > 0);
     const int row = m_attachmentTable->currentRow();
     const bool selected = row >= 0;
     m_downloadButton->setEnabled(selected);
+    m_openButton->setEnabled(selected);
     m_deleteButton->setEnabled(canManage && selected);
     const bool deleted = selected && m_attachmentTable->item(row, 0)->data(DeletedRole).toBool();
     m_deleteButton->setText(deleted ? QStringLiteral("恢复") : QStringLiteral("删除"));
     m_deleteButton->setProperty("danger", !deleted);
     m_deleteButton->style()->unpolish(m_deleteButton);
     m_deleteButton->style()->polish(m_deleteButton);
+}
+
+void AttachmentPage::openAttachment()
+{
+    AttachmentService service(m_database, m_session.userId);
+    AttachmentPayload payload;
+    QString error;
+    if (!service.loadAttachment(selectedAttachmentId(), &payload, &error)) {
+        QMessageBox::warning(this, QStringLiteral("读取失败"), error);
+        return;
+    }
+    if (payload.mimeType.startsWith(QStringLiteral("image/"))) {
+        QPixmap pixmap;
+        if (pixmap.loadFromData(payload.data)) {
+            QDialog preview(this);
+            preview.setWindowTitle(QStringLiteral("图片预览 - %1").arg(payload.fileName));
+            preview.resize(900, 680);
+            auto *layout = new QVBoxLayout(&preview);
+            auto *scroll = new QScrollArea(&preview);
+            scroll->setWidgetResizable(true);
+            auto *image = new QLabel(scroll);
+            image->setAlignment(Qt::AlignCenter);
+            image->setPixmap(pixmap);
+            image->setMinimumSize(pixmap.size().boundedTo(QSize(1200, 900)));
+            scroll->setWidget(image);
+            layout->addWidget(scroll, 1);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &preview);
+            buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+            layout->addWidget(buttons);
+            connect(buttons, &QDialogButtonBox::rejected, &preview, &QDialog::reject);
+            preview.exec();
+            return;
+        }
+    }
+    QString safeName = payload.fileName;
+    safeName.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("_"));
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+        + QStringLiteral("/IceBeautyWms/attachments");
+    QDir().mkpath(directory);
+    const QString digest = QString::fromLatin1(
+        QCryptographicHash::hash(payload.data, QCryptographicHash::Sha256).toHex().left(12));
+    const QString path = directory + QStringLiteral("/%1-%2-%3")
+        .arg(payload.id).arg(digest).arg(safeName);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        || file.write(payload.data) != payload.data.size()) {
+        QMessageBox::warning(this, QStringLiteral("打开失败"), file.errorString());
+        return;
+    }
+    file.close();
+    if (payload.mimeType == QStringLiteral("application/pdf")
+        || payload.fileName.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+        QDialog preview(this);
+        preview.setWindowTitle(QStringLiteral("PDF 预览 - %1").arg(payload.fileName));
+        preview.resize(1000, 760);
+        auto *layout = new QVBoxLayout(&preview);
+        auto *viewer = new QQuickWidget(&preview);
+        viewer->setResizeMode(QQuickWidget::SizeRootObjectToView);
+        viewer->setInitialProperties({{QStringLiteral("previewUrl"), QUrl::fromLocalFile(path)}});
+        viewer->setSource(QUrl(QStringLiteral("qrc:/resources/PdfPreview.qml")));
+        layout->addWidget(viewer, 1);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &preview);
+        buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+        layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, &preview, &QDialog::reject);
+        if (viewer->status() == QQuickWidget::Ready) {
+            preview.exec();
+            return;
+        }
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
+        QMessageBox::warning(this, QStringLiteral("打开失败"), QStringLiteral("系统没有可打开此文件类型的默认程序。"));
 }
 
 void AttachmentPage::upload()

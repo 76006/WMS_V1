@@ -97,7 +97,7 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     actions->addStretch();
     m_submitButton = new QPushButton(QStringLiteral("确认并退料"), panel);
     m_submitButton->setProperty("primary", true);
-    m_submitButton->setEnabled(m_session.canManageWarehouse());
+    m_submitButton->setEnabled(m_session.canPostProduction());
     actions->addWidget(m_submitButton);
     panelLayout->addLayout(actions);
     root->addWidget(panel);
@@ -255,7 +255,7 @@ void ProductionReturnPage::loadSourceLines()
                 });
         loadReturnLocations(row);
     }
-    m_submitButton->setEnabled(m_session.canManageWarehouse()
+    m_submitButton->setEnabled(m_session.canPostProduction()
                                && m_linesTable->rowCount() > 0);
 }
 
@@ -392,7 +392,7 @@ void ProductionReturnPage::submit()
     PostedDocument posted;
     QString error;
     const bool ok = service.postProductionReturn(request, &posted, &error);
-    m_submitButton->setEnabled(m_session.canManageWarehouse());
+    m_submitButton->setEnabled(m_session.canPostProduction());
     if (!ok) {
         QMessageBox::warning(this, QStringLiteral("生产退料失败"), error);
         return;

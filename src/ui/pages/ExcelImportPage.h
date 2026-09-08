@@ -30,6 +30,9 @@ private slots:
     void loadLocations();
     void preview();
     void importInventory();
+    void exportMaterialTemplate();
+    void exportInitialTemplate();
+    void exportInventory();
 
 private:
     QSqlDatabase m_database;

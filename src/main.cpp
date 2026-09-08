@@ -10,13 +10,15 @@
 #include <QFile>
 #include <QMessageBox>
 #include <QSqlQuery>
+#include <QtWebView/QtWebView>
 
 int main(int argc, char *argv[])
 {
+    QtWebView::initialize();
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("IceBeauty"));
     QCoreApplication::setApplicationName(QStringLiteral("IceBeautyWms"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("1.0.0"));
 
     QFile styleFile(QStringLiteral(":/resources/styles.qss"));
     if (styleFile.open(QIODevice::ReadOnly | QIODevice::Text)) {

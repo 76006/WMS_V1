@@ -3,6 +3,10 @@
 #include "services/UserService.h"
 
 #include <QAbstractItemView>
+#include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QFrame>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -12,6 +16,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSqlQuery>
+#include <QSqlError>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
@@ -36,12 +41,14 @@ UserManagementPage::UserManagementPage(QSqlDatabase database, Session session, Q
     add->setProperty("primary", true);
     m_editButton = new QPushButton(QStringLiteral("编辑"), panel);
     m_resetButton = new QPushButton(QStringLiteral("重置密码"), panel);
+    m_permissionsButton = new QPushButton(QStringLiteral("角色权限"), panel);
     toolbar->addWidget(new QLabel(QStringLiteral("用户与角色"), panel));
     toolbar->addWidget(m_keywordEdit, 1);
     toolbar->addWidget(search);
     toolbar->addWidget(add);
     toolbar->addWidget(m_editButton);
     toolbar->addWidget(m_resetButton);
+    toolbar->addWidget(m_permissionsButton);
     layout->addLayout(toolbar);
     m_table = new QTableWidget(0, 7, panel);
     m_table->setHorizontalHeaderLabels({QStringLiteral("用户名"), QStringLiteral("显示名"),
@@ -61,8 +68,100 @@ UserManagementPage::UserManagementPage(QSqlDatabase database, Session session, Q
     connect(add, &QPushButton::clicked, this, &UserManagementPage::addUser);
     connect(m_editButton, &QPushButton::clicked, this, &UserManagementPage::editUser);
     connect(m_resetButton, &QPushButton::clicked, this, &UserManagementPage::resetPassword);
+    connect(m_permissionsButton, &QPushButton::clicked, this, &UserManagementPage::editRolePermissions);
     connect(m_table, &QTableWidget::itemSelectionChanged, this, &UserManagementPage::updateActions);
     refresh();
+}
+
+void UserManagementPage::editRolePermissions()
+{
+    const int row = m_table->currentRow();
+    if (row < 0 || !m_session.canManageUsers()) return;
+    const QString roleCode = m_table->item(row, 2)->text().section(QStringLiteral(" - "), 0, 0);
+    QSqlQuery roleQuery(m_database);
+    roleQuery.prepare(QStringLiteral("SELECT id,name FROM roles WHERE code=?"));
+    roleQuery.addBindValue(roleCode);
+    if (!roleQuery.exec() || !roleQuery.next()) return;
+    const qlonglong roleId = roleQuery.value(0).toLongLong();
+    const QString roleName = roleQuery.value(1).toString();
+
+    const QList<QPair<QString, QString>> definitions = {
+        {QStringLiteral("VIEW_INVENTORY"), QStringLiteral("查看库存与追溯信息")},
+        {QStringLiteral("MANAGE_MATERIALS"), QStringLiteral("维护物料与物料图片")},
+        {QStringLiteral("MANAGE_WAREHOUSES"), QStringLiteral("维护仓库和库位")},
+        {QStringLiteral("POST_INVENTORY"), QStringLiteral("办理出入库、调拨、盘点和撤销")},
+        {QStringLiteral("POST_PRODUCTION"), QStringLiteral("办理生产领料、退料和成品入库")},
+        {QStringLiteral("MANAGE_ATTACHMENTS"), QStringLiteral("上传、删除和恢复附件")},
+        {QStringLiteral("MANAGE_USERS"), QStringLiteral("维护用户和角色权限")},
+        {QStringLiteral("MANAGE_SYSTEM"), QStringLiteral("维护系统与单据编号规则")},
+        {QStringLiteral("VIEW_AUDIT"), QStringLiteral("查询和导出操作日志")}
+    };
+    QSet<QString> current;
+    QSqlQuery currentQuery(m_database);
+    currentQuery.prepare(QStringLiteral(
+        "SELECT permission_code FROM role_permissions WHERE role_id=? AND is_allowed=1"));
+    currentQuery.addBindValue(roleId);
+    currentQuery.exec();
+    while (currentQuery.next()) current.insert(currentQuery.value(0).toString());
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("角色权限 - %1 (%2)").arg(roleName, roleCode));
+    dialog.setMinimumWidth(480);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *hint = new QLabel(QStringLiteral("权限在用户下次登录时生效。管理员始终拥有全部权限。"), &dialog);
+    hint->setObjectName(QStringLiteral("mutedText"));
+    layout->addWidget(hint);
+    QList<QCheckBox *> checks;
+    for (const auto &definition : definitions) {
+        auto *check = new QCheckBox(QStringLiteral("%1  [%2]").arg(definition.second, definition.first), &dialog);
+        check->setChecked(current.contains(definition.first));
+        if (roleCode == QStringLiteral("ADMIN")) {
+            check->setChecked(true);
+            check->setEnabled(false);
+        }
+        check->setProperty("permissionCode", definition.first);
+        checks << check;
+        layout->addWidget(check);
+    }
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存"));
+    buttons->button(QDialogButtonBox::Save)->setProperty("primary", true);
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    if (!m_database.transaction()) return;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral("DELETE FROM role_permissions WHERE role_id=?"));
+    query.addBindValue(roleId);
+    bool ok = query.exec();
+    for (QCheckBox *check : checks) {
+        if (!ok || !check->isChecked()) continue;
+        query.prepare(QStringLiteral(
+            "INSERT INTO role_permissions(role_id,permission_code,is_allowed) VALUES(?,?,1)"));
+        query.addBindValue(roleId);
+        query.addBindValue(check->property("permissionCode").toString());
+        ok = query.exec();
+    }
+    if (ok) {
+        query.prepare(QStringLiteral(
+            "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
+            "VALUES(?,'ROLE_PERMISSIONS_UPDATE','role',?,?)"));
+        query.addBindValue(m_session.userId);
+        query.addBindValue(roleId);
+        query.addBindValue(roleCode);
+        ok = query.exec();
+    }
+    if (!ok || !m_database.commit()) {
+        const QString error = query.lastError().text();
+        m_database.rollback();
+        QMessageBox::warning(this, QStringLiteral("保存失败"), error);
+        return;
+    }
+    QMessageBox::information(this, QStringLiteral("保存完成"),
+                             QStringLiteral("角色权限已保存，将在相关用户下次登录时生效。"));
 }
 
 qlonglong UserManagementPage::selectedUserId() const
@@ -163,7 +262,8 @@ void UserManagementPage::resetPassword()
 
 void UserManagementPage::updateActions()
 {
-    const bool enabled = m_session.isAdministrator() && selectedUserId() > 0;
+    const bool enabled = m_session.canManageUsers() && selectedUserId() > 0;
     m_editButton->setEnabled(enabled);
     m_resetButton->setEnabled(enabled);
+    m_permissionsButton->setEnabled(enabled);
 }

@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(IceBeautyWms VERSION 0.1.0 LANGUAGES CXX)
+project(IceBeautyWms VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Sql)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Sql QuickWidgets WebView)
 
 qt_standard_project_setup()
 
@@ -17,6 +17,7 @@ set(WMS_SOURCES
     src/database/DatabaseManager.cpp
     src/database/SchemaMigrator.cpp
     src/import/LegacyInventoryImporter.cpp
+    src/import/XlsxExporter.cpp
     src/services/AttachmentService.cpp
     src/services/InventoryService.cpp
     src/services/InventoryServiceDocuments.cpp
@@ -27,6 +28,7 @@ set(WMS_SOURCES
     src/ui/dialogs/MaterialDialog.cpp
     src/ui/pages/DashboardPage.cpp
     src/ui/pages/AttachmentPage.cpp
+    src/ui/pages/AuditLogPage.cpp
     src/ui/pages/BatchTracePage.cpp
     src/ui/pages/ExcelImportPage.cpp
     src/ui/pages/FinishedGoodsInPage.cpp
@@ -47,6 +49,7 @@ set(WMS_SOURCES
     src/ui/widgets/StockLineTable.cpp
     src/core/DatabaseConfig.h
     src/import/LegacyInventoryImporter.h
+    src/import/XlsxExporter.h
     src/core/PasswordHasher.h
     src/core/Session.h
     src/database/DatabaseManager.h
@@ -59,6 +62,7 @@ set(WMS_SOURCES
     src/ui/dialogs/MaterialDialog.h
     src/ui/pages/DashboardPage.h
     src/ui/pages/AttachmentPage.h
+    src/ui/pages/AuditLogPage.h
     src/ui/pages/BatchTracePage.h
     src/ui/pages/ExcelImportPage.h
     src/ui/pages/FinishedGoodsInPage.h
@@ -85,11 +89,15 @@ qt_add_resources(IceBeautyWms "wms_resources"
     FILES
         database/schema.sql
         database/migrations/002_production_workflow.sql
+        database/migrations/003_final_features.sql
+        resources/PdfPreview.qml
         resources/styles.qss
 )
 
 target_include_directories(IceBeautyWms PRIVATE src)
-target_link_libraries(IceBeautyWms PRIVATE Qt6::Core Qt6::Widgets Qt6::Sql)
+target_link_libraries(IceBeautyWms PRIVATE Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView)
+
+install(TARGETS IceBeautyWms RUNTIME DESTINATION .)
 
 if(MSVC)
     target_compile_options(IceBeautyWms PRIVATE /utf-8 /W4)
@@ -131,6 +139,7 @@ if(BUILD_TESTING)
         FILES
             database/schema.sql
             database/migrations/002_production_workflow.sql
+            database/migrations/003_final_features.sql
     )
     target_include_directories(WmsDatabaseTests PRIVATE src)
     target_link_libraries(WmsDatabaseTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -145,6 +154,7 @@ if(BUILD_TESTING)
         FILES
             database/schema.sql
             database/migrations/002_production_workflow.sql
+            database/migrations/003_final_features.sql
     )
     target_include_directories(WmsProductionWorkflowTests PRIVATE src)
     target_link_libraries(WmsProductionWorkflowTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -161,6 +171,7 @@ if(BUILD_TESTING)
         FILES
             database/schema.sql
             database/migrations/002_production_workflow.sql
+            database/migrations/003_final_features.sql
     )
     target_include_directories(WmsWorkflowExpansionTests PRIVATE src)
     target_link_libraries(WmsWorkflowExpansionTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -182,6 +193,7 @@ if(BUILD_TESTING)
         FILES
             database/schema.sql
             database/migrations/002_production_workflow.sql
+            database/migrations/003_final_features.sql
     )
     target_include_directories(WmsTraceabilityAttachmentTests PRIVATE src)
     target_link_libraries(WmsTraceabilityAttachmentTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -203,10 +215,42 @@ if(BUILD_TESTING)
         FILES
             database/schema.sql
             database/migrations/002_production_workflow.sql
+            database/migrations/003_final_features.sql
     )
     target_include_directories(WmsUserServiceTests PRIVATE src)
     target_link_libraries(WmsUserServiceTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
     add_test(NAME WmsUserServiceTests COMMAND WmsUserServiceTests)
+
+    qt_add_executable(WmsExcelDataExchangeTests
+        tests/ExcelDataExchangeTests.cpp
+        src/import/LegacyInventoryImporter.cpp
+        src/import/LegacyInventoryImporter.h
+        src/import/XlsxExporter.cpp
+        src/import/XlsxExporter.h
+    )
+    target_include_directories(WmsExcelDataExchangeTests PRIVATE src)
+    target_link_libraries(WmsExcelDataExchangeTests PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME WmsExcelDataExchangeTests COMMAND WmsExcelDataExchangeTests)
+
+    qt_add_executable(WmsFinalFeaturesTests
+        tests/FinalFeaturesTests.cpp
+        src/core/PasswordHasher.cpp
+        src/core/PasswordHasher.h
+        src/database/DatabaseManager.cpp
+        src/database/DatabaseManager.h
+        src/database/SchemaMigrator.cpp
+        src/database/SchemaMigrator.h
+    )
+    qt_add_resources(WmsFinalFeaturesTests "wms_final_test_resources"
+        PREFIX "/"
+        FILES
+            database/schema.sql
+            database/migrations/002_production_workflow.sql
+            database/migrations/003_final_features.sql
+    )
+    target_include_directories(WmsFinalFeaturesTests PRIVATE src)
+    target_link_libraries(WmsFinalFeaturesTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+    add_test(NAME WmsFinalFeaturesTests COMMAND WmsFinalFeaturesTests)
 
     add_test(NAME WmsAppSmoke
         COMMAND IceBeautyWms --smoke-test --database ${CMAKE_CURRENT_BINARY_DIR}/wms-smoke.db)

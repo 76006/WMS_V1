@@ -63,7 +63,7 @@ void ProductionWorkflowTests::completeProductionInventoryLoop()
     QVERIFY2(manager.open(config, &error), qPrintable(error));
     QVERIFY2(SchemaMigrator::migrate(manager.database(), &error), qPrintable(error));
     QVERIFY2(SchemaMigrator::migrate(manager.database(), &error), qPrintable(error));
-    QCOMPARE(scalar(manager.database(), QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 2);
+    QCOMPARE(scalar(manager.database(), QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 3);
 
     const qlonglong userId = scalar(manager.database(),
                                     QStringLiteral("SELECT id FROM users WHERE username='admin'"))

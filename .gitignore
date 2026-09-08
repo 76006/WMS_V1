@@ -1,4 +1,5 @@
 /build*/
+/dist/
 /.qt/
 /.vs/
 /.vscode/
@@ -14,4 +15,3 @@
 *.sqlite
 *.sqlite3
 /data/
-

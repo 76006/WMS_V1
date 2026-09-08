@@ -7,6 +7,7 @@
 
 class DashboardPage;
 class AttachmentPage;
+class AuditLogPage;
 class BatchTracePage;
 class ExcelImportPage;
 class FinishedGoodsInPage;
@@ -63,6 +64,7 @@ private:
     BatchTracePage *m_batchTracePage = nullptr;
     SerialTracePage *m_serialTracePage = nullptr;
     AttachmentPage *m_attachmentPage = nullptr;
+    AuditLogPage *m_auditLogPage = nullptr;
     UserManagementPage *m_userManagementPage = nullptr;
     SystemSettingsPage *m_systemSettingsPage = nullptr;
     TransferPage *m_transferPage = nullptr;

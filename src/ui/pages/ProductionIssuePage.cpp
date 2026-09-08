@@ -74,7 +74,7 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     actions->addStretch();
     m_submitButton = new QPushButton(QStringLiteral("确认并领料"), panel);
     m_submitButton->setProperty("primary", true);
-    m_submitButton->setEnabled(m_session.canManageWarehouse());
+    m_submitButton->setEnabled(m_session.canPostProduction());
     actions->addWidget(m_submitButton);
     panelLayout->addLayout(actions);
     root->addWidget(panel);
@@ -120,7 +120,7 @@ void ProductionIssuePage::refreshReferenceData()
     const int selectedIndex = m_productCombo->findData(selected);
     if (selectedIndex >= 0) m_productCombo->setCurrentIndex(selectedIndex);
     m_lines->refreshReferenceData();
-    m_submitButton->setEnabled(m_session.canManageWarehouse()
+    m_submitButton->setEnabled(m_session.canPostProduction()
                                && m_productCombo->count() > 0);
     refreshRecentDocuments();
 }
@@ -181,7 +181,7 @@ void ProductionIssuePage::submit()
     PostedDocument posted;
     qlonglong runId = 0;
     const bool ok = service.postProductionIssue(run, document, &posted, &runId, &error);
-    m_submitButton->setEnabled(m_session.canManageWarehouse());
+    m_submitButton->setEnabled(m_session.canPostProduction());
     if (!ok) {
         QMessageBox::warning(this, QStringLiteral("生产领料失败"), error);
         return;

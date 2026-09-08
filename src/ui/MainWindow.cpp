@@ -2,6 +2,7 @@
 
 #include "ui/pages/DashboardPage.h"
 #include "ui/pages/AttachmentPage.h"
+#include "ui/pages/AuditLogPage.h"
 #include "ui/pages/BatchTracePage.h"
 #include "ui/pages/ExcelImportPage.h"
 #include "ui/pages/FinishedGoodsInPage.h"
@@ -138,6 +139,7 @@ void MainWindow::buildUi()
     m_batchTracePage = new BatchTracePage(m_database, m_stack);
     m_serialTracePage = new SerialTracePage(m_database, m_stack);
     m_attachmentPage = new AttachmentPage(m_database, m_session, m_stack);
+    m_auditLogPage = new AuditLogPage(m_database, m_stack);
     m_userManagementPage = new UserManagementPage(m_database, m_session, m_stack);
     m_systemSettingsPage = new SystemSettingsPage(m_database, m_session,
                                                    m_databaseFilePath, m_stack);
@@ -148,17 +150,18 @@ void MainWindow::buildUi()
     add(QStringLiteral("库存Excel导入"), m_excelImportPage, m_session.canManageWarehouse());
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
     add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
-    add(QStringLiteral("生产领料"), m_productionIssuePage);
-    add(QStringLiteral("生产退料"), m_productionReturnPage);
-    add(QStringLiteral("成品入库"), m_finishedGoodsInPage);
-    add(QStringLiteral("库存查询"), m_inventoryPage);
-    add(QStringLiteral("库存流水"), m_ledgerPage);
+    add(QStringLiteral("生产领料"), m_productionIssuePage, m_session.canPostProduction());
+    add(QStringLiteral("生产退料"), m_productionReturnPage, m_session.canPostProduction());
+    add(QStringLiteral("成品入库"), m_finishedGoodsInPage, m_session.canPostProduction());
+    add(QStringLiteral("库存查询"), m_inventoryPage, m_session.canViewInventory());
+    add(QStringLiteral("库存流水"), m_ledgerPage, m_session.canViewInventory());
     add(QStringLiteral("库存调拨"), m_transferPage, m_session.canManageWarehouse());
     add(QStringLiteral("库存盘点"), m_countPage, m_session.canManageWarehouse());
-    add(QStringLiteral("批次查询"), m_batchTracePage);
-    add(QStringLiteral("SN查询"), m_serialTracePage);
+    add(QStringLiteral("批次查询"), m_batchTracePage, m_session.canViewInventory());
+    add(QStringLiteral("SN查询"), m_serialTracePage, m_session.canViewInventory());
     add(QStringLiteral("附件管理"), m_attachmentPage);
-    add(QStringLiteral("用户管理"), m_userManagementPage, m_session.isAdministrator());
+    add(QStringLiteral("操作日志"), m_auditLogPage, m_session.canViewAudit());
+    add(QStringLiteral("用户管理"), m_userManagementPage, m_session.canManageUsers());
     add(QStringLiteral("系统设置"), m_systemSettingsPage);
 
     navLayout->addStretch();
@@ -217,6 +220,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_batchTracePage) m_batchTracePage->refresh();
     else if (page == m_serialTracePage) m_serialTracePage->refresh();
     else if (page == m_attachmentPage) m_attachmentPage->refresh();
+    else if (page == m_auditLogPage) m_auditLogPage->refresh();
     else if (page == m_userManagementPage) m_userManagementPage->refresh();
 }
 

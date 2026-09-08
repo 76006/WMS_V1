@@ -24,6 +24,7 @@ private slots:
     void loadAttachments();
     void upload();
     void download();
+    void openAttachment();
     void deleteOrRestore();
     void updateActions();
 
@@ -39,5 +40,6 @@ private:
     QCheckBox *m_showDeleted = nullptr;
     QPushButton *m_uploadButton = nullptr;
     QPushButton *m_downloadButton = nullptr;
+    QPushButton *m_openButton = nullptr;
     QPushButton *m_deleteButton = nullptr;
 };

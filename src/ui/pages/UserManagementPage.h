@@ -20,6 +20,7 @@ private slots:
     void addUser();
     void editUser();
     void resetPassword();
+    void editRolePermissions();
     void updateActions();
 private:
     qlonglong selectedUserId() const;
@@ -29,4 +30,5 @@ private:
     QTableWidget *m_table = nullptr;
     QPushButton *m_editButton = nullptr;
     QPushButton *m_resetButton = nullptr;
+    QPushButton *m_permissionsButton = nullptr;
 };

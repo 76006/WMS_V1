@@ -155,6 +155,15 @@ void LoginDialog::authenticate()
     m_session.displayName = query.value(2).toString();
     m_session.roleCode = query.value(4).toString();
 
+    QSqlQuery permissions(m_database);
+    permissions.prepare(QStringLiteral(
+        "SELECT rp.permission_code FROM role_permissions rp "
+        "JOIN roles r ON r.id=rp.role_id WHERE r.code=? AND rp.is_allowed=1"));
+    permissions.addBindValue(m_session.roleCode);
+    if (permissions.exec()) {
+        while (permissions.next()) m_session.permissions.insert(permissions.value(0).toString());
+    }
+
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral("UPDATE users SET last_login_at=? WHERE id=?"));
     update.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));

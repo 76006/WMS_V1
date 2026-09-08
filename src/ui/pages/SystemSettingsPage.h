@@ -3,6 +3,7 @@
 #include <QSqlDatabase>
 #include <QWidget>
 class QLineEdit;
+class QTableWidget;
 class SystemSettingsPage final : public QWidget
 {
     Q_OBJECT
@@ -11,10 +12,13 @@ public:
                        const QString &databaseFilePath, QWidget *parent = nullptr);
 private slots:
     void changePassword();
+    void loadNumberRules();
+    void saveNumberRules();
 private:
     QSqlDatabase m_database;
     Session m_session;
     QLineEdit *m_currentPassword = nullptr;
     QLineEdit *m_newPassword = nullptr;
     QLineEdit *m_confirmPassword = nullptr;
+    QTableWidget *m_numberRulesTable = nullptr;
 };

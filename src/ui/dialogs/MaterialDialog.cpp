@@ -2,12 +2,19 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMimeDatabase>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -18,8 +25,10 @@
 
 MaterialDialog::MaterialDialog(QSqlDatabase database,
                                qlonglong materialId,
+                               qlonglong operatorId,
                                QWidget *parent)
-    : QDialog(parent), m_database(std::move(database)), m_materialId(materialId)
+    : QDialog(parent), m_database(std::move(database)), m_materialId(materialId),
+      m_operatorId(operatorId)
 {
     setWindowTitle(materialId > 0 ? QStringLiteral("编辑物料") : QStringLiteral("新增物料"));
     setMinimumWidth(560);
@@ -47,6 +56,21 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     m_serialCheck = new QCheckBox(QStringLiteral("启用SN序列号管理"), this);
     m_notesEdit = new QTextEdit(this);
     m_notesEdit->setMaximumHeight(85);
+    m_imagePreview = new QLabel(QStringLiteral("暂无图片"), this);
+    m_imagePreview->setAlignment(Qt::AlignCenter);
+    m_imagePreview->setMinimumSize(180, 120);
+    m_imagePreview->setMaximumSize(260, 180);
+    m_imagePreview->setFrameShape(QFrame::StyledPanel);
+    auto *imageRow = new QHBoxLayout;
+    auto *chooseImageButton = new QPushButton(QStringLiteral("选择图片"), this);
+    auto *removeImageButton = new QPushButton(QStringLiteral("移除图片"), this);
+    auto *imageButtons = new QVBoxLayout;
+    imageButtons->addWidget(chooseImageButton);
+    imageButtons->addWidget(removeImageButton);
+    imageButtons->addStretch();
+    imageRow->addWidget(m_imagePreview);
+    imageRow->addLayout(imageButtons);
+    imageRow->addStretch();
 
     auto *trackingLayout = new QHBoxLayout;
     trackingLayout->addWidget(m_batchCheck);
@@ -63,6 +87,7 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     form->addRow(QStringLiteral("默认仓库"), m_warehouseCombo);
     form->addRow(QStringLiteral("默认库位"), m_locationCombo);
     form->addRow(QStringLiteral("追溯方式"), trackingLayout);
+    form->addRow(QStringLiteral("物料图片"), imageRow);
     form->addRow(QStringLiteral("备注"), m_notesEdit);
     root->addLayout(form);
 
@@ -80,6 +105,8 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
 
     connect(m_warehouseCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MaterialDialog::loadLocations);
+    connect(chooseImageButton, &QPushButton::clicked, this, &MaterialDialog::chooseImage);
+    connect(removeImageButton, &QPushButton::clicked, this, &MaterialDialog::removeImage);
     connect(buttons, &QDialogButtonBox::accepted, this, &MaterialDialog::save);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
@@ -167,6 +194,70 @@ void MaterialDialog::loadMaterial()
     m_batchCheck->setChecked(query.value(9).toBool());
     m_serialCheck->setChecked(query.value(10).toBool());
     m_notesEdit->setPlainText(query.value(11).toString());
+
+    QSqlQuery image(m_database);
+    image.prepare(QStringLiteral(
+        "SELECT original_file_name,mime_type,image_data FROM material_images WHERE material_id=?"));
+    image.addBindValue(m_materialId);
+    if (image.exec() && image.next()) {
+        m_imageFileName = image.value(0).toString();
+        m_imageMimeType = image.value(1).toString();
+        m_imageData = image.value(2).toByteArray();
+        updateImagePreview();
+    }
+}
+
+void MaterialDialog::chooseImage()
+{
+    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择物料图片"), {},
+        QStringLiteral("图片 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)"));
+    if (path.isEmpty()) return;
+    QFile file(path);
+    if (file.size() > 5 * 1024 * 1024) {
+        showError(QStringLiteral("物料图片不能超过 5 MB。"));
+        return;
+    }
+    if (!file.open(QIODevice::ReadOnly)) {
+        showError(QStringLiteral("读取图片失败：%1").arg(file.errorString()));
+        return;
+    }
+    const QByteArray data = file.readAll();
+    QPixmap pixmap;
+    if (!pixmap.loadFromData(data)) {
+        showError(QStringLiteral("所选文件不是受支持的图片。"));
+        return;
+    }
+    m_imageData = data;
+    m_imageFileName = QFileInfo(path).fileName();
+    m_imageMimeType = QMimeDatabase().mimeTypeForFile(path).name();
+    m_imageChanged = true;
+    m_errorLabel->hide();
+    updateImagePreview();
+}
+
+void MaterialDialog::removeImage()
+{
+    m_imageData.clear();
+    m_imageFileName.clear();
+    m_imageMimeType.clear();
+    m_imageChanged = true;
+    updateImagePreview();
+}
+
+void MaterialDialog::updateImagePreview()
+{
+    if (m_imageData.isEmpty()) {
+        m_imagePreview->setPixmap(QPixmap());
+        m_imagePreview->setText(QStringLiteral("暂无图片"));
+        m_imagePreview->setToolTip({});
+        return;
+    }
+    QPixmap pixmap;
+    pixmap.loadFromData(m_imageData);
+    m_imagePreview->setText({});
+    m_imagePreview->setPixmap(pixmap.scaled(m_imagePreview->size(), Qt::KeepAspectRatio,
+                                            Qt::SmoothTransformation));
+    m_imagePreview->setToolTip(m_imageFileName);
 }
 
 void MaterialDialog::save()
@@ -185,6 +276,10 @@ void MaterialDialog::save()
         return;
     }
 
+    if (!m_database.transaction()) {
+        showError(QStringLiteral("无法开始保存事务：%1").arg(m_database.lastError().text()));
+        return;
+    }
     QSqlQuery query(m_database);
     if (m_materialId > 0) {
         query.prepare(QStringLiteral(
@@ -214,7 +309,50 @@ void MaterialDialog::save()
         query.addBindValue(m_materialId);
     }
     if (!query.exec()) {
+        m_database.rollback();
         showError(QStringLiteral("保存失败。请检查物料编码是否重复。\n%1").arg(query.lastError().text()));
+        return;
+    }
+    if (m_materialId <= 0) m_materialId = query.lastInsertId().toLongLong();
+
+    if (m_imageChanged) {
+        QSqlQuery image(m_database);
+        if (m_imageData.isEmpty()) {
+            image.prepare(QStringLiteral("DELETE FROM material_images WHERE material_id=?"));
+            image.addBindValue(m_materialId);
+        } else {
+            image.prepare(QStringLiteral(
+                "INSERT INTO material_images(material_id,original_file_name,mime_type,sha256,image_data,updated_by,updated_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(material_id) DO UPDATE SET "
+                "original_file_name=excluded.original_file_name,mime_type=excluded.mime_type,"
+                "sha256=excluded.sha256,image_data=excluded.image_data,updated_by=excluded.updated_by,"
+                "updated_at=excluded.updated_at"));
+            image.addBindValue(m_materialId);
+            image.addBindValue(m_imageFileName);
+            image.addBindValue(m_imageMimeType);
+            image.addBindValue(QString::fromLatin1(QCryptographicHash::hash(
+                m_imageData, QCryptographicHash::Sha256).toHex()));
+            image.addBindValue(m_imageData);
+            image.addBindValue(m_operatorId > 0 ? QVariant(m_operatorId) : QVariant());
+            image.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+        }
+        if (!image.exec()) {
+            m_database.rollback();
+            showError(QStringLiteral("保存物料图片失败：%1").arg(image.lastError().text()));
+            return;
+        }
+    }
+    QSqlQuery audit(m_database);
+    audit.prepare(QStringLiteral(
+        "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) VALUES(?,?,?,?,?)"));
+    audit.addBindValue(m_operatorId > 0 ? QVariant(m_operatorId) : QVariant());
+    audit.addBindValue(QStringLiteral("MATERIAL_SAVE"));
+    audit.addBindValue(QStringLiteral("material"));
+    audit.addBindValue(m_materialId);
+    audit.addBindValue(code + QStringLiteral(" - ") + name);
+    if (!audit.exec() || !m_database.commit()) {
+        m_database.rollback();
+        showError(QStringLiteral("提交保存失败：%1").arg(m_database.lastError().text()));
         return;
     }
     accept();

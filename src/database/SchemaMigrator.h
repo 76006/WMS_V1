@@ -10,6 +10,7 @@ public:
 private:
     static bool executeSchema(QSqlDatabase database, QString *errorMessage);
     static bool applyProductionWorkflowMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applyFinalFeaturesMigration(QSqlDatabase database, QString *errorMessage);
     static bool executeSqlResource(QSqlDatabase database,
                                    const QString &resourcePath,
                                    const QString &operationName,

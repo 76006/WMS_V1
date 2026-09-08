@@ -185,6 +185,22 @@ void parseStandardSheet(const QString &name, const SheetCells &cells,
     }
 }
 
+void parseInitialTemplate(const QString &name, const SheetCells &cells,
+                          QList<LegacyImportRow> *rows)
+{
+    const int lastRow = cells.isEmpty() ? 0 : cells.lastKey();
+    for (int row = 2; row <= lastRow; ++row) {
+        if (cell(cells, row, 1).isEmpty() && cell(cells, row, 2).isEmpty()) continue;
+        LegacyImportRow item = makeRow(name, row, cell(cells, row, 1), cell(cells, row, 2),
+                                       cell(cells, row, 3),
+                                       cell(cells, row, 4).isEmpty() ? QStringLiteral("RAW")
+                                                                    : cell(cells, row, 4),
+                                       cell(cells, row, 6), cell(cells, row, 7));
+        if (!cell(cells, row, 5).isEmpty()) item.unit = cell(cells, row, 5);
+        rows->append(item);
+    }
+}
+
 void parseFinishedSheet(const QString &name, const SheetCells &cells,
                         QList<LegacyImportRow> *rows)
 {
@@ -354,6 +370,8 @@ bool LegacyInventoryImporter::parseFile(const QString &filePath,
             parseStandardSheet(sheet.first, cells, 7, QStringLiteral("SEMI"), rows);
         } else if (sheet.first == QStringLiteral("成品")) {
             parseFinishedSheet(sheet.first, cells, rows);
+        } else if (sheet.first == QStringLiteral("期初库存")) {
+            parseInitialTemplate(sheet.first, cells, rows);
         } else if (sheet.first == QStringLiteral("Sheet1")) {
             LegacyImportRow warning;
             warning.status = LegacyImportStatus::Warning;
