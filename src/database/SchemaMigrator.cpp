@@ -26,7 +26,49 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     if (!applyFinalFeaturesMigration(database, errorMessage)) {
         return false;
     }
+    if (!applyMaterialNumberingMigration(database, errorMessage)) {
+        return false;
+    }
+    if (!applyInventoryReportingMigration(database, errorMessage)) {
+        return false;
+    }
     return ensureDefaultAdministrator(database, errorMessage);
+}
+
+bool SchemaMigrator::applyInventoryReportingMigration(QSqlDatabase database,
+                                                       QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=5"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/005_inventory_reporting.sql"),
+                              QStringLiteral("升级数据库到版本5"),
+                              errorMessage);
+}
+
+bool SchemaMigrator::applyMaterialNumberingMigration(QSqlDatabase database,
+                                                      QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=4"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/004_material_numbering.sql"),
+                              QStringLiteral("升级数据库到版本4"),
+                              errorMessage);
 }
 
 bool SchemaMigrator::applyFinalFeaturesMigration(QSqlDatabase database,

@@ -2,9 +2,11 @@
 
 #include "import/LegacyInventoryImporter.h"
 #include "import/XlsxExporter.h"
+#include "services/MaterialCodeService.h"
 #include "ui/dialogs/MaterialDialog.h"
 
 #include <QComboBox>
+#include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFileDialog>
@@ -13,6 +15,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSqlError>
@@ -45,14 +48,17 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     m_editButton = new QPushButton(QStringLiteral("编辑"), this);
     m_importButton = new QPushButton(QStringLiteral("导入Excel"), this);
     m_exportButton = new QPushButton(QStringLiteral("导出Excel"), this);
+    m_projectButton = new QPushButton(QStringLiteral("项目代码"), this);
     const bool canEdit = m_session.canManageMaterials();
     m_addButton->setEnabled(canEdit);
     m_editButton->setEnabled(canEdit);
     m_importButton->setEnabled(canEdit);
+    m_projectButton->setEnabled(canEdit);
     if (!canEdit) {
         m_addButton->setToolTip(QStringLiteral("当前角色没有物料维护权限"));
         m_editButton->setToolTip(m_addButton->toolTip());
         m_importButton->setToolTip(m_addButton->toolTip());
+        m_projectButton->setToolTip(m_addButton->toolTip());
     }
     toolbar->addWidget(m_searchEdit, 1);
     toolbar->addWidget(m_categoryCombo);
@@ -62,6 +68,7 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     toolbar->addWidget(m_editButton);
     toolbar->addWidget(m_importButton);
     toolbar->addWidget(m_exportButton);
+    toolbar->addWidget(m_projectButton);
     root->addLayout(toolbar);
 
     auto *panel = new QFrame(this);
@@ -87,6 +94,7 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     connect(m_editButton, &QPushButton::clicked, this, &MaterialPage::editMaterial);
     connect(m_importButton, &QPushButton::clicked, this, &MaterialPage::importMaterials);
     connect(m_exportButton, &QPushButton::clicked, this, &MaterialPage::exportMaterials);
+    connect(m_projectButton, &QPushButton::clicked, this, &MaterialPage::manageProjects);
     connect(m_table, &QTableView::doubleClicked, this, [this] {
         if (m_session.canManageMaterials()) editMaterial();
     });
@@ -175,6 +183,165 @@ void MaterialPage::editMaterial()
         refresh();
         emit dataChanged();
     }
+}
+
+void MaterialPage::manageProjects()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("项目代码维护"));
+    dialog.resize(620, 430);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *hint = new QLabel(QStringLiteral(
+        "项目代码用于自动生成物料编码。代码创建后不可修改；停用后不再用于新物料。"), &dialog);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+    auto *table = new QTableWidget(0, 4, &dialog);
+    table->setHorizontalHeaderLabels({QStringLiteral("ID"), QStringLiteral("项目代码"),
+                                      QStringLiteral("项目名称"), QStringLiteral("状态")});
+    table->hideColumn(0);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->setVisible(false);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    layout->addWidget(table, 1);
+
+    auto reload = [this, table] {
+        table->setRowCount(0);
+        QSqlQuery query(m_database);
+        query.exec(QStringLiteral(
+            "SELECT id,code,name,is_active FROM material_projects ORDER BY code"));
+        while (query.next()) {
+            const int row = table->rowCount();
+            table->insertRow(row);
+            table->setItem(row, 0, new QTableWidgetItem(query.value(0).toString()));
+            table->setItem(row, 1, new QTableWidgetItem(query.value(1).toString()));
+            table->setItem(row, 2, new QTableWidgetItem(query.value(2).toString()));
+            table->setItem(row, 3, new QTableWidgetItem(query.value(3).toBool()
+                ? QStringLiteral("启用") : QStringLiteral("停用")));
+        }
+        if (table->rowCount() > 0) table->selectRow(0);
+    };
+    auto selectedId = [table] {
+        const int row = table->currentRow();
+        return row >= 0 && table->item(row, 0)
+            ? table->item(row, 0)->text().toLongLong() : 0;
+    };
+    auto writeAudit = [this](const QString &action, qlonglong id, const QString &detail) {
+        QSqlQuery audit(m_database);
+        audit.prepare(QStringLiteral(
+            "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) VALUES(?,?,?,?,?)"));
+        audit.addBindValue(m_session.userId);
+        audit.addBindValue(action);
+        audit.addBindValue(QStringLiteral("material_project"));
+        audit.addBindValue(id);
+        audit.addBindValue(detail);
+        audit.exec();
+    };
+
+    auto *actions = new QHBoxLayout;
+    auto *addButton = new QPushButton(QStringLiteral("新增项目代码"), &dialog);
+    addButton->setProperty("primary", true);
+    auto *renameButton = new QPushButton(QStringLiteral("修改名称"), &dialog);
+    auto *toggleButton = new QPushButton(QStringLiteral("启用/停用"), &dialog);
+    auto *closeButton = new QPushButton(QStringLiteral("关闭"), &dialog);
+    actions->addWidget(addButton);
+    actions->addWidget(renameButton);
+    actions->addWidget(toggleButton);
+    actions->addStretch();
+    actions->addWidget(closeButton);
+    layout->addLayout(actions);
+
+    connect(addButton, &QPushButton::clicked, &dialog, [this, &dialog, reload, writeAudit] {
+        bool accepted = false;
+        QString code = QInputDialog::getText(&dialog, QStringLiteral("新增项目代码"),
+            QStringLiteral("项目代码（例如 SM01）"), QLineEdit::Normal, {}, &accepted);
+        if (!accepted) return;
+        code = MaterialCodeService::normalizeProjectCode(code);
+        if (!MaterialCodeService::isValidProjectCode(code)) {
+            QMessageBox::warning(&dialog, QStringLiteral("项目代码无效"),
+                QStringLiteral("项目代码必须以字母开头，只能包含2至8位大写字母或数字。"));
+            return;
+        }
+        QString name = QInputDialog::getText(&dialog, QStringLiteral("新增项目代码"),
+            QStringLiteral("项目名称"), QLineEdit::Normal, code, &accepted).trimmed();
+        if (!accepted) return;
+        if (name.isEmpty()) name = code;
+        QSqlQuery insert(m_database);
+        insert.prepare(QStringLiteral(
+            "INSERT INTO material_projects(code,name) VALUES(?,?)"));
+        insert.addBindValue(code);
+        insert.addBindValue(name);
+        if (!insert.exec()) {
+            QMessageBox::warning(&dialog, QStringLiteral("新增失败"),
+                QStringLiteral("项目代码已存在或无法保存：%1").arg(insert.lastError().text()));
+            return;
+        }
+        writeAudit(QStringLiteral("MATERIAL_PROJECT_CREATE"),
+                   insert.lastInsertId().toLongLong(), code + QStringLiteral(" - ") + name);
+        reload();
+    });
+    connect(renameButton, &QPushButton::clicked, &dialog,
+            [this, &dialog, table, selectedId, reload, writeAudit] {
+        const qlonglong id = selectedId();
+        if (id <= 0) return;
+        bool accepted = false;
+        const QString name = QInputDialog::getText(&dialog, QStringLiteral("修改项目名称"),
+            QStringLiteral("项目名称"), QLineEdit::Normal,
+            table->item(table->currentRow(), 2)->text(), &accepted).trimmed();
+        if (!accepted || name.isEmpty()) return;
+        QSqlQuery update(m_database);
+        update.prepare(QStringLiteral(
+            "UPDATE material_projects SET name=?,updated_at=? WHERE id=?"));
+        update.addBindValue(name);
+        update.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+        update.addBindValue(id);
+        if (!update.exec()) {
+            QMessageBox::warning(&dialog, QStringLiteral("修改失败"), update.lastError().text());
+            return;
+        }
+        writeAudit(QStringLiteral("MATERIAL_PROJECT_UPDATE"), id, name);
+        reload();
+    });
+    connect(toggleButton, &QPushButton::clicked, &dialog,
+            [this, &dialog, selectedId, reload, writeAudit] {
+        const qlonglong id = selectedId();
+        if (id <= 0) return;
+        QSqlQuery current(m_database);
+        current.prepare(QStringLiteral("SELECT code,is_active FROM material_projects WHERE id=?"));
+        current.addBindValue(id);
+        if (!current.exec() || !current.next()) return;
+        const bool enable = !current.value(1).toBool();
+        if (!enable) {
+            QSqlQuery active(m_database);
+            active.exec(QStringLiteral("SELECT COUNT(*) FROM material_projects WHERE is_active=1"));
+            if (active.next() && active.value(0).toInt() <= 1) {
+                QMessageBox::warning(&dialog, QStringLiteral("不能停用"),
+                    QStringLiteral("至少需要保留一个启用的项目代码。"));
+                return;
+            }
+        }
+        QSqlQuery update(m_database);
+        update.prepare(QStringLiteral(
+            "UPDATE material_projects SET is_active=?,updated_at=? WHERE id=?"));
+        update.addBindValue(enable);
+        update.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+        update.addBindValue(id);
+        if (!update.exec()) {
+            QMessageBox::warning(&dialog, QStringLiteral("修改失败"), update.lastError().text());
+            return;
+        }
+        writeAudit(QStringLiteral("MATERIAL_PROJECT_TOGGLE"), id,
+                   current.value(0).toString() + (enable ? QStringLiteral(" 启用")
+                                                       : QStringLiteral(" 停用")));
+        reload();
+    });
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(table, &QTableWidget::doubleClicked, renameButton, &QPushButton::click);
+    reload();
+    dialog.exec();
 }
 
 void MaterialPage::importMaterials()

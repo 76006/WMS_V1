@@ -1,6 +1,7 @@
 #include "ui/pages/FinishedGoodsInPage.h"
 
 #include "services/InventoryService.h"
+#include "ui/widgets/ComboBoxSearch.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -57,8 +58,8 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     auto *form = new QFormLayout;
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     m_runCombo = new QComboBox(panel);
-    m_runCombo->setEditable(true);
-    m_runCombo->setInsertPolicy(QComboBox::NoInsert);
+    ComboBoxSearch::enableContainsSearch(
+        m_runCombo, QStringLiteral("输入生产批次、物料编码或名称检索"));
     m_productLabel = new QLabel(panel);
     m_productLabel->setObjectName(QStringLiteral("mutedText"));
     m_progressLabel = new QLabel(panel);
@@ -144,8 +145,9 @@ void FinishedGoodsInPage::refreshReferenceData()
         "FROM production_runs p JOIN materials m ON m.id=p.product_material_id ORDER BY p.id DESC"));
     while (runs.next()) {
         const int index = m_runCombo->count();
-        m_runCombo->addItem(QStringLiteral("%1 - %2（%3）")
-                                .arg(runs.value(1).toString(), runs.value(4).toString(),
+        m_runCombo->addItem(QStringLiteral("%1 - %2 - %3（%4）")
+                                .arg(runs.value(1).toString(), runs.value(3).toString(),
+                                     runs.value(4).toString(),
                                      runs.value(10).toString() == QStringLiteral("COMPLETED")
                                          ? QStringLiteral("已完成") : QStringLiteral("进行中")),
                             runs.value(0));

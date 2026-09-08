@@ -1,6 +1,7 @@
 #include "ui/pages/ProductionIssuePage.h"
 
 #include "services/InventoryService.h"
+#include "ui/widgets/ComboBoxSearch.h"
 #include "ui/widgets/StockLineTable.h"
 
 #include <QComboBox>
@@ -43,8 +44,8 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     auto *headerForm = new QFormLayout;
     headerForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     m_productCombo = new QComboBox(panel);
-    m_productCombo->setEditable(true);
-    m_productCombo->setInsertPolicy(QComboBox::NoInsert);
+    ComboBoxSearch::enableContainsSearch(
+        m_productCombo, QStringLiteral("输入成品编码或名称检索"));
     m_batchEdit = new QLineEdit(panel);
     m_batchEdit->setPlaceholderText(QStringLiteral("例如 PROD-202609-001"));
     m_plannedQuantity = new QDoubleSpinBox(panel);

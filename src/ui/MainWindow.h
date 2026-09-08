@@ -12,6 +12,7 @@ class BatchTracePage;
 class ExcelImportPage;
 class FinishedGoodsInPage;
 class InventoryPage;
+class InventoryReportPage;
 class InventoryCountPage;
 class LedgerPage;
 class MaterialPage;
@@ -60,6 +61,7 @@ private:
     ProductionReturnPage *m_productionReturnPage = nullptr;
     FinishedGoodsInPage *m_finishedGoodsInPage = nullptr;
     InventoryPage *m_inventoryPage = nullptr;
+    InventoryReportPage *m_inventoryReportPage = nullptr;
     LedgerPage *m_ledgerPage = nullptr;
     BatchTracePage *m_batchTracePage = nullptr;
     SerialTracePage *m_serialTracePage = nullptr;

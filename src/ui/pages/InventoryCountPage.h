@@ -27,6 +27,7 @@ signals:
 private slots:
     void loadLocations();
     void loadSnapshot();
+    void filterMaterials();
     void submit();
 
 private:
@@ -38,6 +39,7 @@ private:
     QComboBox *m_locationCombo = nullptr;
     QDateEdit *m_dateEdit = nullptr;
     QLineEdit *m_handlerEdit = nullptr;
+    QLineEdit *m_materialSearchEdit = nullptr;
     QTextEdit *m_notesEdit = nullptr;
     QTableWidget *m_table = nullptr;
     QPushButton *m_submitButton = nullptr;

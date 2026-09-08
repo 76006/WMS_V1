@@ -27,6 +27,12 @@ void setImportError(QString *target, const QString &message)
     if (target) *target = message;
 }
 
+QString databaseText(const QString &value)
+{
+    const QString trimmed = value.trimmed();
+    return trimmed.isNull() ? QString::fromLatin1("", 0) : trimmed;
+}
+
 int columnNumber(const QString &cellReference)
 {
     int value = 0;
@@ -135,11 +141,16 @@ QString powerShellLiteral(QString value)
 bool extractArchive(const QString &filePath, const QString &destination,
                     QString *errorMessage)
 {
+    const QString readableArchive = QDir(destination).filePath(QStringLiteral("__source.xlsx"));
+    if (!QFile::copy(filePath, readableArchive)) {
+        setImportError(errorMessage, QStringLiteral("无法读取Office文件，请检查文件是否存在或有读取权限。"));
+        return false;
+    }
     QProcess unzip;
     const QString script = QStringLiteral(
         "Add-Type -AssemblyName System.IO.Compression.FileSystem; "
         "[IO.Compression.ZipFile]::ExtractToDirectory(%1,%2)")
-                               .arg(powerShellLiteral(QFileInfo(filePath).absoluteFilePath()),
+                               .arg(powerShellLiteral(readableArchive),
                                     powerShellLiteral(destination));
     unzip.start(QStringLiteral("powershell.exe"),
                 {QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"),
@@ -689,16 +700,16 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
             save.addBindValue(row.materialCode);
         }
         save.addBindValue(row.materialName);
-        save.addBindValue(row.specification);
+        save.addBindValue(databaseText(row.specification));
         save.addBindValue(category.value(0));
-        save.addBindValue(row.brand);
+        save.addBindValue(databaseText(row.brand));
         save.addBindValue(row.unit);
         save.addBindValue(row.minimumStock);
         save.addBindValue(warehouseId);
         save.addBindValue(locationId);
         save.addBindValue(row.requireBatch);
         save.addBindValue(row.requireSerial);
-        save.addBindValue(row.notes);
+        save.addBindValue(databaseText(row.notes));
         if (exists) {
             save.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
             save.addBindValue(materialId);

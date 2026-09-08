@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(IceBeautyWms VERSION 1.1.0 LANGUAGES CXX)
+project(IceBeautyWms VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,8 @@ set(WMS_SOURCES
     src/services/InventoryService.cpp
     src/services/InventoryServiceDocuments.cpp
     src/services/InventoryServiceProduction.cpp
+    src/services/MaterialCodeService.cpp
+    src/services/InventoryReportService.cpp
     src/services/UserService.cpp
     src/ui/LoginDialog.cpp
     src/ui/MainWindow.cpp
@@ -33,6 +35,7 @@ set(WMS_SOURCES
     src/ui/pages/ExcelImportPage.cpp
     src/ui/pages/FinishedGoodsInPage.cpp
     src/ui/pages/InventoryPage.cpp
+    src/ui/pages/InventoryReportPage.cpp
     src/ui/pages/InventoryCountPage.cpp
     src/ui/pages/LedgerPage.cpp
     src/ui/pages/MaterialPage.cpp
@@ -47,6 +50,7 @@ set(WMS_SOURCES
     src/ui/pages/UserManagementPage.cpp
     src/ui/pages/WarehousePage.cpp
     src/ui/widgets/StockLineTable.cpp
+    src/ui/widgets/ComboBoxSearch.cpp
     src/core/DatabaseConfig.h
     src/import/LegacyInventoryImporter.h
     src/import/XlsxExporter.h
@@ -56,6 +60,8 @@ set(WMS_SOURCES
     src/database/SchemaMigrator.h
     src/services/AttachmentService.h
     src/services/InventoryService.h
+    src/services/MaterialCodeService.h
+    src/services/InventoryReportService.h
     src/services/UserService.h
     src/ui/LoginDialog.h
     src/ui/MainWindow.h
@@ -67,6 +73,7 @@ set(WMS_SOURCES
     src/ui/pages/ExcelImportPage.h
     src/ui/pages/FinishedGoodsInPage.h
     src/ui/pages/InventoryPage.h
+    src/ui/pages/InventoryReportPage.h
     src/ui/pages/InventoryCountPage.h
     src/ui/pages/LedgerPage.h
     src/ui/pages/MaterialPage.h
@@ -81,6 +88,7 @@ set(WMS_SOURCES
     src/ui/pages/UserManagementPage.h
     src/ui/pages/WarehousePage.h
     src/ui/widgets/StockLineTable.h
+    src/ui/widgets/ComboBoxSearch.h
 )
 
 qt_add_executable(IceBeautyWms WIN32 ${WMS_SOURCES})
@@ -90,6 +98,8 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/schema.sql
         database/migrations/002_production_workflow.sql
         database/migrations/003_final_features.sql
+        database/migrations/004_material_numbering.sql
+        database/migrations/005_inventory_reporting.sql
         resources/PdfPreview.qml
         resources/styles.qss
 )
@@ -128,6 +138,10 @@ if(BUILD_TESTING)
         src/services/InventoryServiceDocuments.cpp
         src/services/InventoryServiceProduction.cpp
         src/services/InventoryService.h
+        src/services/MaterialCodeService.cpp
+        src/services/MaterialCodeService.h
+        src/services/InventoryReportService.cpp
+        src/services/InventoryReportService.h
     )
 
     qt_add_executable(WmsDatabaseTests
@@ -140,6 +154,8 @@ if(BUILD_TESTING)
             database/schema.sql
             database/migrations/002_production_workflow.sql
             database/migrations/003_final_features.sql
+            database/migrations/004_material_numbering.sql
+            database/migrations/005_inventory_reporting.sql
     )
     target_include_directories(WmsDatabaseTests PRIVATE src)
     target_link_libraries(WmsDatabaseTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -155,6 +171,8 @@ if(BUILD_TESTING)
             database/schema.sql
             database/migrations/002_production_workflow.sql
             database/migrations/003_final_features.sql
+            database/migrations/004_material_numbering.sql
+            database/migrations/005_inventory_reporting.sql
     )
     target_include_directories(WmsProductionWorkflowTests PRIVATE src)
     target_link_libraries(WmsProductionWorkflowTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -172,6 +190,8 @@ if(BUILD_TESTING)
             database/schema.sql
             database/migrations/002_production_workflow.sql
             database/migrations/003_final_features.sql
+            database/migrations/004_material_numbering.sql
+            database/migrations/005_inventory_reporting.sql
     )
     target_include_directories(WmsWorkflowExpansionTests PRIVATE src)
     target_link_libraries(WmsWorkflowExpansionTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -194,6 +214,8 @@ if(BUILD_TESTING)
             database/schema.sql
             database/migrations/002_production_workflow.sql
             database/migrations/003_final_features.sql
+            database/migrations/004_material_numbering.sql
+            database/migrations/005_inventory_reporting.sql
     )
     target_include_directories(WmsTraceabilityAttachmentTests PRIVATE src)
     target_link_libraries(WmsTraceabilityAttachmentTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -216,6 +238,8 @@ if(BUILD_TESTING)
             database/schema.sql
             database/migrations/002_production_workflow.sql
             database/migrations/003_final_features.sql
+            database/migrations/004_material_numbering.sql
+            database/migrations/005_inventory_reporting.sql
     )
     target_include_directories(WmsUserServiceTests PRIVATE src)
     target_link_libraries(WmsUserServiceTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -240,6 +264,8 @@ if(BUILD_TESTING)
             database/schema.sql
             database/migrations/002_production_workflow.sql
             database/migrations/003_final_features.sql
+            database/migrations/004_material_numbering.sql
+            database/migrations/005_inventory_reporting.sql
     )
     target_include_directories(WmsExcelDataExchangeTests PRIVATE src)
     target_link_libraries(WmsExcelDataExchangeTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
@@ -260,6 +286,8 @@ if(BUILD_TESTING)
             database/schema.sql
             database/migrations/002_production_workflow.sql
             database/migrations/003_final_features.sql
+            database/migrations/004_material_numbering.sql
+            database/migrations/005_inventory_reporting.sql
     )
     target_include_directories(WmsFinalFeaturesTests PRIVATE src)
     target_link_libraries(WmsFinalFeaturesTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)

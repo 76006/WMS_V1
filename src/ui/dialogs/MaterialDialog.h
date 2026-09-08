@@ -23,6 +23,8 @@ public:
 
 private slots:
     void loadLocations();
+    void refreshGeneratedCode();
+    void applyDefaultCategory();
     void chooseImage();
     void removeImage();
     void save();
@@ -36,7 +38,11 @@ private:
     QSqlDatabase m_database;
     qlonglong m_materialId = 0;
     qlonglong m_operatorId = 0;
+    QComboBox *m_typeCombo = nullptr;
+    QComboBox *m_projectCombo = nullptr;
+    QComboBox *m_disciplineCombo = nullptr;
     QLineEdit *m_codeEdit = nullptr;
+    QLabel *m_codeHint = nullptr;
     QLineEdit *m_nameEdit = nullptr;
     QLineEdit *m_specificationEdit = nullptr;
     QComboBox *m_categoryCombo = nullptr;

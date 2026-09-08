@@ -69,6 +69,11 @@ InventoryCountPage::InventoryCountPage(QSqlDatabase database, Session session, Q
 
     auto *toolbar = new QHBoxLayout;
     toolbar->addWidget(new QLabel(QStringLiteral("盘点明细"), panel));
+    m_materialSearchEdit = new QLineEdit(panel);
+    m_materialSearchEdit->setPlaceholderText(QStringLiteral("按物料编码或名称检索"));
+    m_materialSearchEdit->setClearButtonEnabled(true);
+    m_materialSearchEdit->setMinimumWidth(260);
+    toolbar->addWidget(m_materialSearchEdit);
     toolbar->addStretch();
     auto *reload = new QPushButton(QStringLiteral("重新加载库存"), panel);
     toolbar->addWidget(reload);
@@ -99,6 +104,8 @@ InventoryCountPage::InventoryCountPage(QSqlDatabase database, Session session, Q
     connect(m_locationCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &InventoryCountPage::loadSnapshot);
     connect(reload, &QPushButton::clicked, this, &InventoryCountPage::loadSnapshot);
+    connect(m_materialSearchEdit, &QLineEdit::textChanged,
+            this, &InventoryCountPage::filterMaterials);
     connect(m_submitButton, &QPushButton::clicked, this, &InventoryCountPage::submit);
     resetSubmissionToken();
     refreshReferenceData();
@@ -199,6 +206,17 @@ void InventoryCountPage::loadSnapshot()
                 });
     }
     m_submitButton->setEnabled(m_session.canManageWarehouse() && m_table->rowCount() > 0);
+    filterMaterials();
+}
+
+void InventoryCountPage::filterMaterials()
+{
+    const QString keyword = m_materialSearchEdit->text().trimmed();
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        const QTableWidgetItem *material = m_table->item(row, 0);
+        m_table->setRowHidden(row, material && !keyword.isEmpty()
+            && !material->text().contains(keyword, Qt::CaseInsensitive));
+    }
 }
 
 void InventoryCountPage::submit()

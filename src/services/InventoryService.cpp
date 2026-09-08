@@ -61,6 +61,22 @@ bool InventoryService::postMovement(const StockMovementRequest &request,
         return false;
     }
 
+    const QString type = request.documentType.trimmed().toUpper();
+    if (inbound && type == QStringLiteral("CGRK")) {
+        if (request.orderedQuantity < -QuantityTolerance
+            || request.giftQuantity < -QuantityTolerance
+            || request.giftQuantity > qMax(0.0, request.quantity - request.orderedQuantity)
+                                          + QuantityTolerance) {
+            setError(errorMessage, QStringLiteral(
+                "采购数量或赠送数量无效，赠送数量不能超过多到货数量。"));
+            return false;
+        }
+    } else if (std::abs(request.orderedQuantity) > QuantityTolerance
+               || std::abs(request.giftQuantity) > QuantityTolerance) {
+        setError(errorMessage, QStringLiteral("只有采购入库可以填写采购数量和赠送数量。"));
+        return false;
+    }
+
     const MaterialRules rules = materialRules(request.materialId, errorMessage);
     if (!rules.valid || !validateMovement(request, rules, errorMessage)
         || !validateLocation(request.warehouseId, request.locationId, errorMessage)) {
@@ -91,6 +107,17 @@ bool InventoryService::postMovement(const StockMovementRequest &request,
         return false;
     }
 
+    QSqlQuery supplierUpdate(m_database);
+    if (inbound && type == QStringLiteral("CGRK")) {
+        supplierUpdate.prepare(QStringLiteral("UPDATE business_documents SET supplier=? WHERE id=?"));
+        supplierUpdate.addBindValue(databaseText(request.supplier));
+        supplierUpdate.addBindValue(documentId);
+        if (!supplierUpdate.exec()) {
+            setError(errorMessage, supplierUpdate.lastError().text());
+            rollback();
+            return false;
+        }
+    }
     const qlonglong itemId = createItem(documentId, request, 0, 0, errorMessage);
     if (itemId <= 0) {
         rollback();
@@ -375,7 +402,6 @@ bool InventoryService::reverseTransfer(const ReversalRequest &request,
         rollback();
         return false;
     }
-
     StockMovementRequest movement;
     movement.documentType = QStringLiteral("CX");
     movement.documentDate = request.documentDate;
@@ -560,7 +586,8 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     source.prepare(QStringLiteral(
         "SELECT i.document_id, d.document_no, d.stock_direction, d.status, d.document_type, "
         "d.production_run_id, i.material_id, i.quantity, i.reversed_quantity, i.returned_quantity, "
-        "i.batch_no, i.warehouse_id, i.location_id, m.require_serial, i.source_item_id "
+        "i.batch_no, i.warehouse_id, i.location_id, m.require_serial, i.source_item_id, "
+        "i.gift_quantity, i.reversed_gift_quantity "
         "FROM business_document_items i "
         "JOIN business_documents d ON d.id=i.document_id "
         "JOIN materials m ON m.id=i.material_id WHERE i.id=?"));
@@ -586,6 +613,8 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     const qlonglong locationId = source.value(12).toLongLong();
     const bool requireSerial = source.value(13).toBool();
     const qlonglong originalSourceItemId = source.value(14).toLongLong();
+    const double originalGiftQuantity = source.value(15).toDouble();
+    const double reversedGiftQuantity = source.value(16).toDouble();
 
     if (direction != QStringLiteral("IN") && direction != QStringLiteral("OUT")) {
         setError(errorMessage, QStringLiteral("当前版本仅支持入库和出库明细的部分撤销。"));
@@ -597,6 +626,17 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     if (sourceStatus == QStringLiteral("REVERSED")
         || request.quantity > originalQuantity - unavailableForReversal + QuantityTolerance) {
         setError(errorMessage, QStringLiteral("撤销数量超过原明细的剩余可撤销数量。"));
+        rollback();
+        return false;
+    }
+    const bool purchaseInbound = sourceType == QStringLiteral("CGRK")
+        && direction == QStringLiteral("IN");
+    const double remainingGiftQuantity = originalGiftQuantity - reversedGiftQuantity;
+    if (request.giftQuantity < -QuantityTolerance
+        || request.giftQuantity > request.quantity + QuantityTolerance
+        || request.giftQuantity > remainingGiftQuantity + QuantityTolerance
+        || (!purchaseInbound && request.giftQuantity > QuantityTolerance)) {
+        setError(errorMessage, QStringLiteral("撤销赠送数量无效或超过剩余赠送数量。"));
         rollback();
         return false;
     }
@@ -642,6 +682,7 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     itemRequest.documentDate = request.documentDate;
     itemRequest.materialId = materialId;
     itemRequest.quantity = request.quantity;
+    itemRequest.giftQuantity = request.giftQuantity;
     itemRequest.batchNo = batchNo;
     itemRequest.warehouseId = warehouseId;
     itemRequest.locationId = locationId;
@@ -743,13 +784,17 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
 
     QSqlQuery updateItem(m_database);
     updateItem.prepare(QStringLiteral(
-        "UPDATE business_document_items SET reversed_quantity=reversed_quantity+? "
+        "UPDATE business_document_items SET reversed_quantity=reversed_quantity+?, "
+        "reversed_gift_quantity=reversed_gift_quantity+? "
         "WHERE id=? AND reversed_quantity+?<=quantity-CASE WHEN ?='SCLL' "
-        "THEN returned_quantity ELSE 0 END+0.0000001"));
+        "THEN returned_quantity ELSE 0 END+0.0000001 "
+        "AND reversed_gift_quantity+?<=gift_quantity+0.0000001"));
     updateItem.addBindValue(request.quantity);
+    updateItem.addBindValue(request.giftQuantity);
     updateItem.addBindValue(request.sourceItemId);
     updateItem.addBindValue(request.quantity);
     updateItem.addBindValue(sourceType);
+    updateItem.addBindValue(request.giftQuantity);
     if (!updateItem.exec() || updateItem.numRowsAffected() != 1) {
         setError(errorMessage, QStringLiteral("可撤销数量已发生变化，请刷新后重试。"));
         rollback();
@@ -1045,12 +1090,15 @@ qlonglong InventoryService::createItem(qlonglong documentId,
 {
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "INSERT INTO business_document_items(document_id, line_number, material_id, quantity, batch_no, "
-        "warehouse_id, location_id, target_warehouse_id, target_location_id, notes) "
-        "VALUES(?, 1, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "INSERT INTO business_document_items(document_id,line_number,material_id,quantity,"
+        "ordered_quantity,gift_quantity,batch_no,warehouse_id,location_id,"
+        "target_warehouse_id,target_location_id,notes) "
+        "VALUES(?,1,?,?,?,?,?,?,?,?,?,?)"));
     query.addBindValue(documentId);
     query.addBindValue(request.materialId);
     query.addBindValue(request.quantity);
+    query.addBindValue(request.orderedQuantity);
+    query.addBindValue(request.giftQuantity);
     query.addBindValue(databaseText(request.batchNo));
     query.addBindValue(request.warehouseId);
     query.addBindValue(request.locationId);

@@ -1,6 +1,7 @@
 #include "ui/pages/ProductionReturnPage.h"
 
 #include "services/InventoryService.h"
+#include "ui/widgets/ComboBoxSearch.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -64,6 +65,8 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     auto *form = new QFormLayout;
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     m_runCombo = new QComboBox(panel);
+    ComboBoxSearch::enableContainsSearch(
+        m_runCombo, QStringLiteral("输入生产批次、物料编码或名称检索"));
     m_documentCombo = new QComboBox(panel);
     m_dateEdit = new QDateEdit(QDate::currentDate(), panel);
     m_dateEdit->setCalendarPopup(true);
@@ -143,15 +146,17 @@ void ProductionReturnPage::refreshReferenceData()
     m_runCombo->clear();
     QSqlQuery runs(m_database);
     runs.exec(QStringLiteral(
-        "SELECT p.id,p.batch_no,p.product_name FROM production_runs p "
+        "SELECT p.id,p.batch_no,p.product_name,m.code FROM production_runs p "
+        "JOIN materials m ON m.id=p.product_material_id "
         "WHERE EXISTS(SELECT 1 FROM business_documents d JOIN business_document_items i "
         "ON i.document_id=d.id WHERE d.production_run_id=p.id AND d.document_type='SCLL' "
         "AND d.status IN ('POSTED','PARTIALLY_REVERSED') "
         "AND i.quantity-i.returned_quantity-i.reversed_quantity>0.0000001) "
         "ORDER BY p.id DESC"));
     while (runs.next()) {
-        m_runCombo->addItem(QStringLiteral("%1 - %2")
-                                .arg(runs.value(1).toString(), runs.value(2).toString()),
+        m_runCombo->addItem(QStringLiteral("%1 - %2 - %3")
+                                .arg(runs.value(1).toString(), runs.value(3).toString(),
+                                     runs.value(2).toString()),
                             runs.value(0));
     }
     const int index = m_runCombo->findData(selected);

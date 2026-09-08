@@ -43,12 +43,15 @@ qlonglong InventoryService::createDocumentItem(qlonglong documentId,
 {
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "INSERT INTO business_document_items(document_id, line_number, material_id, quantity, batch_no, "
-        "warehouse_id, location_id, notes, source_item_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "INSERT INTO business_document_items(document_id,line_number,material_id,quantity,"
+        "ordered_quantity,gift_quantity,batch_no,warehouse_id,location_id,notes,source_item_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)"));
     query.addBindValue(documentId);
     query.addBindValue(lineNumber);
     query.addBindValue(request.materialId);
     query.addBindValue(request.quantity);
+    query.addBindValue(request.orderedQuantity);
+    query.addBindValue(request.giftQuantity);
     query.addBindValue(normalizedDatabaseText(request.batchNo));
     query.addBindValue(request.warehouseId);
     query.addBindValue(request.locationId);

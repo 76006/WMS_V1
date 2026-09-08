@@ -17,6 +17,8 @@ class ExcelDataExchangeTests final : public QObject
 private slots:
     void generatedInitialTemplateCanBeParsed();
     void materialTemplateCanBeImportedAndUpdated();
+    void materialImportAcceptsBlankOptionalText();
+    void multiSheetMonthlyReportCanBeOpened();
     void modernWordDocumentCanBePreviewed();
 };
 
@@ -137,6 +139,90 @@ void ExcelDataExchangeTests::materialTemplateCanBeImportedAndUpdated()
     QVERIFY(saved.exec(QStringLiteral("SELECT name FROM materials WHERE code='MAT-100'")));
     QVERIFY(saved.next());
     QCOMPARE(saved.value(0).toString(), QStringLiteral("批量物料（更新）"));
+#endif
+}
+
+void ExcelDataExchangeTests::materialImportAcceptsBlankOptionalText()
+{
+#ifndef Q_OS_WIN
+    QSKIP("OOXML压缩当前使用Windows内置Zip能力。");
+#else
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    DatabaseConfig config;
+    config.filePath = directory.filePath(QStringLiteral("blank-material-import.db"));
+    DatabaseManager manager;
+    QString error;
+    QVERIFY2(manager.open(config, &error), qPrintable(error));
+    QVERIFY2(SchemaMigrator::migrate(manager.database(), &error), qPrintable(error));
+
+    const QString path = directory.filePath(QStringLiteral("空白可选字段物料.xlsx"));
+    const QStringList headers = {QStringLiteral("物料编码"), QStringLiteral("物料名称"),
+        QStringLiteral("规格"), QStringLiteral("分类编码"), QStringLiteral("单位"),
+        QStringLiteral("最低库存"), QStringLiteral("默认仓库编码"), QStringLiteral("默认库位编码"),
+        QStringLiteral("批次管理"), QStringLiteral("SN管理"), QStringLiteral("品牌"),
+        QStringLiteral("备注")};
+    const QList<QList<QVariant>> data = {{QStringLiteral("MAT-BLANK"),
+        QStringLiteral("空规格物料"), QString(), QStringLiteral("RAW"), QStringLiteral("个"), 0,
+        QString(), QString(), QStringLiteral("否"), QStringLiteral("否"), QString(), QString()}};
+    QVERIFY2(XlsxExporter::writeSingleSheet(path, QStringLiteral("物料导入"), headers, data, &error),
+             qPrintable(error));
+
+    QList<MaterialImportRow> rows;
+    QVERIFY2(MaterialExcelImporter::parseFile(path, &rows, &error), qPrintable(error));
+    QCOMPARE(rows.size(), 1);
+    MaterialExcelImporter::validateReferences(manager.database(), &rows);
+    QCOMPARE(rows.first().status, MaterialImportStatus::Ready);
+
+    QSqlQuery user(manager.database());
+    QVERIFY(user.exec(QStringLiteral("SELECT id FROM users WHERE username='admin'")));
+    QVERIFY(user.next());
+    int created = 0;
+    int updated = 0;
+    QVERIFY2(MaterialExcelImporter::importRows(manager.database(), user.value(0).toLongLong(), rows,
+                                               &created, &updated, &error), qPrintable(error));
+    QCOMPARE(created, 1);
+    QCOMPARE(updated, 0);
+
+    QSqlQuery saved(manager.database());
+    QVERIFY(saved.exec(QStringLiteral(
+        "SELECT specification,brand,notes,specification IS NULL,brand IS NULL,notes IS NULL "
+        "FROM materials WHERE code='MAT-BLANK'")));
+    QVERIFY(saved.next());
+    QCOMPARE(saved.value(0).toString(), QStringLiteral(""));
+    QCOMPARE(saved.value(1).toString(), QStringLiteral(""));
+    QCOMPARE(saved.value(2).toString(), QStringLiteral(""));
+    QVERIFY(!saved.value(3).toBool());
+    QVERIFY(!saved.value(4).toBool());
+    QVERIFY(!saved.value(5).toBool());
+#endif
+}
+
+void ExcelDataExchangeTests::multiSheetMonthlyReportCanBeOpened()
+{
+#ifndef Q_OS_WIN
+    QSKIP("OOXML压缩当前使用Windows内置Zip能力。");
+#else
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("月度物料出入库.xlsx"));
+    QString error;
+    const QList<XlsxExporter::SheetData> sheets = {
+        {QStringLiteral("月度汇总"),
+         {QStringLiteral("物料编码"), QStringLiteral("期初库存"), QStringLiteral("期末库存")},
+         {{QStringLiteral("MAT-001"), 5.0, 8.0}}},
+        {QStringLiteral("出入库明细"),
+         {QStringLiteral("日期"), QStringLiteral("单据号"), QStringLiteral("入库数量")},
+         {{QDate(2026, 9, 8), QStringLiteral("CGRK-001"), 3.0}}}
+    };
+    QVERIFY2(XlsxExporter::writeWorkbook(path, sheets, &error), qPrintable(error));
+    QList<SpreadsheetPreviewSheet> preview;
+    QVERIFY2(OfficePreviewExtractor::previewXlsx(path, &preview, &error), qPrintable(error));
+    QCOMPARE(preview.size(), 2);
+    QCOMPARE(preview.at(0).name, QStringLiteral("月度汇总"));
+    QCOMPARE(preview.at(0).rows.at(1).at(0), QStringLiteral("MAT-001"));
+    QCOMPARE(preview.at(1).name, QStringLiteral("出入库明细"));
+    QCOMPARE(preview.at(1).rows.at(1).at(1), QStringLiteral("CGRK-001"));
 #endif
 }
 

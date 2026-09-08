@@ -2,6 +2,8 @@
 #include "database/DatabaseManager.h"
 #include "database/SchemaMigrator.h"
 #include "services/InventoryService.h"
+#include "services/InventoryReportService.h"
+#include "services/MaterialCodeService.h"
 
 #include <QSqlQuery>
 #include <QTemporaryDir>
@@ -14,6 +16,8 @@ class DatabaseTests final : public QObject
 private slots:
     void initializeAndRunInventoryFlow();
     void serialNumberFlow();
+    void materialCodeRuleAndProjectMigration();
+    void purchaseGiftAndMonthlyReporting();
 
 private:
     static qlonglong scalarId(QSqlDatabase database, const QString &sql);
@@ -25,6 +29,140 @@ private:
                                         qlonglong *locationId,
                                         qlonglong *materialId);
 };
+
+void DatabaseTests::materialCodeRuleAndProjectMigration()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    DatabaseConfig config;
+    config.filePath = directory.filePath(QStringLiteral("material-code.db"));
+    DatabaseManager manager;
+    QString error;
+    QVERIFY2(manager.open(config, &error), qPrintable(error));
+    QVERIFY2(SchemaMigrator::migrate(manager.database(), &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT COUNT(*) FROM material_projects WHERE code='SM01' AND is_active=1")).toInt(), 1);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version=4")).toInt(), 1);
+    QVERIFY(MaterialCodeService::isValidProjectCode(QStringLiteral("sm01")));
+    QVERIFY(!MaterialCodeService::isValidProjectCode(QStringLiteral("S-01")));
+
+    QSqlQuery insert(manager.database());
+    insert.prepare(QStringLiteral(
+        "INSERT INTO materials(code,name,category_id,unit) "
+        "VALUES(?,?,(SELECT id FROM material_categories WHERE code='RAW'),'个')"));
+    for (const QString &code : {QStringLiteral("MSM011001"), QStringLiteral("MSM011003")}) {
+        insert.bindValue(0, code);
+        insert.bindValue(1, code);
+        QVERIFY(insert.exec());
+    }
+    QCOMPARE(MaterialCodeService::nextCode(manager.database(), QStringLiteral("M"),
+        QStringLiteral("SM01"), QStringLiteral("1"), &error), QStringLiteral("MSM011004"));
+    QCOMPARE(MaterialCodeService::nextCode(manager.database(), QStringLiteral("M"),
+        QStringLiteral("SM01"), QStringLiteral("2"), &error), QStringLiteral("MSM012001"));
+    QCOMPARE(MaterialCodeService::nextCode(manager.database(), QStringLiteral("P"),
+        QStringLiteral("SM01"), QStringLiteral("1"), &error), QStringLiteral("PSM011001"));
+    QCOMPARE(MaterialCodeService::nextCode(manager.database(), QStringLiteral("O"),
+        QStringLiteral("SM01"), QStringLiteral("9"), &error), QStringLiteral("OSM019001"));
+}
+
+void DatabaseTests::purchaseGiftAndMonthlyReporting()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    DatabaseConfig config;
+    config.filePath = directory.filePath(QStringLiteral("purchase-report.db"));
+    DatabaseManager manager;
+    QString error;
+    QVERIFY2(manager.open(config, &error), qPrintable(error));
+    QVERIFY2(SchemaMigrator::migrate(manager.database(), &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT MAX(version) FROM schema_migrations")).toInt(), 5);
+
+    qlonglong userId = 0;
+    qlonglong warehouseId = 0;
+    qlonglong locationId = 0;
+    qlonglong materialId = 0;
+    createWarehouseMaterial(manager.database(), false, &userId, &warehouseId,
+                            &locationId, &materialId);
+    InventoryService inventory(manager.database(), userId);
+    StockMovementRequest line;
+    line.materialId = materialId;
+    line.orderedQuantity = 10.0;
+    line.quantity = 12.0;
+    line.giftQuantity = 2.0;
+    line.batchNo = QStringLiteral("GIFT-001");
+    line.warehouseId = warehouseId;
+    line.locationId = locationId;
+    StockDocumentRequest request;
+    request.documentType = QStringLiteral("CGRK");
+    request.documentDate = QDate::currentDate();
+    request.supplier = QStringLiteral("测试供应商");
+    request.submissionToken = QStringLiteral("purchase-gift-1");
+    request.lines = {line};
+    PostedDocument posted;
+    QVERIFY2(inventory.postStockDocument(request, true, &posted, &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT supplier FROM business_documents WHERE id=%1").arg(posted.documentId)).toString(),
+        QStringLiteral("测试供应商"));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT ordered_quantity FROM business_document_items WHERE document_id=%1")
+        .arg(posted.documentId)).toDouble(), 10.0);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT gift_quantity FROM business_document_items WHERE document_id=%1")
+        .arg(posted.documentId)).toDouble(), 2.0);
+
+    const qlonglong itemId = scalarId(manager.database(), QStringLiteral(
+        "SELECT id FROM business_document_items WHERE document_id=%1").arg(posted.documentId));
+    ReversalRequest reversal;
+    reversal.sourceItemId = itemId;
+    reversal.documentDate = QDate::currentDate();
+    reversal.quantity = 1.0;
+    reversal.giftQuantity = 1.0;
+    reversal.notes = QStringLiteral("撤销一件赠送物料");
+    QVERIFY2(inventory.reverseItem(reversal, nullptr, &error), qPrintable(error));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT quantity FROM stock_balances WHERE material_id=%1").arg(materialId)).toDouble(),
+        11.0);
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT reversed_gift_quantity FROM business_document_items WHERE id=%1").arg(itemId))
+                 .toDouble(), 1.0);
+
+    InventoryReportService reports(manager.database());
+    QList<AnnualInventoryReportRow> annual;
+    QVERIFY2(reports.loadAnnual(QDate::currentDate().year(), QString(), &annual, &error),
+             qPrintable(error));
+    const AnnualInventoryReportRow annualRow = annual.at(QDate::currentDate().month() - 1);
+    QCOMPARE(annualRow.orderedQuantity, 10.0);
+    QCOMPARE(annualRow.purchaseReceivedQuantity, 11.0);
+    QCOMPARE(annualRow.giftQuantity, 1.0);
+    QCOMPARE(annualRow.billableQuantity, 10.0);
+    QCOMPARE(annualRow.inboundQuantity, 12.0);
+    QCOMPARE(annualRow.outboundQuantity, 1.0);
+
+    QList<MonthlyMaterialReportRow> summary;
+    QList<InventoryMovementReportRow> detail;
+    QVERIFY2(reports.loadMonthly(QDate::currentDate().year(), QDate::currentDate().month(),
+                                 QStringLiteral("TEST-MAT"), &summary, &detail, &error),
+             qPrintable(error));
+    QCOMPARE(summary.size(), 1);
+    QCOMPARE(summary.first().openingQuantity, 0.0);
+    QCOMPARE(summary.first().orderedQuantity, 10.0);
+    QCOMPARE(summary.first().purchaseReceivedQuantity, 11.0);
+    QCOMPARE(summary.first().giftQuantity, 1.0);
+    QCOMPARE(summary.first().billableQuantity, 10.0);
+    QCOMPARE(summary.first().closingQuantity, 11.0);
+    QCOMPARE(detail.size(), 2);
+
+    StockDocumentRequest invalid = request;
+    invalid.submissionToken = QStringLiteral("purchase-gift-invalid");
+    invalid.lines[0].giftQuantity = 13.0;
+    QVERIFY(!inventory.postStockDocument(invalid, true, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("赠送数量")));
+    QCOMPARE(scalar(manager.database(), QStringLiteral(
+        "SELECT quantity FROM stock_balances WHERE material_id=%1").arg(materialId)).toDouble(),
+        11.0);
+}
 
 qlonglong DatabaseTests::scalarId(QSqlDatabase database, const QString &sql)
 {

@@ -20,11 +20,13 @@ public:
                             QWidget *parent = nullptr);
 
     QList<StockMovementRequest> lines(QString *errorMessage = nullptr) const;
+    QStringList purchaseWarnings() const;
 
 public slots:
     void refreshReferenceData();
     void addLine();
     void clearLines();
+    void setPurchaseMode(bool enabled);
 
 private:
     int rowForWidget(const QWidget *widget, int column) const;
@@ -39,5 +41,6 @@ private:
 
     QSqlDatabase m_database;
     Mode m_mode = Mode::Outbound;
+    bool m_purchaseMode = false;
     QTableWidget *m_table = nullptr;
 };

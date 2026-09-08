@@ -1,5 +1,7 @@
 #include "ui/dialogs/MaterialDialog.h"
 
+#include "services/MaterialCodeService.h"
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -23,6 +25,10 @@
 
 #include <utility>
 
+namespace {
+constexpr int CategoryCodeRole = Qt::UserRole + 1;
+}
+
 MaterialDialog::MaterialDialog(QSqlDatabase database,
                                qlonglong materialId,
                                qlonglong operatorId,
@@ -38,8 +44,20 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     form->setSpacing(10);
 
+    m_typeCombo = new QComboBox(this);
+    m_typeCombo->addItem(QStringLiteral("M - 原材料"), QStringLiteral("M"));
+    m_typeCombo->addItem(QStringLiteral("P - 成品"), QStringLiteral("P"));
+    m_typeCombo->addItem(QStringLiteral("O - 耗材/包装/附件"), QStringLiteral("O"));
+    m_projectCombo = new QComboBox(this);
+    m_disciplineCombo = new QComboBox(this);
+    m_disciplineCombo->addItem(QStringLiteral("1 - 结构件"), QStringLiteral("1"));
+    m_disciplineCombo->addItem(QStringLiteral("2 - 电子件"), QStringLiteral("2"));
+    m_disciplineCombo->addItem(QStringLiteral("9 - 其他"), QStringLiteral("9"));
     m_codeEdit = new QLineEdit(this);
     m_codeEdit->setMaxLength(64);
+    m_codeEdit->setReadOnly(true);
+    m_codeHint = new QLabel(QStringLiteral("编码保存后不可修改"), this);
+    m_codeHint->setObjectName(QStringLiteral("mutedText"));
     m_nameEdit = new QLineEdit(this);
     m_nameEdit->setMaxLength(128);
     m_specificationEdit = new QLineEdit(this);
@@ -77,7 +95,11 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     trackingLayout->addWidget(m_serialCheck);
     trackingLayout->addStretch();
 
-    form->addRow(QStringLiteral("物料编码 *"), m_codeEdit);
+    form->addRow(QStringLiteral("物料类型 *"), m_typeCombo);
+    form->addRow(QStringLiteral("项目代码 *"), m_projectCombo);
+    form->addRow(QStringLiteral("专业类别 *"), m_disciplineCombo);
+    form->addRow(QStringLiteral("物料编码"), m_codeEdit);
+    form->addRow(QString(), m_codeHint);
     form->addRow(QStringLiteral("物料名称 *"), m_nameEdit);
     form->addRow(QStringLiteral("规格型号"), m_specificationEdit);
     form->addRow(QStringLiteral("物料分类 *"), m_categoryCombo);
@@ -105,6 +127,14 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
 
     connect(m_warehouseCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MaterialDialog::loadLocations);
+    connect(m_typeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        applyDefaultCategory();
+        refreshGeneratedCode();
+    });
+    connect(m_projectCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MaterialDialog::refreshGeneratedCode);
+    connect(m_disciplineCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MaterialDialog::refreshGeneratedCode);
     connect(chooseImageButton, &QPushButton::clicked, this, &MaterialDialog::chooseImage);
     connect(removeImageButton, &QPushButton::clicked, this, &MaterialDialog::removeImage);
     connect(buttons, &QDialogButtonBox::accepted, this, &MaterialDialog::save);
@@ -113,6 +143,12 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     loadReferenceData();
     if (m_materialId > 0) {
         loadMaterial();
+        m_typeCombo->setEnabled(false);
+        m_projectCombo->setEnabled(false);
+        m_disciplineCombo->setEnabled(false);
+    } else {
+        applyDefaultCategory();
+        refreshGeneratedCode();
     }
 }
 
@@ -122,10 +158,27 @@ void MaterialDialog::loadReferenceData()
     m_categoryCombo->addItem(QStringLiteral("请选择"), QVariant());
     QSqlQuery categories(m_database);
     categories.exec(QStringLiteral(
-        "SELECT id, name FROM material_categories WHERE is_active=1 ORDER BY sort_order, name"));
+        "SELECT id, code, name FROM material_categories WHERE is_active=1 ORDER BY sort_order, name"));
     while (categories.next()) {
-        m_categoryCombo->addItem(categories.value(1).toString(), categories.value(0));
+        const int index = m_categoryCombo->count();
+        m_categoryCombo->addItem(categories.value(2).toString(), categories.value(0));
+        m_categoryCombo->setItemData(index, categories.value(1), CategoryCodeRole);
     }
+
+    m_projectCombo->blockSignals(true);
+    m_projectCombo->clear();
+    QSqlQuery projects(m_database);
+    projects.exec(m_materialId > 0
+        ? QStringLiteral("SELECT code,name FROM material_projects ORDER BY code")
+        : QStringLiteral("SELECT code,name FROM material_projects WHERE is_active=1 ORDER BY code"));
+    while (projects.next()) {
+        m_projectCombo->addItem(QStringLiteral("%1 - %2")
+                                    .arg(projects.value(0).toString(), projects.value(1).toString()),
+                                projects.value(0));
+    }
+    const int defaultProject = m_projectCombo->findData(QStringLiteral("SM01"));
+    if (defaultProject >= 0) m_projectCombo->setCurrentIndex(defaultProject);
+    m_projectCombo->blockSignals(false);
 
     m_warehouseCombo->clear();
     m_warehouseCombo->addItem(QStringLiteral("未设置"), QVariant());
@@ -137,6 +190,35 @@ void MaterialDialog::loadReferenceData()
             warehouses.value(0));
     }
     loadLocations();
+}
+
+void MaterialDialog::applyDefaultCategory()
+{
+    if (m_materialId > 0) return;
+    const QString type = m_typeCombo->currentData().toString();
+    const QString categoryCode = type == QStringLiteral("P") ? QStringLiteral("FINISHED")
+        : type == QStringLiteral("O") ? QStringLiteral("CONSUMABLE")
+                                      : QStringLiteral("RAW");
+    const int index = m_categoryCombo->findData(categoryCode, CategoryCodeRole);
+    if (index >= 0) m_categoryCombo->setCurrentIndex(index);
+}
+
+void MaterialDialog::refreshGeneratedCode()
+{
+    if (m_materialId > 0) return;
+    QString error;
+    const QString code = MaterialCodeService::nextCode(
+        m_database, m_typeCombo->currentData().toString(),
+        m_projectCombo->currentData().toString(),
+        m_disciplineCombo->currentData().toString(), &error);
+    m_codeEdit->setText(code);
+    if (code.isEmpty()) {
+        m_codeHint->setText(error);
+        m_codeHint->setStyleSheet(QStringLiteral("color:#b91c1c;"));
+    } else {
+        m_codeHint->setText(QStringLiteral("自动生成；保存时再次校验，保存后不可修改"));
+        m_codeHint->setStyleSheet(QString());
+    }
 }
 
 void MaterialDialog::loadLocations()
@@ -181,6 +263,19 @@ void MaterialDialog::loadMaterial()
         return;
     }
     m_codeEdit->setText(query.value(0).toString());
+    const QString materialCode = query.value(0).toString().toUpper();
+    const int typeIndex = m_typeCombo->findData(materialCode.left(1));
+    if (typeIndex >= 0) m_typeCombo->setCurrentIndex(typeIndex);
+    for (int index = 0; index < m_projectCombo->count(); ++index) {
+        const QString project = m_projectCombo->itemData(index).toString();
+        const QString suffix = materialCode.mid(1 + project.size());
+        if (materialCode.mid(1).startsWith(project) && suffix.size() == 4) {
+            m_projectCombo->setCurrentIndex(index);
+            const int disciplineIndex = m_disciplineCombo->findData(suffix.left(1));
+            if (disciplineIndex >= 0) m_disciplineCombo->setCurrentIndex(disciplineIndex);
+            break;
+        }
+    }
     m_nameEdit->setText(query.value(1).toString());
     m_specificationEdit->setText(query.value(2).toString());
     m_categoryCombo->setCurrentIndex(m_categoryCombo->findData(query.value(3)));
@@ -262,11 +357,16 @@ void MaterialDialog::updateImagePreview()
 
 void MaterialDialog::save()
 {
-    const QString code = m_codeEdit->text().trimmed().toUpper();
+    QString code = m_codeEdit->text().trimmed().toUpper();
     const QString name = m_nameEdit->text().trimmed();
     const QString unit = m_unitEdit->text().trimmed();
-    if (code.isEmpty() || name.isEmpty() || unit.isEmpty() || m_categoryCombo->currentData().isNull()) {
-        showError(QStringLiteral("请完整填写物料编码、名称、分类和单位。"));
+    if (name.isEmpty() || unit.isEmpty() || m_categoryCombo->currentData().isNull()) {
+        showError(QStringLiteral("请完整填写物料名称、分类和单位。"));
+        return;
+    }
+    if (m_materialId <= 0 && (m_typeCombo->currentIndex() < 0
+        || m_projectCombo->currentIndex() < 0 || m_disciplineCombo->currentIndex() < 0)) {
+        showError(QStringLiteral("请选择物料类型、项目代码和专业类别。"));
         return;
     }
     const qlonglong warehouseId = m_warehouseCombo->currentData().toLongLong();
@@ -276,9 +376,23 @@ void MaterialDialog::save()
         return;
     }
 
-    if (!m_database.transaction()) {
-        showError(QStringLiteral("无法开始保存事务：%1").arg(m_database.lastError().text()));
+    QSqlQuery begin(m_database);
+    if (!begin.exec(QStringLiteral("BEGIN IMMEDIATE"))) {
+        showError(QStringLiteral("无法开始保存事务：%1").arg(begin.lastError().text()));
         return;
+    }
+    if (m_materialId <= 0) {
+        QString error;
+        code = MaterialCodeService::nextCode(
+            m_database, m_typeCombo->currentData().toString(),
+            m_projectCombo->currentData().toString(),
+            m_disciplineCombo->currentData().toString(), &error);
+        if (code.isEmpty()) {
+            m_database.rollback();
+            showError(error);
+            return;
+        }
+        m_codeEdit->setText(code);
     }
     QSqlQuery query(m_database);
     if (m_materialId > 0) {

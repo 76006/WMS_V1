@@ -32,7 +32,7 @@ void FinalFeaturesTests::migrationPermissionsImagesAndRules()
     QString error;
     QVERIFY2(manager.open(config, &error), qPrintable(error));
     QVERIFY2(SchemaMigrator::migrate(manager.database(), &error), qPrintable(error));
-    QCOMPARE(scalar(manager.database(), QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 3);
+    QCOMPARE(scalar(manager.database(), QStringLiteral("SELECT MAX(version) FROM schema_migrations")).toInt(), 5);
     QVERIFY(scalar(manager.database(), QStringLiteral(
         "SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.id=rp.role_id "
         "WHERE r.code='PRODUCTION' AND rp.permission_code='POST_PRODUCTION' AND rp.is_allowed=1")).toInt() == 1);

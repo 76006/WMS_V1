@@ -29,6 +29,7 @@ private slots:
     void editMaterial();
     void importMaterials();
     void exportMaterials();
+    void manageProjects();
     void loadCategories();
 
 private:
@@ -42,6 +43,7 @@ private:
     QPushButton *m_editButton = nullptr;
     QPushButton *m_importButton = nullptr;
     QPushButton *m_exportButton = nullptr;
+    QPushButton *m_projectButton = nullptr;
     QTableView *m_table = nullptr;
     QSqlQueryModel *m_model = nullptr;
 };

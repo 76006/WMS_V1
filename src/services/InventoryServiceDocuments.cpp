@@ -88,6 +88,18 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         rollback();
         return false;
     }
+    if (inbound && type == QStringLiteral("CGRK")) {
+        QSqlQuery supplier(m_database);
+        supplier.prepare(QStringLiteral("UPDATE business_documents SET supplier=? WHERE id=?"));
+        supplier.addBindValue(normalizedText(request.supplier));
+        supplier.addBindValue(documentId);
+        if (!supplier.exec()) {
+            setDocumentError(errorMessage,
+                             QStringLiteral("保存供应商失败：%1").arg(supplier.lastError().text()));
+            rollback();
+            return false;
+        }
+    }
 
     QSet<QString> identities;
     for (int index = 0; index < request.lines.size(); ++index) {
@@ -106,6 +118,24 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
             return false;
         }
         identities.insert(identity);
+
+        if (inbound && type == QStringLiteral("CGRK")) {
+            if (movement.orderedQuantity < -DocumentQuantityTolerance
+                || movement.giftQuantity < -DocumentQuantityTolerance
+                || movement.giftQuantity > qMax(0.0, movement.quantity - movement.orderedQuantity)
+                                               + DocumentQuantityTolerance) {
+                setDocumentError(errorMessage, lineError(index + 1,
+                    QStringLiteral("采购数量或赠送数量无效，赠送数量不能超过多到货数量。")));
+                rollback();
+                return false;
+            }
+        } else if (std::abs(movement.orderedQuantity) > DocumentQuantityTolerance
+                   || std::abs(movement.giftQuantity) > DocumentQuantityTolerance) {
+            setDocumentError(errorMessage, lineError(index + 1,
+                QStringLiteral("只有采购入库可以填写采购数量和赠送数量。")));
+            rollback();
+            return false;
+        }
 
         QString detail;
         const MaterialRules rules = materialRules(movement.materialId, &detail);

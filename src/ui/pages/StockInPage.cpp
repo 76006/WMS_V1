@@ -65,6 +65,7 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     form->addRow(QStringLiteral("备注"), m_notesEdit);
     layout->addLayout(form);
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Inbound, panel);
+    m_lines->setPurchaseMode(true);
     layout->addWidget(m_lines);
     auto *actions = new QHBoxLayout;
     actions->addStretch();
@@ -87,6 +88,12 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     root->addWidget(recentPanel, 1);
 
     connect(m_submitButton, &QPushButton::clicked, this, &StockInPage::submit);
+    connect(m_typeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        const bool purchase = m_typeCombo->currentData().toString() == QStringLiteral("CGRK");
+        m_lines->setPurchaseMode(purchase);
+        m_supplierEdit->setEnabled(purchase);
+        if (!purchase) m_supplierEdit->clear();
+    });
     resetSubmissionToken();
     refreshReferenceData();
 }
@@ -128,14 +135,36 @@ void StockInPage::submit()
         QMessageBox::warning(this, QStringLiteral("入库明细有误"), error);
         return;
     }
-    if (QMessageBox::question(this, QStringLiteral("确认入库"),
-        QStringLiteral("确认提交 %1 条入库明细？库存将整单增加并生成流水。")
-            .arg(lines.size())) != QMessageBox::Yes) return;
+    QString confirmation = QStringLiteral("确认提交 %1 条入库明细？库存将整单增加并生成流水。")
+                               .arg(lines.size());
+    if (m_typeCombo->currentData().toString() == QStringLiteral("CGRK")) {
+        double ordered = 0.0;
+        double received = 0.0;
+        double gifted = 0.0;
+        for (const StockMovementRequest &line : lines) {
+            ordered += line.orderedQuantity;
+            received += line.quantity;
+            gifted += line.giftQuantity;
+        }
+        confirmation += QStringLiteral("\n\n采购数量：%1\n实际入库：%2\n其中赠送：%3\n对账数量：%4")
+                            .arg(ordered, 0, 'g', 12)
+                            .arg(received, 0, 'g', 12)
+                            .arg(gifted, 0, 'g', 12)
+                            .arg(received - gifted, 0, 'g', 12);
+        const QStringList warnings = m_lines->purchaseWarnings();
+        if (!warnings.isEmpty()) {
+            confirmation += QStringLiteral("\n\n请注意：\n• ")
+                                + warnings.join(QStringLiteral("\n• "));
+        }
+    }
+    if (QMessageBox::question(this, QStringLiteral("确认入库"), confirmation)
+        != QMessageBox::Yes) return;
     StockDocumentRequest request;
     request.documentType = m_typeCombo->currentData().toString();
     request.documentDate = m_dateEdit->date();
     request.handlerName = m_handlerEdit->text().trimmed();
-    request.supplier = m_supplierEdit->text().trimmed();
+    request.supplier = request.documentType == QStringLiteral("CGRK")
+        ? m_supplierEdit->text().trimmed() : QString();
     request.purpose = m_purposeEdit->text().trimmed();
     request.notes = m_notesEdit->toPlainText().trimmed();
     request.submissionToken = m_submissionToken;

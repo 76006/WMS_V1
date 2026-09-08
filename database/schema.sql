@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS material_categories (
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
 );
 
+CREATE TABLE IF NOT EXISTS material_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    name TEXT NOT NULL DEFAULT '',
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS warehouses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -250,6 +259,8 @@ INSERT OR IGNORE INTO material_categories(code, name, sort_order) VALUES
     ('CONSUMABLE', '辅料耗材', 70),
     ('DEFECTIVE', '不良品', 80),
     ('SPARE', '备件', 90);
+
+INSERT OR IGNORE INTO material_projects(code, name) VALUES ('SM01', 'SM01项目');
 
 INSERT OR IGNORE INTO number_rules(document_type, prefix, sequence_width) VALUES
     ('CGRK', 'CGRK', 4),

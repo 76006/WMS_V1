@@ -7,6 +7,7 @@
 #include "ui/pages/ExcelImportPage.h"
 #include "ui/pages/FinishedGoodsInPage.h"
 #include "ui/pages/InventoryPage.h"
+#include "ui/pages/InventoryReportPage.h"
 #include "ui/pages/InventoryCountPage.h"
 #include "ui/pages/LedgerPage.h"
 #include "ui/pages/MaterialPage.h"
@@ -133,6 +134,7 @@ void MainWindow::buildUi()
     m_productionReturnPage = new ProductionReturnPage(m_database, m_session, m_stack);
     m_finishedGoodsInPage = new FinishedGoodsInPage(m_database, m_session, m_stack);
     m_inventoryPage = new InventoryPage(m_database, m_stack);
+    m_inventoryReportPage = new InventoryReportPage(m_database, m_stack);
     m_ledgerPage = new LedgerPage(m_database, m_session, m_stack);
     m_transferPage = new TransferPage(m_database, m_session, m_stack);
     m_countPage = new InventoryCountPage(m_database, m_session, m_stack);
@@ -145,7 +147,7 @@ void MainWindow::buildUi()
                                                    m_databaseFilePath, m_stack);
 
     add(QStringLiteral("首页"), m_dashboardPage);
-    add(QStringLiteral("物料管理"), m_materialPage);
+    add(QStringLiteral("物料维护"), m_materialPage);
     add(QStringLiteral("仓库/库位管理"), m_warehousePage);
     add(QStringLiteral("库存Excel导入"), m_excelImportPage, m_session.canManageWarehouse());
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
@@ -154,6 +156,7 @@ void MainWindow::buildUi()
     add(QStringLiteral("生产退料"), m_productionReturnPage, m_session.canPostProduction());
     add(QStringLiteral("成品入库"), m_finishedGoodsInPage, m_session.canPostProduction());
     add(QStringLiteral("库存查询"), m_inventoryPage, m_session.canViewInventory());
+    add(QStringLiteral("出入库统计"), m_inventoryReportPage, m_session.canViewInventory());
     add(QStringLiteral("库存流水"), m_ledgerPage, m_session.canViewInventory());
     add(QStringLiteral("库存调拨"), m_transferPage, m_session.canManageWarehouse());
     add(QStringLiteral("库存盘点"), m_countPage, m_session.canManageWarehouse());
@@ -214,6 +217,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_productionReturnPage) m_productionReturnPage->refreshReferenceData();
     else if (page == m_finishedGoodsInPage) m_finishedGoodsInPage->refreshReferenceData();
     else if (page == m_inventoryPage) m_inventoryPage->refresh();
+    else if (page == m_inventoryReportPage) m_inventoryReportPage->refresh();
     else if (page == m_ledgerPage) m_ledgerPage->refresh();
     else if (page == m_transferPage) m_transferPage->refreshReferenceData();
     else if (page == m_countPage) m_countPage->refreshReferenceData();
@@ -229,6 +233,7 @@ void MainWindow::refreshInventoryViews()
     m_dashboardPage->refresh();
     m_materialPage->refresh();
     m_inventoryPage->refresh();
+    m_inventoryReportPage->refresh();
     m_ledgerPage->refresh();
     m_stockInPage->refreshReferenceData();
     m_stockOutPage->refreshReferenceData();

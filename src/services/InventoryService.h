@@ -15,7 +15,9 @@ struct StockMovementRequest
     QString supplier;
     QString notes;
     qlonglong materialId = 0;
+    double orderedQuantity = 0.0;
     double quantity = 0.0;
+    double giftQuantity = 0.0;
     QString batchNo;
     qlonglong warehouseId = 0;
     qlonglong locationId = 0;
@@ -73,6 +75,7 @@ struct ReversalRequest
     qlonglong sourceItemId = 0;
     QDate documentDate;
     double quantity = 0.0;
+    double giftQuantity = 0.0;
     QString handlerName;
     QString notes;
     QStringList serialNumbers;

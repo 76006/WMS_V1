@@ -136,7 +136,8 @@ void LedgerPage::refresh()
         "l.quantity_in, l.quantity_out, l.quantity_before, l.quantity_after, "
         "w.name, loc.code, u.display_name, d.stock_direction, d.status, "
         "i.quantity-i.reversed_quantity-CASE WHEN d.document_type='SCLL' THEN i.returned_quantity ELSE 0 END, "
-        "m.require_serial, d.created_by "
+        "m.require_serial, d.created_by, i.gift_quantity-i.reversed_gift_quantity, "
+        "d.document_type "
         "FROM inventory_ledger l "
         "JOIN business_documents d ON d.id=l.document_id "
         "JOIN business_document_items i ON i.id=l.document_item_id "
@@ -167,12 +168,13 @@ void LedgerPage::refresh()
         QStringLiteral("操作前库存"), QStringLiteral("操作后库存"), QStringLiteral("仓库"),
         QStringLiteral("库位"), QStringLiteral("操作人员"), QStringLiteral("方向"),
         QStringLiteral("单据状态"), QStringLiteral("可撤销数量"), QStringLiteral("SN管理"),
-        QStringLiteral("创建人ID")
+        QStringLiteral("创建人ID"), QStringLiteral("剩余赠送数量"),
+        QStringLiteral("原单类型")
     };
     for (int column = 0; column < headers.size(); ++column) {
         m_model->setHeaderData(column, Qt::Horizontal, headers.at(column));
     }
-    for (int hidden : {0, 1, 2, 17, 19, 20, 21}) {
+    for (int hidden : {0, 1, 2, 17, 19, 20, 21, 22, 23}) {
         m_table->hideColumn(hidden);
     }
     m_table->resizeColumnsToContents();
@@ -219,6 +221,8 @@ void LedgerPage::reverseSelectedItem()
                                       m_model->index(row, 7).data().toString());
     const double maximum = m_model->index(row, 19).data().toDouble();
     const bool requireSerial = m_model->index(row, 20).data().toBool();
+    const double remainingGift = m_model->index(row, 22).data().toDouble();
+    const QString sourceType = m_model->index(row, 23).data().toString();
     const QString originalSerials = m_model->index(row, 9).data().toString();
 
     QDialog dialog(this);
@@ -238,11 +242,24 @@ void LedgerPage::reverseSelectedItem()
     quantitySpin->setDecimals(6);
     quantitySpin->setRange(0.000001, maximum);
     quantitySpin->setValue(maximum);
+    QDoubleSpinBox *giftSpin = nullptr;
+    if (sourceType == QStringLiteral("CGRK") && remainingGift > 0.0000001) {
+        giftSpin = new QDoubleSpinBox(&dialog);
+        giftSpin->setDecimals(6);
+        giftSpin->setRange(0.0, qMin(maximum, remainingGift));
+        giftSpin->setValue(qMin(maximum, remainingGift));
+        giftSpin->setToolTip(QStringLiteral("只填写本次撤销数量中属于供应商赠送的部分"));
+        connect(quantitySpin, qOverload<double>(&QDoubleSpinBox::valueChanged), giftSpin,
+                [giftSpin, remainingGift](double value) {
+                    giftSpin->setMaximum(qMin(value, remainingGift));
+                });
+    }
     auto *handlerEdit = new QLineEdit(m_session.displayName, &dialog);
     auto *notesEdit = new QTextEdit(&dialog);
     notesEdit->setMaximumHeight(70);
     form->addRow(QStringLiteral("撤销日期 *"), dateEdit);
     form->addRow(QStringLiteral("撤销数量 *"), quantitySpin);
+    if (giftSpin) form->addRow(QStringLiteral("其中撤销赠送"), giftSpin);
     form->addRow(QStringLiteral("经办人"), handlerEdit);
     QTextEdit *serialEdit = nullptr;
     if (requireSerial) {
@@ -266,9 +283,14 @@ void LedgerPage::reverseSelectedItem()
         QMessageBox::warning(this, QStringLiteral("缺少撤销原因"), QStringLiteral("请填写撤销原因。"));
         return;
     }
-    if (QMessageBox::question(this, QStringLiteral("再次确认"),
-        QStringLiteral("确定撤销 %1，数量 %2？")
-            .arg(documentNumber, QString::number(quantitySpin->value(), 'f', 6))) != QMessageBox::Yes) {
+    QString confirmation = QStringLiteral("确定撤销 %1，数量 %2？")
+        .arg(documentNumber, QString::number(quantitySpin->value(), 'f', 6));
+    if (giftSpin) {
+        confirmation += QStringLiteral("\n其中赠送数量：%1")
+                            .arg(giftSpin->value(), 0, 'f', 6);
+    }
+    if (QMessageBox::question(this, QStringLiteral("再次确认"), confirmation)
+        != QMessageBox::Yes) {
         return;
     }
 
@@ -276,6 +298,7 @@ void LedgerPage::reverseSelectedItem()
     request.sourceItemId = itemId;
     request.documentDate = dateEdit->date();
     request.quantity = quantitySpin->value();
+    request.giftQuantity = giftSpin ? giftSpin->value() : 0.0;
     request.handlerName = handlerEdit->text().trimmed();
     request.notes = notesEdit->toPlainText().trimmed();
     if (serialEdit) request.serialNumbers = parseSerialNumbers(serialEdit->toPlainText());
