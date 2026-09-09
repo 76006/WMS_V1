@@ -1,6 +1,8 @@
 #include "ui/pages/FinishedGoodsInPage.h"
 
 #include "services/InventoryService.h"
+#include "services/OfficeTemplateService.h"
+#include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/widgets/ComboBoxSearch.h"
 
 #include <QAbstractItemView>
@@ -312,6 +314,29 @@ void FinishedGoodsInPage::submit()
                              QStringLiteral("SN管理成品的数量必须是整数，且SN数量必须一致。"));
         return;
     }
+    StockMovementRequest line;
+    line.materialId = m_productMaterialId;
+    line.quantity = m_quantitySpin->value();
+    line.batchNo = m_runCombo->currentText().section(QStringLiteral(" - "), 0, 0).trimmed();
+    line.warehouseId = m_warehouseCombo->currentData().toLongLong();
+    line.locationId = m_locationCombo->currentData().toLongLong();
+    line.serialNumbers = serials;
+
+    OfficeTemplateDocument inboundForm;
+    inboundForm.kind = OfficeFormKind::FinishedGoodsInbound;
+    inboundForm.documentNumber = QStringLiteral("提交后自动生成");
+    inboundForm.documentDate = m_dateEdit->date();
+    inboundForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
+    QString formError;
+    inboundForm.lines = OfficeTemplateService::materialLines(m_database, {line}, &formError);
+    if (inboundForm.lines.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("无法填写成品入库单模板"), formError);
+        return;
+    }
+    DocumentTemplateDialog inboundDialog(inboundForm, this);
+    if (inboundDialog.exec() != QDialog::Accepted) return;
+    inboundForm = inboundDialog.document();
+
     const double afterReceipt = m_receivedQuantity + m_quantitySpin->value();
     QString confirmation = QStringLiteral("确认本次成品入库 %1？库存将立即增加并生成流水。")
                                .arg(m_quantitySpin->value(), 0, 'g', 12);
@@ -324,12 +349,6 @@ void FinishedGoodsInPage::submit()
         return;
     }
 
-    StockMovementRequest line;
-    line.materialId = m_productMaterialId;
-    line.quantity = m_quantitySpin->value();
-    line.warehouseId = m_warehouseCombo->currentData().toLongLong();
-    line.locationId = m_locationCombo->currentData().toLongLong();
-    line.serialNumbers = serials;
     StockDocumentRequest document;
     document.documentType = QStringLiteral("CPRK");
     document.documentDate = m_dateEdit->date();
@@ -349,8 +368,19 @@ void FinishedGoodsInPage::submit()
         QMessageBox::warning(this, QStringLiteral("成品入库失败"), error);
         return;
     }
-    QMessageBox::information(this, QStringLiteral("成品入库完成"),
-                             QStringLiteral("成品入库单 %1 已生效。").arg(posted.documentNumber));
+    inboundForm.documentNumber = posted.documentNumber;
+    if (OfficeTemplateService::attachToDocument(inboundForm, m_database, m_session.userId,
+                                                posted.documentId, &formError)) {
+        QMessageBox::information(
+            this, QStringLiteral("成品入库完成"),
+            QStringLiteral("成品入库单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单\\成品入库单”，并已自动打开。")
+                .arg(posted.documentNumber));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("成品入库已完成，但模板处理未全部完成"),
+            QStringLiteral("成品入库单 %1 已生效，但以下保存或打开步骤未完成：\n\n%2")
+                .arg(posted.documentNumber, formError));
+    }
     resetSubmissionToken();
     m_serialEdit->clear();
     m_notesEdit->clear();

@@ -5,12 +5,14 @@
 #include "services/InventoryService.h"
 #include "services/MaterialCodeService.h"
 #include "ui/dialogs/MaterialDialog.h"
+#include "ui/widgets/ComboBoxSearch.h"
 #include "ui/widgets/TableExcelExport.h"
 
 #include <QComboBox>
 #include <QCheckBox>
 #include <QBrush>
 #include <QColor>
+#include <QDateEdit>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -20,6 +22,8 @@
 #include <QFont>
 #include <QFrame>
 #include <QFormLayout>
+#include <QGridLayout>
+#include <QGroupBox>
 #include <QHeaderView>
 #include <QHash>
 #include <QHBoxLayout>
@@ -30,6 +34,7 @@
 #include <QMessageBox>
 #include <QMap>
 #include <QPushButton>
+#include <QPixmap>
 #include <QScreen>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -43,6 +48,8 @@
 #include <QUuid>
 #include <QVBoxLayout>
 
+#include <cmath>
+#include <functional>
 #include <utility>
 
 namespace {
@@ -50,6 +57,123 @@ constexpr int BomMaterialIdRole = Qt::UserRole + 1;
 constexpr int BomItemIdRole = Qt::UserRole + 2;
 constexpr int BomCumulativeQuantityRole = Qt::UserRole + 3;
 constexpr int BomProductCodeRole = Qt::UserRole + 4;
+constexpr int BomLookupCodeRole = Qt::UserRole + 20;
+constexpr int BomLookupNameRole = Qt::UserRole + 21;
+constexpr int BomLookupSpecificationRole = Qt::UserRole + 22;
+constexpr int BomLookupCategoryRole = Qt::UserRole + 23;
+constexpr int BomLookupUnitRole = Qt::UserRole + 24;
+constexpr int BomLookupProcessingRole = Qt::UserRole + 25;
+constexpr int BomLookupActiveRole = Qt::UserRole + 26;
+
+void loadBomMaterialOptions(QSqlDatabase database, QComboBox *comboBox,
+                            qlonglong productId, qlonglong currentMaterialId = 0)
+{
+    comboBox->clear();
+    QSqlQuery materials(database);
+    materials.prepare(QStringLiteral(
+        "SELECT m.id,m.code,m.name,m.specification,COALESCE(c.name,''),m.unit,"
+        "m.processing_method,m.is_active FROM materials m "
+        "LEFT JOIN material_categories c ON c.id=m.category_id "
+        "WHERE m.id<>? AND COALESCE(c.code,'')<>'FINISHED' "
+        "AND (m.is_active=1 OR m.id=?) ORDER BY m.code"));
+    materials.addBindValue(productId);
+    materials.addBindValue(currentMaterialId);
+    if (!materials.exec()) return;
+
+    while (materials.next()) {
+        QString label = QStringLiteral("%1 - %2")
+                            .arg(materials.value(1).toString(), materials.value(2).toString());
+        const QString specification = materials.value(3).toString().trimmed();
+        if (!specification.isEmpty()) label += QStringLiteral("（%1）").arg(specification);
+        if (!materials.value(7).toBool()) label += QStringLiteral("（已停用）");
+        const int index = comboBox->count();
+        comboBox->addItem(label, materials.value(0));
+        comboBox->setItemData(index, materials.value(1), BomLookupCodeRole);
+        comboBox->setItemData(index, materials.value(2), BomLookupNameRole);
+        comboBox->setItemData(index, materials.value(3), BomLookupSpecificationRole);
+        comboBox->setItemData(index, materials.value(4), BomLookupCategoryRole);
+        comboBox->setItemData(index, materials.value(5), BomLookupUnitRole);
+        comboBox->setItemData(index, materials.value(6), BomLookupProcessingRole);
+        comboBox->setItemData(index, materials.value(7), BomLookupActiveRole);
+    }
+}
+
+int resolveBomMaterialIndex(const QComboBox *comboBox)
+{
+    if (!comboBox) return -1;
+    const QString keyword = comboBox->currentText().trimmed();
+    if (keyword.isEmpty()) return -1;
+
+    const int currentIndex = comboBox->currentIndex();
+    if (currentIndex >= 0
+        && keyword.compare(comboBox->itemText(currentIndex), Qt::CaseInsensitive) == 0) {
+        return currentIndex;
+    }
+
+    for (int index = 0; index < comboBox->count(); ++index) {
+        if (keyword.compare(comboBox->itemData(index, BomLookupCodeRole).toString(),
+                            Qt::CaseInsensitive) == 0) {
+            return index;
+        }
+    }
+
+    int matchedIndex = -1;
+    int matchCount = 0;
+    for (int index = 0; index < comboBox->count(); ++index) {
+        const QStringList searchable = {
+            comboBox->itemData(index, BomLookupCodeRole).toString(),
+            comboBox->itemData(index, BomLookupNameRole).toString(),
+            comboBox->itemData(index, BomLookupSpecificationRole).toString(),
+            comboBox->itemData(index, BomLookupCategoryRole).toString(),
+            comboBox->itemData(index, BomLookupProcessingRole).toString()
+        };
+        bool matched = false;
+        for (const QString &value : searchable) {
+            if (value.contains(keyword, Qt::CaseInsensitive)) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) continue;
+        matchedIndex = index;
+        ++matchCount;
+    }
+    return matchCount == 1 ? matchedIndex : -1;
+}
+
+void updateBomMaterialSummary(const QComboBox *comboBox, QLabel *summaryLabel)
+{
+    const int index = resolveBomMaterialIndex(comboBox);
+    if (index < 0) {
+        const QString text = QStringLiteral(
+            "请输入完整物料号，或输入名称/规格关键词后从候选项中选择。");
+        summaryLabel->setText(text);
+        summaryLabel->setToolTip(text);
+        return;
+    }
+    const QString text =
+        QStringLiteral("已识别：%1 - %2\n规格：%3｜类别：%4｜单位：%5｜加工方式：%6｜状态：%7")
+            .arg(comboBox->itemData(index, BomLookupCodeRole).toString(),
+                 comboBox->itemData(index, BomLookupNameRole).toString(),
+                 comboBox->itemData(index, BomLookupSpecificationRole).toString(),
+                 comboBox->itemData(index, BomLookupCategoryRole).toString(),
+                 comboBox->itemData(index, BomLookupUnitRole).toString(),
+                 comboBox->itemData(index, BomLookupProcessingRole).toString(),
+                 comboBox->itemData(index, BomLookupActiveRole).toBool()
+                     ? QStringLiteral("正常") : QStringLiteral("停用"));
+    summaryLabel->setText(text);
+    summaryLabel->setToolTip(text);
+}
+
+void configureBomMaterialSummary(QLabel *summaryLabel)
+{
+    summaryLabel->setObjectName(QStringLiteral("mutedText"));
+    summaryLabel->setWordWrap(true);
+    summaryLabel->setMinimumHeight(64);
+    summaryLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    summaryLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    summaryLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
+}
 }
 
 MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *parent)
@@ -75,6 +199,7 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     m_addButton = new QPushButton(QStringLiteral("新增物料"), this);
     m_addButton->setProperty("primary", true);
     m_editButton = new QPushButton(QStringLiteral("编辑"), this);
+    m_editStockButton = new QPushButton(QStringLiteral("编辑库存"), this);
     m_deleteButton = new QPushButton(QStringLiteral("删除物料"), this);
     m_batchEditButton = new QPushButton(QStringLiteral("批量编辑"), this);
     m_importButton = new QPushButton(QStringLiteral("导入Excel"), this);
@@ -83,6 +208,7 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     const bool canEdit = m_session.canManageMaterials();
     m_addButton->setEnabled(canEdit);
     m_editButton->setEnabled(canEdit);
+    m_editStockButton->setEnabled(m_session.canManageWarehouse());
     m_deleteButton->setEnabled(canEdit);
     m_batchEditButton->setEnabled(canEdit);
     m_importButton->setEnabled(canEdit);
@@ -95,6 +221,8 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
         m_importButton->setToolTip(m_addButton->toolTip());
         m_projectButton->setToolTip(m_addButton->toolTip());
     }
+    if (!m_session.canManageWarehouse())
+        m_editStockButton->setToolTip(QStringLiteral("当前角色没有库存调整权限"));
     toolbar->addWidget(m_searchEdit, 1);
     toolbar->addWidget(m_categoryCombo);
     toolbar->addWidget(m_statusCombo);
@@ -102,6 +230,7 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     toolbar->addSpacing(14);
     toolbar->addWidget(m_addButton);
     toolbar->addWidget(m_editButton);
+    toolbar->addWidget(m_editStockButton);
     toolbar->addWidget(m_deleteButton);
     toolbar->addWidget(m_batchEditButton);
     toolbar->addWidget(m_importButton);
@@ -145,26 +274,33 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     bomToolbar->addWidget(m_bomProductCombo, 1);
     m_importBomButton = new QPushButton(QStringLiteral("导入BOM"), bomPanel);
     m_importBomButton->setProperty("primary", true);
+    m_viewBomMaterialButton = new QPushButton(QStringLiteral("查看物料详情"), bomPanel);
+    m_viewBomMaterialButton->setEnabled(false);
     m_addBomChildButton = new QPushButton(QStringLiteral("添加下级"), bomPanel);
-    m_editBomQuantityButton = new QPushButton(QStringLiteral("修改用量"), bomPanel);
-    m_removeBomItemButton = new QPushButton(QStringLiteral("移除节点"), bomPanel);
+    m_editBomQuantityButton = new QPushButton(QStringLiteral("调整选中节点"), bomPanel);
+    m_removeBomItemButton = new QPushButton(QStringLiteral("删除选中节点"), bomPanel);
+    m_clearBomButton = new QPushButton(QStringLiteral("清空整棵BOM"), bomPanel);
+    m_clearBomButton->setProperty("danger", true);
     auto *expandButton = new QPushButton(QStringLiteral("全部展开"), bomPanel);
     auto *collapseButton = new QPushButton(QStringLiteral("全部折叠"), bomPanel);
     for (QPushButton *button : {m_importBomButton, m_addBomChildButton,
-                                m_editBomQuantityButton, m_removeBomItemButton}) {
+                                m_editBomQuantityButton, m_removeBomItemButton,
+                                m_clearBomButton}) {
         button->setEnabled(canEdit);
         if (!canEdit) button->setToolTip(QStringLiteral("当前角色没有物料维护权限"));
     }
     bomToolbar->addWidget(m_importBomButton);
+    bomToolbar->addWidget(m_viewBomMaterialButton);
     bomToolbar->addWidget(m_addBomChildButton);
     bomToolbar->addWidget(m_editBomQuantityButton);
     bomToolbar->addWidget(m_removeBomItemButton);
+    bomToolbar->addWidget(m_clearBomButton);
     bomToolbar->addWidget(expandButton);
     bomToolbar->addWidget(collapseButton);
     bomLayout->addLayout(bomToolbar);
 
     auto *bomHint = new QLabel(
-        QStringLiteral("BOM按成品、半成品、原材料和辅料分层显示。节点用量为相对上级用量，累计用量为生产1台成品所需数量。"),
+        QStringLiteral("BOM按成品、半成品、原材料和辅料分层显示。选中任意物料后可查看完整档案和库存批次；有维护权限时还可添加下级、调整节点或删除子树。成品根节点的用量固定为1。"),
         bomPanel);
     bomHint->setObjectName(QStringLiteral("mutedText"));
     bomHint->setWordWrap(true);
@@ -193,6 +329,7 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     connect(m_statusCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MaterialPage::refresh);
     connect(m_addButton, &QPushButton::clicked, this, &MaterialPage::addMaterial);
     connect(m_editButton, &QPushButton::clicked, this, &MaterialPage::editMaterial);
+    connect(m_editStockButton, &QPushButton::clicked, this, &MaterialPage::editStock);
     connect(m_deleteButton, &QPushButton::clicked, this, &MaterialPage::deleteMaterials);
     connect(m_batchEditButton, &QPushButton::clicked, this, &MaterialPage::batchEditMaterials);
     connect(m_importButton, &QPushButton::clicked, this, &MaterialPage::importMaterials);
@@ -201,25 +338,26 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     connect(m_bomProductCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MaterialPage::refreshBomTree);
     connect(m_importBomButton, &QPushButton::clicked, this, &MaterialPage::importBom);
+    connect(m_viewBomMaterialButton, &QPushButton::clicked,
+            this, &MaterialPage::viewBomMaterialDetails);
     connect(m_addBomChildButton, &QPushButton::clicked, this, &MaterialPage::addBomChild);
     connect(m_editBomQuantityButton, &QPushButton::clicked,
             this, &MaterialPage::editBomQuantity);
     connect(m_removeBomItemButton, &QPushButton::clicked, this, &MaterialPage::removeBomItem);
+    connect(m_clearBomButton, &QPushButton::clicked, this, &MaterialPage::clearBom);
     connect(expandButton, &QPushButton::clicked, m_bomTree, &QTreeWidget::expandAll);
     connect(collapseButton, &QPushButton::clicked, m_bomTree, &QTreeWidget::collapseAll);
     connect(m_table, &QTableView::doubleClicked, this, [this] {
         if (m_session.canManageMaterials()) editMaterial();
     });
     connect(m_bomTree, &QTreeWidget::itemDoubleClicked, this,
-            [this](QTreeWidgetItem *, int) {
-                if (m_session.canManageMaterials()) editMaterial();
-            });
+            [this](QTreeWidgetItem *, int) { viewBomMaterialDetails(); });
     connect(m_bomTree, &QTreeWidget::itemSelectionChanged, this, [this, canEdit] {
         const QTreeWidgetItem *item = m_bomTree->currentItem();
-        const bool isBomItem = item && item->data(0, BomItemIdRole).toLongLong() > 0;
+        m_viewBomMaterialButton->setEnabled(item);
         m_addBomChildButton->setEnabled(canEdit && item);
-        m_editBomQuantityButton->setEnabled(canEdit && isBomItem);
-        m_removeBomItemButton->setEnabled(canEdit && isBomItem);
+        m_editBomQuantityButton->setEnabled(canEdit && item);
+        m_removeBomItemButton->setEnabled(canEdit && item);
     });
     loadCategories();
     refresh();
@@ -323,8 +461,10 @@ void MaterialPage::refreshBomTree()
     const qlonglong productId = m_bomProductCombo->currentData().toLongLong();
     const bool canEdit = m_session.canManageMaterials();
     m_addBomChildButton->setEnabled(false);
+    m_viewBomMaterialButton->setEnabled(false);
     m_editBomQuantityButton->setEnabled(false);
     m_removeBomItemButton->setEnabled(false);
+    m_clearBomButton->setEnabled(false);
     if (productId <= 0) return;
 
     QSqlQuery product(m_database);
@@ -389,6 +529,188 @@ void MaterialPage::refreshBomTree()
     rootItem->setExpanded(true);
     m_bomTree->setCurrentItem(rootItem);
     m_addBomChildButton->setEnabled(canEdit);
+    m_viewBomMaterialButton->setEnabled(true);
+    m_editBomQuantityButton->setEnabled(canEdit);
+    m_removeBomItemButton->setEnabled(canEdit);
+    m_clearBomButton->setEnabled(canEdit && !itemById.isEmpty());
+}
+
+void MaterialPage::viewBomMaterialDetails()
+{
+    const QTreeWidgetItem *selectedItem = m_bomTree->currentItem();
+    const qlonglong materialId = selectedItem
+        ? selectedItem->data(0, BomMaterialIdRole).toLongLong() : 0;
+    if (materialId <= 0) {
+        QMessageBox::information(this, QStringLiteral("请选择物料"),
+                                 QStringLiteral("请先在BOM中选择需要查看的物料。"));
+        return;
+    }
+
+    QSqlQuery material(m_database);
+    material.prepare(QStringLiteral(
+        "SELECT m.code,m.name,m.specification,COALESCE(c.name,''),m.brand,m.unit,"
+        "m.unit_usage,m.processing_method,m.minimum_stock,COALESCE(w.code,''),"
+        "COALESCE(w.name,''),COALESCE(l.code,''),COALESCE(l.name,''),"
+        "m.require_batch,m.require_serial,m.notes,m.is_active,m.created_at,m.updated_at,"
+        "COALESCE((SELECT SUM(s.quantity) FROM stock_balances s WHERE s.material_id=m.id),0) "
+        "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
+        "LEFT JOIN warehouses w ON w.id=m.default_warehouse_id "
+        "LEFT JOIN locations l ON l.id=m.default_location_id WHERE m.id=?"));
+    material.addBindValue(materialId);
+    if (!material.exec() || !material.next()) {
+        const QString error = material.lastError().text().isEmpty()
+            ? QStringLiteral("该物料已不存在，请刷新后重试。")
+            : material.lastError().text();
+        QMessageBox::warning(this, QStringLiteral("读取物料失败"), error);
+        return;
+    }
+
+    const auto displayValue = [](const QString &value) {
+        return value.trimmed().isEmpty() ? QStringLiteral("未设置") : value.trimmed();
+    };
+    const auto codeAndName = [&displayValue](const QString &code, const QString &name) {
+        if (code.trimmed().isEmpty()) return QStringLiteral("未设置");
+        return name.trimmed().isEmpty() ? code.trimmed()
+                                        : QStringLiteral("%1 - %2").arg(code.trimmed(), name.trimmed());
+    };
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("物料详情 - %1").arg(material.value(0).toString()));
+    dialog.setWindowFlag(Qt::WindowMaximizeButtonHint, true);
+    dialog.resize(1120, 720);
+    auto *layout = new QVBoxLayout(&dialog);
+
+    auto *heading = new QLabel(
+        QStringLiteral("%1 - %2").arg(material.value(0).toString(), material.value(1).toString()),
+        &dialog);
+    heading->setStyleSheet(QStringLiteral("font-size:18px;font-weight:600;"));
+    heading->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(heading);
+
+    auto *profileBox = new QGroupBox(QStringLiteral("物料完整档案"), &dialog);
+    auto *profileLayout = new QHBoxLayout(profileBox);
+    auto *fieldWidget = new QWidget(profileBox);
+    auto *fields = new QGridLayout(fieldWidget);
+    fields->setColumnStretch(1, 1);
+    fields->setColumnStretch(3, 1);
+    const auto addField = [fields, fieldWidget](int row, int pairColumn,
+                                                const QString &caption, const QString &value) {
+        const int column = pairColumn * 2;
+        auto *captionLabel = new QLabel(caption + QStringLiteral("："), fieldWidget);
+        captionLabel->setStyleSheet(QStringLiteral("font-weight:600;"));
+        auto *valueLabel = new QLabel(value, fieldWidget);
+        valueLabel->setWordWrap(true);
+        valueLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        fields->addWidget(captionLabel, row, column, Qt::AlignTop);
+        fields->addWidget(valueLabel, row, column + 1);
+    };
+    addField(0, 0, QStringLiteral("物料编码"), material.value(0).toString());
+    addField(0, 1, QStringLiteral("物料名称"), material.value(1).toString());
+    addField(1, 0, QStringLiteral("规格型号"), displayValue(material.value(2).toString()));
+    addField(1, 1, QStringLiteral("物料类别"), displayValue(material.value(3).toString()));
+    addField(2, 0, QStringLiteral("品牌"), displayValue(material.value(4).toString()));
+    addField(2, 1, QStringLiteral("单位"), material.value(5).toString());
+    addField(3, 0, QStringLiteral("单台用量"),
+             QString::number(material.value(6).toDouble(), 'g', 12));
+    addField(3, 1, QStringLiteral("加工方式"), displayValue(material.value(7).toString()));
+    addField(4, 0, QStringLiteral("当前总库存"),
+             QString::number(material.value(19).toDouble(), 'g', 12));
+    addField(4, 1, QStringLiteral("最低库存"),
+             QString::number(material.value(8).toDouble(), 'g', 12));
+    addField(5, 0, QStringLiteral("物料状态"),
+             material.value(16).toBool() ? QStringLiteral("正常") : QStringLiteral("停用"));
+    addField(5, 1, QStringLiteral("默认仓库"),
+             codeAndName(material.value(9).toString(), material.value(10).toString()));
+    addField(6, 0, QStringLiteral("默认库位"),
+             codeAndName(material.value(11).toString(), material.value(12).toString()));
+    addField(6, 1, QStringLiteral("批次管理"),
+             material.value(13).toBool() ? QStringLiteral("是") : QStringLiteral("否"));
+    addField(7, 0, QStringLiteral("SN管理"),
+             material.value(14).toBool() ? QStringLiteral("是") : QStringLiteral("否"));
+    addField(7, 1, QStringLiteral("创建时间"), displayValue(material.value(17).toString()));
+    addField(8, 0, QStringLiteral("更新时间"), displayValue(material.value(18).toString()));
+    addField(8, 1, QStringLiteral("备注"), displayValue(material.value(15).toString()));
+    profileLayout->addWidget(fieldWidget, 1);
+
+    auto *imageBox = new QGroupBox(QStringLiteral("物料图片"), profileBox);
+    auto *imageLayout = new QVBoxLayout(imageBox);
+    auto *imageLabel = new QLabel(QStringLiteral("暂无图片"), imageBox);
+    imageLabel->setAlignment(Qt::AlignCenter);
+    imageLabel->setMinimumSize(190, 150);
+    imageLabel->setMaximumSize(240, 190);
+    imageLabel->setFrameShape(QFrame::StyledPanel);
+    auto *imageName = new QLabel(imageBox);
+    imageName->setAlignment(Qt::AlignCenter);
+    imageName->setWordWrap(true);
+    QSqlQuery imageQuery(m_database);
+    imageQuery.prepare(QStringLiteral(
+        "SELECT original_file_name,image_data FROM material_images WHERE material_id=?"));
+    imageQuery.addBindValue(materialId);
+    if (imageQuery.exec() && imageQuery.next()) {
+        QPixmap pixmap;
+        if (pixmap.loadFromData(imageQuery.value(1).toByteArray())) {
+            imageLabel->setText({});
+            imageLabel->setPixmap(pixmap.scaled(imageLabel->maximumSize(), Qt::KeepAspectRatio,
+                                                Qt::SmoothTransformation));
+            imageName->setText(imageQuery.value(0).toString());
+        }
+    }
+    imageLayout->addWidget(imageLabel, 1);
+    imageLayout->addWidget(imageName);
+    profileLayout->addWidget(imageBox);
+    layout->addWidget(profileBox);
+
+    auto *stockTitle = new QLabel(QStringLiteral("分仓、分库位、分批次库存"), &dialog);
+    stockTitle->setStyleSheet(QStringLiteral("font-size:15px;font-weight:600;"));
+    layout->addWidget(stockTitle);
+    auto *stockTable = new QTableWidget(0, 7, &dialog);
+    stockTable->setHorizontalHeaderLabels({
+        QStringLiteral("仓库"), QStringLiteral("库位"), QStringLiteral("批次"),
+        QStringLiteral("供应商"), QStringLiteral("库存数量"), QStringLiteral("首次入库时间"),
+        QStringLiteral("库存更新时间")});
+    stockTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    stockTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    stockTable->setAlternatingRowColors(true);
+    stockTable->verticalHeader()->hide();
+    QSqlQuery stockQuery(m_database);
+    stockQuery.prepare(QStringLiteral(
+        "SELECT w.code,w.name,l.code,l.name,s.batch_no,COALESCE(b.supplier,''),"
+        "s.quantity,COALESCE(b.first_in_at,''),s.updated_at "
+        "FROM stock_balances s JOIN warehouses w ON w.id=s.warehouse_id "
+        "JOIN locations l ON l.id=s.location_id "
+        "LEFT JOIN batches b ON b.material_id=s.material_id AND b.batch_no=s.batch_no "
+        "WHERE s.material_id=? ORDER BY w.code,l.code,s.batch_no"));
+    stockQuery.addBindValue(materialId);
+    if (stockQuery.exec()) {
+        while (stockQuery.next()) {
+            const int row = stockTable->rowCount();
+            stockTable->insertRow(row);
+            const QStringList values = {
+                codeAndName(stockQuery.value(0).toString(), stockQuery.value(1).toString()),
+                codeAndName(stockQuery.value(2).toString(), stockQuery.value(3).toString()),
+                stockQuery.value(4).toString().trimmed().isEmpty()
+                    ? QStringLiteral("无批次") : stockQuery.value(4).toString(),
+                stockQuery.value(5).toString().trimmed().isEmpty()
+                    ? QStringLiteral("未记录") : stockQuery.value(5).toString(),
+                QString::number(stockQuery.value(6).toDouble(), 'g', 12),
+                displayValue(stockQuery.value(7).toString()),
+                displayValue(stockQuery.value(8).toString())
+            };
+            for (int column = 0; column < values.size(); ++column)
+                stockTable->setItem(row, column, new QTableWidgetItem(values.at(column)));
+        }
+    }
+    stockTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    stockTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    if (stockTable->rowCount() == 0)
+        stockTitle->setText(QStringLiteral("分仓、分库位、分批次库存（暂无库存记录）"));
+    layout->addWidget(stockTable, 1);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.exec();
 }
 
 qlonglong MaterialPage::selectedMaterialId() const
@@ -446,6 +768,343 @@ void MaterialPage::editMaterial()
     }
 }
 
+void MaterialPage::editStock()
+{
+    if (!m_session.canManageWarehouse()) return;
+    const qlonglong materialId = selectedMaterialId();
+    if (materialId <= 0) {
+        QMessageBox::information(this, QStringLiteral("请选择物料"),
+                                 QStringLiteral("请先在BOM或物料清单中选择一条物料。"));
+        return;
+    }
+
+    QSqlQuery material(m_database);
+    material.prepare(QStringLiteral(
+        "SELECT code,name,require_batch,require_serial,is_active,"
+        "default_warehouse_id,default_location_id FROM materials WHERE id=?"));
+    material.addBindValue(materialId);
+    if (!material.exec() || !material.next()) {
+        QMessageBox::warning(this, QStringLiteral("读取失败"),
+                             material.lastError().text().isEmpty()
+                                 ? QStringLiteral("所选物料已不存在。")
+                                 : material.lastError().text());
+        return;
+    }
+    const QString materialCode = material.value(0).toString();
+    const QString materialName = material.value(1).toString();
+    const bool requireBatch = material.value(2).toBool();
+    const bool requireSerial = material.value(3).toBool();
+    const bool isActive = material.value(4).toBool();
+    const qlonglong defaultWarehouseId = material.value(5).toLongLong();
+    const qlonglong defaultLocationId = material.value(6).toLongLong();
+    if (!isActive) {
+        QMessageBox::warning(this, QStringLiteral("不能编辑库存"),
+                             QStringLiteral("该物料已停用，请先恢复为正常状态。"));
+        return;
+    }
+    if (requireSerial) {
+        QMessageBox::information(
+            this, QStringLiteral("SN物料需同步调整SN"),
+            QStringLiteral("该物料启用了SN管理，不能只修改库存数字。请通过入库管理或出库管理同步录入具体SN。"));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("编辑库存 - %1").arg(materialCode));
+    dialog.resize(820, 640);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *heading = new QLabel(
+        QStringLiteral("%1 - %2").arg(materialCode, materialName), &dialog);
+    heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
+    layout->addWidget(heading);
+    auto *hint = new QLabel(
+        QStringLiteral("可直接把指定仓库、库位和批次的库存改为目标数量。保存后系统自动生成盘点调整单和库存流水，不会覆盖历史记录。"),
+        &dialog);
+    hint->setObjectName(QStringLiteral("mutedText"));
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    auto *form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    auto *warehouseCombo = new QComboBox(&dialog);
+    auto *locationCombo = new QComboBox(&dialog);
+    auto *batchCombo = new QComboBox(&dialog);
+    batchCombo->setEditable(requireBatch);
+    batchCombo->setInsertPolicy(QComboBox::NoInsert);
+    if (requireBatch)
+        batchCombo->lineEdit()->setPlaceholderText(QStringLiteral("选择已有批次或输入新批次"));
+    auto *supplierEdit = new QLineEdit(&dialog);
+    supplierEdit->setEnabled(requireBatch);
+    supplierEdit->setPlaceholderText(requireBatch
+        ? QStringLiteral("批次供应商，可不填") : QStringLiteral("未启用批次管理"));
+    auto *currentLabel = new QLabel(QStringLiteral("0"), &dialog);
+    currentLabel->setStyleSheet(QStringLiteral("font-weight:600;"));
+    auto *targetSpin = new QDoubleSpinBox(&dialog);
+    targetSpin->setDecimals(6);
+    targetSpin->setRange(0.0, 999999999999.0);
+    auto *reasonEdit = new QLineEdit(QStringLiteral("物料维护直接编辑库存"), &dialog);
+    auto *dateEdit = new QDateEdit(QDate::currentDate(), &dialog);
+    dateEdit->setCalendarPopup(true);
+    dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    form->addRow(QStringLiteral("仓库 *"), warehouseCombo);
+    form->addRow(QStringLiteral("库位 *"), locationCombo);
+    form->addRow(QStringLiteral("批次%1").arg(requireBatch ? QStringLiteral(" *") : QString()),
+                 batchCombo);
+    form->addRow(QStringLiteral("供应商"), supplierEdit);
+    form->addRow(QStringLiteral("当前库存"), currentLabel);
+    form->addRow(QStringLiteral("目标库存 *"), targetSpin);
+    form->addRow(QStringLiteral("调整原因 *"), reasonEdit);
+    form->addRow(QStringLiteral("调整日期 *"), dateEdit);
+    layout->addLayout(form);
+
+    auto *stockTitle = new QLabel(QStringLiteral("现有库存位置（双击可载入编辑）"), &dialog);
+    stockTitle->setStyleSheet(QStringLiteral("font-weight:600;"));
+    layout->addWidget(stockTitle);
+    auto *stockTable = new QTableWidget(0, 5, &dialog);
+    stockTable->setHorizontalHeaderLabels({QStringLiteral("仓库"), QStringLiteral("库位"),
+        QStringLiteral("批次"), QStringLiteral("供应商"), QStringLiteral("库存数量")});
+    stockTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    stockTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    stockTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    stockTable->setAlternatingRowColors(true);
+    stockTable->verticalHeader()->hide();
+    stockTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    stockTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    QSqlQuery stockRows(m_database);
+    stockRows.prepare(QStringLiteral(
+        "SELECT s.warehouse_id,w.code,s.location_id,l.code,s.batch_no,"
+        "COALESCE(b.supplier,''),s.quantity FROM stock_balances s "
+        "JOIN warehouses w ON w.id=s.warehouse_id JOIN locations l ON l.id=s.location_id "
+        "LEFT JOIN batches b ON b.material_id=s.material_id AND b.batch_no=s.batch_no "
+        "WHERE s.material_id=? ORDER BY w.code,l.code,s.batch_no"));
+    stockRows.addBindValue(materialId);
+    if (stockRows.exec()) {
+        while (stockRows.next()) {
+            const int row = stockTable->rowCount();
+            stockTable->insertRow(row);
+            auto *warehouseItem = new QTableWidgetItem(stockRows.value(1).toString());
+            warehouseItem->setData(Qt::UserRole, stockRows.value(0));
+            warehouseItem->setData(Qt::UserRole + 1, stockRows.value(2));
+            warehouseItem->setData(Qt::UserRole + 2, stockRows.value(4));
+            stockTable->setItem(row, 0, warehouseItem);
+            stockTable->setItem(row, 1, new QTableWidgetItem(stockRows.value(3).toString()));
+            stockTable->setItem(row, 2, new QTableWidgetItem(
+                stockRows.value(4).toString().isEmpty()
+                    ? QStringLiteral("无批次") : stockRows.value(4).toString()));
+            stockTable->setItem(row, 3, new QTableWidgetItem(stockRows.value(5).toString()));
+            stockTable->setItem(row, 4, new QTableWidgetItem(
+                QString::number(stockRows.value(6).toDouble(), 'g', 12)));
+        }
+    }
+    if (stockTable->rowCount() == 0)
+        stockTitle->setText(QStringLiteral("现有库存位置：暂无，可在上方选择位置后新增库存"));
+    layout->addWidget(stockTable, 1);
+
+    std::function<void()> refreshCurrentStock;
+    std::function<void()> loadBatches;
+    std::function<void()> loadLocations;
+    const auto selectedBatch = [batchCombo, requireBatch] {
+        return requireBatch ? batchCombo->currentText().trimmed() : QStringLiteral("");
+    };
+    refreshCurrentStock = [this, materialId, warehouseCombo, locationCombo, batchCombo,
+                           supplierEdit, currentLabel, targetSpin, selectedBatch, requireBatch] {
+        double quantity = 0.0;
+        QString supplier;
+        if (warehouseCombo->currentIndex() >= 0 && locationCombo->currentIndex() >= 0) {
+            QSqlQuery current(m_database);
+            current.prepare(QStringLiteral(
+                "SELECT quantity FROM stock_balances WHERE material_id=? AND warehouse_id=? "
+                "AND location_id=? AND batch_no=?"));
+            current.addBindValue(materialId);
+            current.addBindValue(warehouseCombo->currentData());
+            current.addBindValue(locationCombo->currentData());
+            current.addBindValue(selectedBatch());
+            if (current.exec() && current.next()) quantity = current.value(0).toDouble();
+            if (requireBatch && !selectedBatch().isEmpty()) {
+                QSqlQuery batch(m_database);
+                batch.prepare(QStringLiteral(
+                    "SELECT supplier FROM batches WHERE material_id=? AND batch_no=?"));
+                batch.addBindValue(materialId);
+                batch.addBindValue(selectedBatch());
+                if (batch.exec() && batch.next()) supplier = batch.value(0).toString();
+            }
+        }
+        currentLabel->setText(QString::number(quantity, 'g', 12));
+        targetSpin->setValue(quantity);
+        targetSpin->setProperty("systemQuantity", quantity);
+        supplierEdit->setText(supplier);
+        supplierEdit->setProperty("originalSupplier", supplier);
+        batchCombo->setToolTip(requireBatch && selectedBatch().isEmpty()
+            ? QStringLiteral("该物料必须填写批次号") : QString());
+    };
+    loadBatches = [this, materialId, locationCombo, warehouseCombo, batchCombo, requireBatch,
+                   refreshCurrentStock] {
+        const QString previous = requireBatch ? batchCombo->currentText().trimmed() : QString();
+        batchCombo->blockSignals(true);
+        batchCombo->clear();
+        if (requireBatch && warehouseCombo->currentIndex() >= 0
+            && locationCombo->currentIndex() >= 0) {
+            QSqlQuery batches(m_database);
+            batches.prepare(QStringLiteral(
+                "SELECT DISTINCT batch_no FROM stock_balances WHERE material_id=? "
+                "AND warehouse_id=? AND location_id=? AND batch_no<>'' ORDER BY batch_no"));
+            batches.addBindValue(materialId);
+            batches.addBindValue(warehouseCombo->currentData());
+            batches.addBindValue(locationCombo->currentData());
+            if (batches.exec()) {
+                while (batches.next()) batchCombo->addItem(batches.value(0).toString());
+            }
+            if (!previous.isEmpty()) batchCombo->setEditText(previous);
+            else if (batchCombo->count() == 0) batchCombo->setEditText(QStringLiteral(""));
+        } else {
+            batchCombo->addItem(QStringLiteral("无批次"), QStringLiteral(""));
+            batchCombo->setCurrentIndex(0);
+        }
+        batchCombo->blockSignals(false);
+        refreshCurrentStock();
+    };
+    loadLocations = [this, warehouseCombo, locationCombo, defaultLocationId, loadBatches] {
+        const qlonglong previous = locationCombo->currentData().toLongLong();
+        locationCombo->blockSignals(true);
+        locationCombo->clear();
+        QSqlQuery locations(m_database);
+        locations.prepare(QStringLiteral(
+            "SELECT id,code,name FROM locations WHERE warehouse_id=? AND is_active=1 ORDER BY code"));
+        locations.addBindValue(warehouseCombo->currentData());
+        if (locations.exec()) {
+            while (locations.next()) {
+                const QString name = locations.value(2).toString();
+                locationCombo->addItem(name.isEmpty() ? locations.value(1).toString()
+                    : QStringLiteral("%1 - %2").arg(locations.value(1).toString(), name),
+                    locations.value(0));
+            }
+        }
+        int index = locationCombo->findData(previous > 0 ? previous : defaultLocationId);
+        if (index < 0 && locationCombo->count() > 0) index = 0;
+        locationCombo->setCurrentIndex(index);
+        locationCombo->blockSignals(false);
+        loadBatches();
+    };
+
+    QSqlQuery warehouses(m_database);
+    warehouses.exec(QStringLiteral(
+        "SELECT id,code,name FROM warehouses WHERE is_active=1 ORDER BY code"));
+    while (warehouses.next()) {
+        warehouseCombo->addItem(
+            QStringLiteral("%1 - %2").arg(warehouses.value(1).toString(),
+                                           warehouses.value(2).toString()),
+            warehouses.value(0));
+    }
+    int warehouseIndex = warehouseCombo->findData(defaultWarehouseId);
+    if (warehouseIndex < 0 && warehouseCombo->count() > 0) warehouseIndex = 0;
+    warehouseCombo->setCurrentIndex(warehouseIndex);
+    connect(warehouseCombo, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+            [loadLocations](int) { loadLocations(); });
+    connect(locationCombo, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+            [loadBatches](int) { loadBatches(); });
+    connect(batchCombo, &QComboBox::currentTextChanged, &dialog,
+            [refreshCurrentStock](const QString &) { refreshCurrentStock(); });
+    loadLocations();
+
+    connect(stockTable, &QTableWidget::cellDoubleClicked, &dialog,
+            [warehouseCombo, locationCombo, batchCombo, stockTable,
+             loadLocations, loadBatches, refreshCurrentStock, requireBatch](int row, int) {
+                const QTableWidgetItem *item = stockTable->item(row, 0);
+                if (!item) return;
+                const int warehouseIndex = warehouseCombo->findData(item->data(Qt::UserRole));
+                if (warehouseIndex >= 0) warehouseCombo->setCurrentIndex(warehouseIndex);
+                loadLocations();
+                const int locationIndex = locationCombo->findData(item->data(Qt::UserRole + 1));
+                if (locationIndex >= 0) locationCombo->setCurrentIndex(locationIndex);
+                loadBatches();
+                if (requireBatch) batchCombo->setEditText(item->data(Qt::UserRole + 2).toString());
+                refreshCurrentStock();
+            });
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel,
+                                         &dialog);
+    buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存库存"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked, &dialog,
+            [this, &dialog, materialId, materialCode, warehouseCombo, locationCombo, batchCombo,
+             supplierEdit, currentLabel, targetSpin, reasonEdit, dateEdit,
+             selectedBatch, requireBatch] {
+                if (warehouseCombo->currentIndex() < 0 || locationCombo->currentIndex() < 0) {
+                    QMessageBox::warning(&dialog, QStringLiteral("资料不完整"),
+                                         QStringLiteral("请选择有效的仓库和库位。"));
+                    return;
+                }
+                const QString batchNo = selectedBatch();
+                if (requireBatch && batchNo.isEmpty()) {
+                    QMessageBox::warning(&dialog, QStringLiteral("资料不完整"),
+                                         QStringLiteral("该物料启用了批次管理，必须填写批次号。"));
+                    batchCombo->setFocus();
+                    return;
+                }
+                const QString reason = reasonEdit->text().trimmed();
+                if (reason.isEmpty()) {
+                    QMessageBox::warning(&dialog, QStringLiteral("资料不完整"),
+                                         QStringLiteral("请填写库存调整原因。"));
+                    reasonEdit->setFocus();
+                    return;
+                }
+                const double systemQuantity = targetSpin->property("systemQuantity").toDouble();
+                const double targetQuantity = targetSpin->value();
+                const QString supplier = supplierEdit->text().trimmed();
+                const QString originalSupplier =
+                    supplierEdit->property("originalSupplier").toString().trimmed();
+                if (std::abs(targetQuantity - systemQuantity) <= 0.0000001
+                    && supplier == originalSupplier) {
+                    QMessageBox::information(&dialog, QStringLiteral("没有变化"),
+                                             QStringLiteral("库存数量和供应商均未发生变化。"));
+                    return;
+                }
+                if (QMessageBox::warning(
+                        &dialog, QStringLiteral("确认直接编辑库存"),
+                        QStringLiteral("确认将 %1 在当前位置%2的库存由 %3 修改为 %4？\n\n"
+                                       "系统将自动生成盘点调整单和库存流水。")
+                            .arg(materialCode,
+                                 batchNo.isEmpty() ? QString() : QStringLiteral("、批次 %1").arg(batchNo),
+                                 QString::number(systemQuantity, 'g', 12),
+                                 QString::number(targetQuantity, 'g', 12)),
+                        QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                    != QMessageBox::Yes) {
+                    return;
+                }
+                InventoryCountRequest request;
+                request.documentDate = dateEdit->date();
+                request.handlerName = m_session.displayName;
+                request.notes = reason;
+                request.submissionToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                InventoryCountLine line;
+                line.materialId = materialId;
+                line.warehouseId = warehouseCombo->currentData().toLongLong();
+                line.locationId = locationCombo->currentData().toLongLong();
+                line.batchNo = batchNo;
+                line.systemQuantity = systemQuantity;
+                line.actualQuantity = targetQuantity;
+                line.supplier = supplier.isEmpty() ? QStringLiteral("") : supplier;
+                line.differenceReason = reason;
+                request.lines.append(line);
+                InventoryService service(m_database, m_session.userId);
+                PostedDocument posted;
+                QString error;
+                if (!service.postInventoryCount(request, &posted, &error)) {
+                    QMessageBox::warning(&dialog, QStringLiteral("保存库存失败"), error);
+                    return;
+                }
+                dialog.accept();
+                emit dataChanged();
+                QMessageBox::information(
+                    this, QStringLiteral("库存已更新"),
+                    QStringLiteral("物料 %1 的库存已修改，调整单号：%2")
+                        .arg(materialCode, posted.documentNumber));
+            });
+    dialog.exec();
+}
+
 void MaterialPage::batchEditMaterials()
 {
     const QList<qlonglong> materialIds = selectedMaterialIds();
@@ -475,7 +1134,7 @@ void MaterialPage::batchEditMaterials()
     auto *processingApply = new QCheckBox(QStringLiteral("修改加工方式"), &dialog);
     auto *processingCombo = new QComboBox(&dialog);
     processingCombo->setEditable(true);
-    processingCombo->addItem(QStringLiteral("未设置"), QString());
+    processingCombo->addItem(QStringLiteral("未设置"), QStringLiteral(""));
     processingCombo->addItem(QStringLiteral("外购"), QStringLiteral("外购"));
     processingCombo->addItem(QStringLiteral("自制"), QStringLiteral("自制"));
     processingCombo->addItem(QStringLiteral("委外加工"), QStringLiteral("委外加工"));
@@ -535,8 +1194,10 @@ void MaterialPage::batchEditMaterials()
     }
     if (processingApply->isChecked()) {
         assignments.append(QStringLiteral("processing_method=?"));
-        values.append(processingCombo->currentText() == QStringLiteral("未设置")
-                          ? QString() : processingCombo->currentText().trimmed());
+        QString processingMethod = processingCombo->currentText().trimmed();
+        if (processingMethod.isEmpty() || processingMethod == QStringLiteral("未设置"))
+            processingMethod = QStringLiteral("");
+        values.append(processingMethod);
         changedFields.append(QStringLiteral("加工方式"));
     }
     if (unitApply->isChecked()) {
@@ -958,38 +1619,69 @@ void MaterialPage::addBomChild()
         return;
     }
 
-    QStringList labels;
-    QList<qlonglong> ids;
-    QSqlQuery materials(m_database);
-    materials.prepare(QStringLiteral(
-        "SELECT m.id,m.code,m.name FROM materials m "
-        "LEFT JOIN material_categories c ON c.id=m.category_id "
-        "WHERE m.is_active=1 AND m.id<>? AND COALESCE(c.code,'')<>'FINISHED' ORDER BY m.code"));
-    materials.addBindValue(productId);
-    if (materials.exec()) {
-        while (materials.next()) {
-            ids.append(materials.value(0).toLongLong());
-            labels.append(QStringLiteral("%1 - %2")
-                              .arg(materials.value(1).toString(), materials.value(2).toString()));
-        }
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("添加BOM下级"));
+    dialog.setMinimumWidth(620);
+    auto *dialogLayout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    auto *materialCombo = new QComboBox(&dialog);
+    ComboBoxSearch::enableContainsSearch(
+        materialCombo, QStringLiteral("输入物料号或名称/规格关键词"));
+    materialCombo->setMinimumWidth(460);
+    loadBomMaterialOptions(m_database, materialCombo, productId);
+    for (QTreeWidgetItem *ancestor = parentItem; ancestor; ancestor = ancestor->parent()) {
+        const qlonglong ancestorMaterialId = ancestor->data(0, BomMaterialIdRole).toLongLong();
+        const int ancestorIndex = materialCombo->findData(ancestorMaterialId);
+        if (ancestorIndex >= 0) materialCombo->removeItem(ancestorIndex);
     }
-    if (labels.isEmpty()) {
+    if (materialCombo->count() == 0) {
         QMessageBox::information(this, QStringLiteral("没有可选物料"),
                                  QStringLiteral("请先建立半成品、原材料或辅料档案。"));
         return;
     }
-    bool accepted = false;
-    const QString selected = QInputDialog::getItem(
-        this, QStringLiteral("添加BOM下级"), QStringLiteral("下级物料"),
-        labels, 0, false, &accepted);
-    if (!accepted) return;
-    const int selectedIndex = labels.indexOf(selected);
-    if (selectedIndex < 0) return;
-    const qlonglong componentId = ids.at(selectedIndex);
-    const double quantity = QInputDialog::getDouble(
-        this, QStringLiteral("添加BOM下级"), QStringLiteral("相对上级用量"),
-        1.0, 0.000001, 999999999999.0, 6, &accepted);
-    if (!accepted) return;
+    materialCombo->setCurrentIndex(-1);
+    auto *materialSummary = new QLabel(&dialog);
+    configureBomMaterialSummary(materialSummary);
+    updateBomMaterialSummary(materialCombo, materialSummary);
+    auto *quantitySpin = new QDoubleSpinBox(&dialog);
+    quantitySpin->setDecimals(6);
+    quantitySpin->setRange(0.000001, 999999999999.0);
+    quantitySpin->setValue(1.0);
+    form->addRow(QStringLiteral("上级节点"), new QLabel(parentItem->text(0), &dialog));
+    form->addRow(QStringLiteral("下级物料 *"), materialCombo);
+    form->addRow(QStringLiteral("识别结果"), materialSummary);
+    form->addRow(QStringLiteral("相对上级用量 *"), quantitySpin);
+    dialogLayout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                         Qt::Horizontal, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("添加"));
+    buttons->button(QDialogButtonBox::Ok)->setProperty("primary", true);
+    dialogLayout->addWidget(buttons);
+    connect(materialCombo, &QComboBox::editTextChanged, &dialog,
+            [materialCombo, materialSummary] {
+                updateBomMaterialSummary(materialCombo, materialSummary);
+            });
+    connect(buttons->button(QDialogButtonBox::Ok), &QPushButton::clicked,
+            &dialog, [&dialog, materialCombo] {
+        const int index = resolveBomMaterialIndex(materialCombo);
+        if (index < 0) {
+            QMessageBox::warning(
+                &dialog, QStringLiteral("请选择下级物料"),
+                QStringLiteral("没有唯一识别到物料。请输入完整物料号，或从自动补全结果中选择一条。"));
+            materialCombo->setFocus();
+            return;
+        }
+        materialCombo->setCurrentIndex(index);
+        dialog.accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const int selectedIndex = materialCombo->currentIndex();
+    const qlonglong componentId = materialCombo->itemData(selectedIndex).toLongLong();
+    const QString selected = materialCombo->itemText(selectedIndex);
+    const double quantity = quantitySpin->value();
 
     const qlonglong parentBomItemId = parentItem->data(0, BomItemIdRole).toLongLong();
     QSqlQuery duplicate(m_database);
@@ -1056,34 +1748,140 @@ void MaterialPage::editBomQuantity()
     if (!m_session.canManageMaterials()) return;
     QTreeWidgetItem *item = m_bomTree->currentItem();
     const qlonglong itemId = item ? item->data(0, BomItemIdRole).toLongLong() : 0;
-    if (itemId <= 0) {
+    const qlonglong materialId = item ? item->data(0, BomMaterialIdRole).toLongLong() : 0;
+    const qlonglong productId = m_bomProductCombo->currentData().toLongLong();
+    if (!item || materialId <= 0 || productId <= 0) {
         QMessageBox::information(this, QStringLiteral("请选择BOM节点"),
-                                 QStringLiteral("成品根节点的用量固定为1，请选择下级节点。"));
+                                 QStringLiteral("请先选择需要调整的成品或下级节点。"));
         return;
     }
-    bool accepted = false;
-    const double quantity = QInputDialog::getDouble(
-        this, QStringLiteral("修改BOM用量"), QStringLiteral("相对上级用量"),
-        item->text(4).toDouble(), 0.000001, 999999999999.0, 6, &accepted);
-    if (!accepted) return;
+
+    if (itemId <= 0) {
+        MaterialDialog dialog(m_database, materialId, m_session.userId, this);
+        if (dialog.exec() == QDialog::Accepted) {
+            refresh();
+            emit dataChanged();
+        }
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("调整BOM节点"));
+    dialog.setMinimumWidth(620);
+    auto *dialogLayout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    auto *materialCombo = new QComboBox(&dialog);
+    ComboBoxSearch::enableContainsSearch(
+        materialCombo, QStringLiteral("输入物料号或名称/规格关键词"));
+    materialCombo->setMinimumWidth(460);
+    loadBomMaterialOptions(m_database, materialCombo, productId, materialId);
+    for (QTreeWidgetItem *ancestor = item->parent(); ancestor; ancestor = ancestor->parent()) {
+        const qlonglong ancestorMaterialId = ancestor->data(0, BomMaterialIdRole).toLongLong();
+        const int ancestorIndex = materialCombo->findData(ancestorMaterialId);
+        if (ancestorIndex >= 0) materialCombo->removeItem(ancestorIndex);
+    }
+    QList<QTreeWidgetItem *> descendants;
+    for (int childIndex = 0; childIndex < item->childCount(); ++childIndex)
+        descendants.append(item->child(childIndex));
+    while (!descendants.isEmpty()) {
+        QTreeWidgetItem *descendant = descendants.takeLast();
+        const qlonglong descendantMaterialId =
+            descendant->data(0, BomMaterialIdRole).toLongLong();
+        const int descendantIndex = materialCombo->findData(descendantMaterialId);
+        if (descendantIndex >= 0) materialCombo->removeItem(descendantIndex);
+        for (int childIndex = 0; childIndex < descendant->childCount(); ++childIndex)
+            descendants.append(descendant->child(childIndex));
+    }
+    const int currentMaterialIndex = materialCombo->findData(materialId);
+    materialCombo->setCurrentIndex(currentMaterialIndex);
+    auto *materialSummary = new QLabel(&dialog);
+    configureBomMaterialSummary(materialSummary);
+    updateBomMaterialSummary(materialCombo, materialSummary);
+    auto *quantitySpin = new QDoubleSpinBox(&dialog);
+    quantitySpin->setDecimals(6);
+    quantitySpin->setRange(0.000001, 999999999999.0);
+    quantitySpin->setValue(item->text(4).toDouble());
+    form->addRow(QStringLiteral("当前节点"), new QLabel(item->text(0), &dialog));
+    form->addRow(QStringLiteral("节点物料 *"), materialCombo);
+    form->addRow(QStringLiteral("识别结果"), materialSummary);
+    form->addRow(QStringLiteral("相对上级用量 *"), quantitySpin);
+    dialogLayout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                         Qt::Horizontal, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("保存调整"));
+    buttons->button(QDialogButtonBox::Ok)->setProperty("primary", true);
+    dialogLayout->addWidget(buttons);
+    connect(materialCombo, &QComboBox::editTextChanged, &dialog,
+            [materialCombo, materialSummary] {
+                updateBomMaterialSummary(materialCombo, materialSummary);
+            });
+    connect(buttons->button(QDialogButtonBox::Ok), &QPushButton::clicked,
+            &dialog, [&dialog, materialCombo] {
+        const int index = resolveBomMaterialIndex(materialCombo);
+        if (index < 0) {
+            QMessageBox::warning(
+                &dialog, QStringLiteral("请选择节点物料"),
+                QStringLiteral("没有唯一识别到物料。请输入完整物料号，或从自动补全结果中选择一条。"));
+            materialCombo->setFocus();
+            return;
+        }
+        materialCombo->setCurrentIndex(index);
+        dialog.accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const int selectedIndex = materialCombo->currentIndex();
+    const qlonglong newMaterialId = materialCombo->itemData(selectedIndex).toLongLong();
+    const double quantity = quantitySpin->value();
+    const qlonglong parentItemId = item->parent()
+        ? item->parent()->data(0, BomItemIdRole).toLongLong() : 0;
+    QSqlQuery duplicate(m_database);
+    duplicate.prepare(parentItemId > 0
+        ? QStringLiteral("SELECT 1 FROM material_bom_items WHERE product_material_id=? "
+                         "AND parent_item_id=? AND component_material_id=? AND id<>?")
+        : QStringLiteral("SELECT 1 FROM material_bom_items WHERE product_material_id=? "
+                         "AND parent_item_id IS NULL AND component_material_id=? AND id<>?"));
+    duplicate.addBindValue(productId);
+    if (parentItemId > 0) duplicate.addBindValue(parentItemId);
+    duplicate.addBindValue(newMaterialId);
+    duplicate.addBindValue(itemId);
+    if (duplicate.exec() && duplicate.next()) {
+        QMessageBox::information(this, QStringLiteral("节点已存在"),
+                                 QStringLiteral("该上级下已经有此物料，不能将两个节点调整为同一物料。"));
+        return;
+    }
+
+    if (!m_database.transaction()) {
+        QMessageBox::warning(this, QStringLiteral("调整失败"), m_database.lastError().text());
+        return;
+    }
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral(
-        "UPDATE material_bom_items SET quantity=?,updated_at=? WHERE id=?"));
+        "UPDATE material_bom_items SET component_material_id=?,quantity=?,updated_at=? WHERE id=?"));
+    update.addBindValue(newMaterialId);
     update.addBindValue(quantity);
     update.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
     update.addBindValue(itemId);
-    if (!update.exec() || update.numRowsAffected() != 1) {
-        QMessageBox::warning(this, QStringLiteral("修改失败"), update.lastError().text());
-        return;
-    }
     QSqlQuery audit(m_database);
     audit.prepare(QStringLiteral(
         "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
-        "VALUES(?,'MATERIAL_BOM_QUANTITY','material_bom_item',?,?)"));
+        "VALUES(?,'MATERIAL_BOM_ADJUST','material_bom_item',?,?)"));
     audit.addBindValue(m_session.userId);
     audit.addBindValue(itemId);
-    audit.addBindValue(QStringLiteral("用量修改为 %1").arg(quantity, 0, 'g', 12));
-    audit.exec();
+    audit.addBindValue(QStringLiteral("节点调整为 %1，相对上级用量 %2")
+                           .arg(materialCombo->itemText(selectedIndex),
+                                QString::number(quantity, 'g', 12)));
+    if (!update.exec() || update.numRowsAffected() != 1
+        || !audit.exec() || !m_database.commit()) {
+        const QString error = !update.lastError().text().isEmpty()
+            ? update.lastError().text() : (!audit.lastError().text().isEmpty()
+                ? audit.lastError().text() : m_database.lastError().text());
+        m_database.rollback();
+        QMessageBox::warning(this, QStringLiteral("调整失败"), error);
+        return;
+    }
     refreshBomTree();
     emit dataChanged();
 }
@@ -1094,8 +1892,9 @@ void MaterialPage::removeBomItem()
     QTreeWidgetItem *item = m_bomTree->currentItem();
     const qlonglong itemId = item ? item->data(0, BomItemIdRole).toLongLong() : 0;
     if (itemId <= 0) {
-        QMessageBox::information(this, QStringLiteral("请选择BOM节点"),
-                                 QStringLiteral("不能移除成品根节点，请选择一个下级节点。"));
+        if (item && item->data(0, BomMaterialIdRole).toLongLong() > 0) clearBom();
+        else QMessageBox::information(this, QStringLiteral("请选择BOM节点"),
+                                      QStringLiteral("请先选择需要删除的BOM节点。"));
         return;
     }
     int subtreeCount = 1;
@@ -1129,6 +1928,83 @@ void MaterialPage::removeBomItem()
     audit.exec();
     refreshBomTree();
     emit dataChanged();
+}
+
+void MaterialPage::clearBom()
+{
+    if (!m_session.canManageMaterials()) return;
+    const qlonglong productId = m_bomProductCombo->currentData().toLongLong();
+    if (productId <= 0) {
+        QMessageBox::information(this, QStringLiteral("请选择成品"),
+                                 QStringLiteral("请先选择需要清空BOM的成品。"));
+        return;
+    }
+
+    QSqlQuery count(m_database);
+    count.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM material_bom_items WHERE product_material_id=?"));
+    count.addBindValue(productId);
+    if (!count.exec() || !count.next()) {
+        QMessageBox::warning(this, QStringLiteral("读取BOM失败"), count.lastError().text());
+        return;
+    }
+    const int nodeCount = count.value(0).toInt();
+    if (nodeCount <= 0) {
+        QMessageBox::information(this, QStringLiteral("BOM为空"),
+                                 QStringLiteral("当前成品没有可清空的BOM节点。"));
+        refreshBomTree();
+        return;
+    }
+
+    const QString productText = m_bomProductCombo->currentText();
+    if (QMessageBox::warning(
+            this, QStringLiteral("确认清空整棵BOM"),
+            QStringLiteral("确认清空“%1”的整棵BOM吗？共 %2 个节点。\n\n"
+                           "仅删除该成品的全部 BOM 关系，保留成品及所有物料档案、库存和历史记录。\n\n"
+                           "此操作不能撤销。")
+                .arg(productText).arg(nodeCount),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+
+    if (!m_database.transaction()) {
+        QMessageBox::warning(this, QStringLiteral("清空失败"), m_database.lastError().text());
+        return;
+    }
+    QSqlQuery remove(m_database);
+    remove.prepare(QStringLiteral(
+        "DELETE FROM material_bom_items WHERE product_material_id=?"));
+    remove.addBindValue(productId);
+    if (!remove.exec() || remove.numRowsAffected() != nodeCount) {
+        const QString error = remove.lastError().text().isEmpty()
+            ? QStringLiteral("BOM节点数量已发生变化，请刷新后重试。")
+            : remove.lastError().text();
+        m_database.rollback();
+        QMessageBox::warning(this, QStringLiteral("清空失败"), error);
+        return;
+    }
+    QSqlQuery audit(m_database);
+    audit.prepare(QStringLiteral(
+        "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
+        "VALUES(?,'MATERIAL_BOM_CLEAR','material',?,?)"));
+    audit.addBindValue(m_session.userId);
+    audit.addBindValue(productId);
+    audit.addBindValue(QStringLiteral("%1，清空整棵BOM，共%2个节点")
+                           .arg(productText).arg(nodeCount));
+    if (!audit.exec() || !m_database.commit()) {
+        const QString error = audit.lastError().text().isEmpty()
+            ? m_database.lastError().text() : audit.lastError().text();
+        m_database.rollback();
+        QMessageBox::warning(this, QStringLiteral("清空失败"), error);
+        return;
+    }
+
+    refreshBomTree();
+    emit dataChanged();
+    QMessageBox::information(
+        this, QStringLiteral("BOM已清空"),
+        QStringLiteral("已清空“%1”的 %2 个BOM节点。物料档案、库存和历史记录均已保留。")
+            .arg(productText).arg(nodeCount));
 }
 
 void MaterialPage::importMaterials()

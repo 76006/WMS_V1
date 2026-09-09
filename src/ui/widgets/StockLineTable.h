@@ -7,6 +7,7 @@
 #include <QWidget>
 
 class QComboBox;
+class QPushButton;
 class QTableWidget;
 
 class StockLineTable final : public QWidget
@@ -32,6 +33,10 @@ public slots:
     void setPurchaseMode(bool enabled);
     void setProductionUsageMode(bool enabled);
     void setProductionQuantity(double quantity);
+    void setMaterialCategoryFilter(const QString &categoryCode);
+
+signals:
+    void productionBomRequested();
 
 private:
     int rowForWidget(const QWidget *widget, int column) const;
@@ -50,6 +55,10 @@ private:
     Mode m_mode = Mode::Outbound;
     bool m_purchaseMode = false;
     bool m_productionUsageMode = false;
+    bool m_keepEmptyWhenNoRows = false;
+    bool m_requireExplicitMaterialSelection = false;
     double m_productionQuantity = 1.0;
+    QString m_materialCategoryFilter;
     QTableWidget *m_table = nullptr;
+    QPushButton *m_importProductionBomButton = nullptr;
 };

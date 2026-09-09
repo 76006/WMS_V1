@@ -1,6 +1,7 @@
 #include "services/InventoryService.h"
 
 #include <QCryptographicHash>
+#include <QDate>
 #include <QDateTime>
 #include <QSet>
 #include <QSqlError>
@@ -27,6 +28,17 @@ QString normalizedText(const QString &value)
 QString lineError(int lineNumber, const QString &message)
 {
     return QStringLiteral("第 %1 行：%2").arg(lineNumber).arg(message);
+}
+
+bool isValidInspectionNumber(const QString &number, const QDate &date)
+{
+    const QString prefix = QStringLiteral("BMJ-JY-%1-")
+                               .arg(date.toString(QStringLiteral("yyyyMMdd")));
+    if (!number.startsWith(prefix) || number.size() != prefix.size() + 3) return false;
+    bool ok = false;
+    const int sequence = number.right(3).toInt(&ok);
+    return ok && sequence >= 1 && sequence <= 999
+        && number.right(3) == QStringLiteral("%1").arg(sequence, 3, 10, QLatin1Char('0'));
 }
 }
 
@@ -89,6 +101,12 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
             || !request.inspection.inspectionDate.isValid()
             || request.inspection.inspectorName.trimmed().isEmpty()) {
             setDocumentError(errorMessage, QStringLiteral("送检单号、送检日期和检验员不能为空。"));
+            return false;
+        }
+        if (!isValidInspectionNumber(request.inspection.inspectionNumber.trimmed(),
+                                     request.inspection.inspectionDate)) {
+            setDocumentError(errorMessage,
+                             QStringLiteral("送检单号必须符合 BMJ-JY-年月日-三位流水号，并与送检日期一致。"));
             return false;
         }
         if (request.inspection.result.trimmed().toUpper() != QStringLiteral("QUALIFIED")) {
@@ -180,9 +198,12 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                                     : QString());
         inspection.addBindValue(inspectionAttachmentId);
         if (!inspection.exec()) {
-            setDocumentError(errorMessage,
-                             QStringLiteral("保存入库送检资料失败：%1")
-                                 .arg(inspection.lastError().text()));
+            const QString detail = inspection.lastError().text();
+            setDocumentError(
+                errorMessage,
+                detail.contains(QStringLiteral("UNIQUE"), Qt::CaseInsensitive)
+                    ? QStringLiteral("送检单号已存在，请重新打开送检单生成新的流水号。")
+                    : QStringLiteral("保存入库送检资料失败：%1").arg(detail));
             rollback();
             return false;
         }
@@ -545,6 +566,13 @@ bool InventoryService::postInventoryCount(const InventoryCountRequest &request,
             rollback();
             return false;
         }
+        if (rules.requireBatch && line.batchNo.trimmed().isEmpty()) {
+            setDocumentError(errorMessage,
+                             lineError(index + 1,
+                                       QStringLiteral("该物料启用了批次管理，必须填写批次号。")));
+            rollback();
+            return false;
+        }
         QSqlQuery current(m_database);
         current.prepare(QStringLiteral(
             "SELECT COALESCE(quantity,0) FROM stock_balances WHERE material_id=? "
@@ -579,6 +607,31 @@ bool InventoryService::postInventoryCount(const InventoryCountRequest &request,
                              lineError(index + 1, QStringLiteral("存在盘点差异，必须填写差异原因。")));
             rollback();
             return false;
+        }
+        if (!line.batchNo.trimmed().isEmpty() && line.actualQuantity > DocumentQuantityTolerance) {
+            QSqlQuery batch(m_database);
+            if (line.supplier.isNull()) {
+                batch.prepare(QStringLiteral(
+                    "INSERT OR IGNORE INTO batches(material_id,batch_no,supplier,first_in_at) "
+                    "VALUES(?,?,?,?)"));
+            } else {
+                batch.prepare(QStringLiteral(
+                    "INSERT INTO batches(material_id,batch_no,supplier,first_in_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(material_id,batch_no) DO UPDATE SET supplier=excluded.supplier"));
+            }
+            batch.addBindValue(line.materialId);
+            batch.addBindValue(normalizedText(line.batchNo));
+            batch.addBindValue(line.supplier.isNull()
+                                   ? QStringLiteral("") : normalizedText(line.supplier));
+            batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+            if (!batch.exec()) {
+                setDocumentError(errorMessage,
+                                 lineError(index + 1,
+                                           QStringLiteral("保存批次供应商失败：%1")
+                                               .arg(batch.lastError().text())));
+                rollback();
+                return false;
+            }
         }
         QSqlQuery countItem(m_database);
         countItem.prepare(QStringLiteral(

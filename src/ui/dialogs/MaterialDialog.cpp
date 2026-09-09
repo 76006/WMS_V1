@@ -18,6 +18,7 @@
 #include <QMimeDatabase>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QScrollArea>
@@ -68,8 +69,14 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     m_disciplineCombo->addItem(QStringLiteral("9 - 其他"), QStringLiteral("9"));
     m_codeEdit = new QLineEdit(formContent);
     m_codeEdit->setMaxLength(64);
-    m_codeEdit->setReadOnly(true);
-    m_codeHint = new QLabel(QStringLiteral("编码保存后不可修改"), formContent);
+    m_codeEdit->setPlaceholderText(QStringLiteral("可使用自动编码，也可手工输入"));
+    auto *codeRow = new QWidget(formContent);
+    auto *codeLayout = new QHBoxLayout(codeRow);
+    codeLayout->setContentsMargins(0, 0, 0, 0);
+    auto *generateCodeButton = new QPushButton(QStringLiteral("重新生成"), codeRow);
+    codeLayout->addWidget(m_codeEdit, 1);
+    codeLayout->addWidget(generateCodeButton);
+    m_codeHint = new QLabel(QStringLiteral("系统会自动建议编码，你也可直接修改；保存时检查是否重复"), formContent);
     m_codeHint->setObjectName(QStringLiteral("mutedText"));
     m_nameEdit = new QLineEdit(formContent);
     m_nameEdit->setMaxLength(128);
@@ -83,7 +90,7 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     m_unitUsageSpin->setRange(0, 999999999999.0);
     m_processingMethodCombo = new QComboBox(formContent);
     m_processingMethodCombo->setEditable(true);
-    m_processingMethodCombo->addItem(QStringLiteral("未设置"), QString());
+    m_processingMethodCombo->addItem(QStringLiteral("未设置"), QStringLiteral(""));
     m_processingMethodCombo->addItem(QStringLiteral("外购"), QStringLiteral("外购"));
     m_processingMethodCombo->addItem(QStringLiteral("自制"), QStringLiteral("自制"));
     m_processingMethodCombo->addItem(QStringLiteral("委外加工"), QStringLiteral("委外加工"));
@@ -123,7 +130,7 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     form->addRow(QStringLiteral("物料类型 *"), m_typeCombo);
     form->addRow(QStringLiteral("项目代码 *"), m_projectCombo);
     form->addRow(QStringLiteral("专业类别 *"), m_disciplineCombo);
-    form->addRow(QStringLiteral("物料编码"), m_codeEdit);
+    form->addRow(QStringLiteral("物料编码 *"), codeRow);
     form->addRow(QString(), m_codeHint);
     form->addRow(QStringLiteral("物料名称 *"), m_nameEdit);
     form->addRow(QStringLiteral("规格型号"), m_specificationEdit);
@@ -166,6 +173,21 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
             this, &MaterialDialog::refreshGeneratedCode);
     connect(m_disciplineCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MaterialDialog::refreshGeneratedCode);
+    connect(generateCodeButton, &QPushButton::clicked, this, [this] {
+        m_codeManuallyEdited = false;
+        generateAvailableCode();
+    });
+    connect(m_codeEdit, &QLineEdit::textEdited, this, [this](const QString &text) {
+        m_codeManuallyEdited = true;
+        const QString upper = text.toUpper();
+        if (upper != text) {
+            const int position = m_codeEdit->cursorPosition();
+            m_codeEdit->setText(upper);
+            m_codeEdit->setCursorPosition(position);
+        }
+        m_codeHint->setText(QStringLiteral("已手工修改；保存时将使用此编码并检查是否重复"));
+        m_codeHint->setStyleSheet(QString());
+    });
     connect(chooseImageButton, &QPushButton::clicked, this, &MaterialDialog::chooseImage);
     connect(removeImageButton, &QPushButton::clicked, this, &MaterialDialog::removeImage);
     connect(buttons, &QDialogButtonBox::accepted, this, &MaterialDialog::save);
@@ -236,7 +258,12 @@ void MaterialDialog::applyDefaultCategory()
 
 void MaterialDialog::refreshGeneratedCode()
 {
-    if (m_materialId > 0) return;
+    if (m_materialId > 0 || m_codeManuallyEdited) return;
+    generateAvailableCode();
+}
+
+void MaterialDialog::generateAvailableCode()
+{
     QString error;
     const QString code = MaterialCodeService::nextCode(
         m_database, m_typeCombo->currentData().toString(),
@@ -247,7 +274,7 @@ void MaterialDialog::refreshGeneratedCode()
         m_codeHint->setText(error);
         m_codeHint->setStyleSheet(QStringLiteral("color:#b91c1c;"));
     } else {
-        m_codeHint->setText(QStringLiteral("自动生成；保存时再次校验，保存后不可修改"));
+        m_codeHint->setText(QStringLiteral("已生成下一个可用编码；仍可手工修改，保存时再次检查"));
         m_codeHint->setStyleSheet(QString());
     }
 }
@@ -295,6 +322,7 @@ void MaterialDialog::loadMaterial()
         return;
     }
     m_codeEdit->setText(query.value(0).toString());
+    m_codeHint->setText(QStringLiteral("当前编码可直接修改；保存时会检查新编码是否重复"));
     const QString materialCode = query.value(0).toString().toUpper();
     const int typeIndex = m_typeCombo->findData(materialCode.left(1));
     if (typeIndex >= 0) m_typeCombo->setCurrentIndex(typeIndex);
@@ -401,8 +429,14 @@ void MaterialDialog::save()
     QString code = m_codeEdit->text().trimmed().toUpper();
     const QString name = m_nameEdit->text().trimmed();
     const QString unit = m_unitEdit->text().trimmed();
-    if (name.isEmpty() || unit.isEmpty() || m_categoryCombo->currentData().isNull()) {
-        showError(QStringLiteral("请完整填写物料名称、分类和单位。"));
+    if (code.isEmpty() || name.isEmpty() || unit.isEmpty()
+        || m_categoryCombo->currentData().isNull()) {
+        showError(QStringLiteral("请完整填写物料编码、名称、分类和单位。"));
+        return;
+    }
+    static const QRegularExpression codeExpression(QStringLiteral("^[A-Z0-9_-]{1,64}$"));
+    if (!codeExpression.match(code).hasMatch()) {
+        showError(QStringLiteral("物料编码只能包含英文字母、数字、短横线或下划线，最长64位。"));
         return;
     }
     if (m_materialId <= 0 && (m_typeCombo->currentIndex() < 0
@@ -437,17 +471,37 @@ void MaterialDialog::save()
         return;
     }
     if (m_materialId <= 0) {
-        QString error;
-        code = MaterialCodeService::nextCode(
-            m_database, m_typeCombo->currentData().toString(),
-            m_projectCombo->currentData().toString(),
-            m_disciplineCombo->currentData().toString(), &error);
-        if (code.isEmpty()) {
-            m_database.rollback();
-            showError(error);
-            return;
+        if (!m_codeManuallyEdited) {
+            QString error;
+            code = MaterialCodeService::nextCode(
+                m_database, m_typeCombo->currentData().toString(),
+                m_projectCombo->currentData().toString(),
+                m_disciplineCombo->currentData().toString(), &error);
+            if (code.isEmpty()) {
+                m_database.rollback();
+                showError(error);
+                return;
+            }
+            m_codeEdit->setText(code);
         }
-        m_codeEdit->setText(code);
+    }
+    QSqlQuery duplicate(m_database);
+    duplicate.prepare(QStringLiteral(
+        "SELECT code,name FROM materials WHERE code=? COLLATE NOCASE AND id<>?"));
+    duplicate.addBindValue(code);
+    duplicate.addBindValue(m_materialId);
+    if (!duplicate.exec()) {
+        m_database.rollback();
+        showError(QStringLiteral("检查物料编码失败：%1").arg(duplicate.lastError().text()));
+        return;
+    }
+    if (duplicate.next()) {
+        m_database.rollback();
+        showError(QStringLiteral("物料编码 %1 已被“%2”使用，请修改编码或点击“重新生成”。")
+                      .arg(duplicate.value(0).toString(), duplicate.value(1).toString()));
+        m_codeEdit->setFocus();
+        m_codeEdit->selectAll();
+        return;
     }
     QSqlQuery query(m_database);
     if (m_materialId > 0) {
@@ -470,8 +524,10 @@ void MaterialDialog::save()
     query.addBindValue(m_brandEdit->text().trimmed());
     query.addBindValue(unit);
     query.addBindValue(m_unitUsageSpin->value());
-    query.addBindValue(m_processingMethodCombo->currentText() == QStringLiteral("未设置")
-                           ? QString() : m_processingMethodCombo->currentText().trimmed());
+    QString processingMethod = m_processingMethodCombo->currentText().trimmed();
+    if (processingMethod.isEmpty() || processingMethod == QStringLiteral("未设置"))
+        processingMethod = QStringLiteral("");
+    query.addBindValue(processingMethod);
     query.addBindValue(m_minimumStockSpin->value());
     query.addBindValue(warehouseId > 0 ? QVariant(warehouseId) : QVariant());
     query.addBindValue(locationId > 0 ? QVariant(locationId) : QVariant());
@@ -485,7 +541,7 @@ void MaterialDialog::save()
     }
     if (!query.exec()) {
         m_database.rollback();
-        showError(QStringLiteral("保存失败。请检查物料编码是否重复。\n%1").arg(query.lastError().text()));
+        showError(QStringLiteral("保存物料失败：\n%1").arg(query.lastError().text()));
         return;
     }
     if (m_materialId <= 0) m_materialId = query.lastInsertId().toLongLong();

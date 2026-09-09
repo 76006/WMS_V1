@@ -1,6 +1,8 @@
 #include "ui/pages/StockInPage.h"
 
 #include "services/InventoryService.h"
+#include "services/OfficeTemplateService.h"
+#include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/dialogs/InspectionDialog.h"
 #include "ui/widgets/StockLineTable.h"
 
@@ -177,6 +179,16 @@ void StockInPage::updateInspectionRequirement()
 void StockInPage::openInspectionForm()
 {
     if (!m_inspectionCombo->currentData().toBool()) return;
+    m_inspection.templateFields.insert(QStringLiteral("supplier"),
+                                       m_supplierEdit->text().trimmed());
+    m_inspection.templateFields.insert(QStringLiteral("purchaseOrderNumber"),
+                                       m_purposeEdit->text().trimmed());
+    m_inspection.templateFields.insert(QStringLiteral("arrivalDate"),
+                                       m_dateEdit->date().toString(QStringLiteral("yyyy-MM-dd")));
+    if (m_inspection.templateFields.value(QStringLiteral("entrustedBy")).isEmpty()) {
+        m_inspection.templateFields.insert(QStringLiteral("entrustedBy"),
+                                           m_handlerEdit->text().trimmed());
+    }
     QString ignoredError;
     const QList<StockMovementRequest> currentLines = m_lines->lines(&ignoredError);
     InspectionDialog dialog(m_database, currentLines, m_inspection, this);
@@ -212,6 +224,25 @@ void StockInPage::submit()
         openInspectionForm();
         return;
     }
+
+    OfficeTemplateDocument inboundForm;
+    inboundForm.kind = m_typeCombo->currentData().toString() == QStringLiteral("SCWG")
+        ? OfficeFormKind::FinishedGoodsInbound
+        : OfficeFormKind::RawMaterialInbound;
+    inboundForm.documentDate = m_dateEdit->date();
+    inboundForm.documentNumber = QStringLiteral("提交后自动生成");
+    inboundForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
+    inboundForm.fields.insert(QStringLiteral("supplier"), m_supplierEdit->text().trimmed());
+    inboundForm.fields.insert(QStringLiteral("purpose"), m_purposeEdit->text().trimmed());
+    inboundForm.lines = OfficeTemplateService::materialLines(m_database, lines, &error);
+    if (inboundForm.lines.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("无法填写入库单模板"), error);
+        return;
+    }
+    DocumentTemplateDialog inboundDialog(inboundForm, this);
+    if (inboundDialog.exec() != QDialog::Accepted) return;
+    inboundForm = inboundDialog.document();
+
     QString confirmation = QStringLiteral("确认提交 %1 条入库明细？库存将整单增加并生成流水。")
                                .arg(lines.size());
     if (m_typeCombo->currentData().toString() == QStringLiteral("CGRK")) {
@@ -264,8 +295,49 @@ void StockInPage::submit()
         return;
     }
     m_numberLabel->setText(posted.documentNumber);
-    QMessageBox::information(this, QStringLiteral("入库完成"),
-                             QStringLiteral("入库单 %1 已生效。").arg(posted.documentNumber));
+    inboundForm.documentNumber = posted.documentNumber;
+    QStringList formErrors;
+    QString formError;
+    if (!OfficeTemplateService::attachToDocument(inboundForm, m_database, m_session.userId,
+                                                  posted.documentId, &formError)) {
+        formErrors.append(QStringLiteral("%1：%2")
+                              .arg(OfficeTemplateService::formTitle(inboundForm.kind), formError));
+    }
+    if (requiresInspection) {
+        OfficeTemplateDocument inspectionForm;
+        inspectionForm.kind = OfficeFormKind::Inspection;
+        inspectionForm.documentNumber = m_inspection.inspectionNumber;
+        inspectionForm.documentDate = m_inspection.inspectionDate;
+        inspectionForm.fields = m_inspection.templateFields;
+        inspectionForm.fields.insert(QStringLiteral("inspectionDate"),
+                                     m_inspection.inspectionDate.toString(QStringLiteral("yyyy-MM-dd")));
+        inspectionForm.fields.insert(
+            QStringLiteral("inspectionResult"),
+            m_inspection.result == QStringLiteral("QUALIFIED") ? QStringLiteral("合格")
+                                                                 : QStringLiteral("不合格"));
+        inspectionForm.fields.insert(QStringLiteral("conclusion"), m_inspection.conclusion);
+        inspectionForm.lines = OfficeTemplateService::materialLines(m_database, lines, &formError);
+        for (OfficeTemplateLine &line : inspectionForm.lines) {
+            line.orderNumber = m_inspection.templateFields.value(QStringLiteral("purchaseOrderNumber"));
+            line.supplier = m_inspection.templateFields.value(QStringLiteral("supplier"));
+        }
+        formError.clear();
+        if (!OfficeTemplateService::attachToDocument(inspectionForm, m_database, m_session.userId,
+                                                      posted.documentId, &formError)) {
+            formErrors.append(QStringLiteral("送检单：%1").arg(formError));
+        }
+    }
+    if (formErrors.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("入库完成"),
+            QStringLiteral("入库单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹，并已自动打开。")
+                .arg(posted.documentNumber));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("入库已完成，但模板处理未全部完成"),
+            QStringLiteral("入库单 %1 已生效，但以下保存或打开步骤未完成：\n\n%2")
+                .arg(posted.documentNumber, formErrors.join(QStringLiteral("\n"))));
+    }
     resetSubmissionToken();
     m_supplierEdit->clear();
     m_notesEdit->clear();

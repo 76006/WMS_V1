@@ -1,6 +1,8 @@
 #include "ui/pages/StockOutPage.h"
 
 #include "services/InventoryService.h"
+#include "services/OfficeTemplateService.h"
+#include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/widgets/StockLineTable.h"
 
 #include <QAbstractItemView>
@@ -44,7 +46,7 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     m_typeCombo = new QComboBox(panel);
     m_typeCombo->addItem(QStringLiteral("销售出库"), QStringLiteral("XSCK"));
     m_typeCombo->addItem(QStringLiteral("维修领用"), QStringLiteral("WXLY"));
-    m_typeCombo->addItem(QStringLiteral("样品领用"), QStringLiteral("YPLY"));
+    m_typeCombo->addItem(QStringLiteral("研发领用"), QStringLiteral("YPLY"));
     m_typeCombo->addItem(QStringLiteral("其他出库"), QStringLiteral("QTCK"));
     m_dateEdit = new QDateEdit(QDate::currentDate(), panel);
     m_dateEdit->setCalendarPopup(true);
@@ -82,7 +84,7 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     salesLayout->addWidget(m_customerContactEdit, 1, 1);
     salesLayout->addWidget(new QLabel(QStringLiteral("联系电话"), m_salesDetailsGroup), 1, 2);
     salesLayout->addWidget(m_customerPhoneEdit, 1, 3);
-    salesLayout->addWidget(new QLabel(QStringLiteral("销售订单号"), m_salesDetailsGroup), 2, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("客户合同号/订单号"), m_salesDetailsGroup), 2, 0);
     salesLayout->addWidget(m_salesOrderEdit, 2, 1);
     salesLayout->addWidget(new QLabel(QStringLiteral("物流/快递公司"), m_salesDetailsGroup), 2, 2);
     salesLayout->addWidget(m_logisticsCompanyEdit, 2, 3);
@@ -128,8 +130,14 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
 
 void StockOutPage::updateSalesFieldsVisibility()
 {
-    const bool salesOutbound = m_typeCombo->currentData().toString() == QStringLiteral("XSCK");
+    const QString documentType = m_typeCombo->currentData().toString();
+    const bool salesOutbound = documentType == QStringLiteral("XSCK");
     m_salesDetailsGroup->setVisible(salesOutbound);
+    const bool finishedGoodsOnly = documentType == QStringLiteral("XSCK")
+        || documentType == QStringLiteral("WXLY")
+        || documentType == QStringLiteral("YPLY");
+    m_lines->setMaterialCategoryFilter(
+        finishedGoodsOnly ? QStringLiteral("FINISHED") : QString());
 }
 
 void StockOutPage::resetSubmissionToken()
@@ -149,7 +157,9 @@ void StockOutPage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.id,d.document_no,d.document_type,d.document_date,"
+        "SELECT d.id,d.document_no,CASE d.document_type "
+        "WHEN 'XSCK' THEN '销售出库' WHEN 'WXLY' THEN '维修领用' "
+        "WHEN 'YPLY' THEN '研发领用' ELSE '其他出库' END,d.document_date,"
         "COALESCE(s.customer_company,''),COALESCE(s.destination,''),COUNT(i.id) "
         "FROM business_documents d LEFT JOIN business_document_items i ON i.document_id=d.id "
         "LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
@@ -214,6 +224,49 @@ void StockOutPage::submit()
         QMessageBox::warning(this, QStringLiteral("出库明细有误"), error);
         return;
     }
+
+    OfficeTemplateDocument outboundForm;
+    outboundForm.kind = OfficeFormKind::StockOutbound;
+    outboundForm.documentNumber = QStringLiteral("提交后自动生成");
+    outboundForm.documentDate = m_dateEdit->date();
+    outboundForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
+    outboundForm.fields.insert(QStringLiteral("purpose"), m_purposeEdit->text().trimmed());
+    if (salesOutbound) {
+        outboundForm.fields.insert(QStringLiteral("customerCompany"),
+                                   m_customerCompanyEdit->text().trimmed());
+        outboundForm.fields.insert(QStringLiteral("destination"),
+                                   m_destinationEdit->text().trimmed());
+        outboundForm.fields.insert(QStringLiteral("customerContact"),
+                                   m_customerContactEdit->text().trimmed());
+        outboundForm.fields.insert(QStringLiteral("customerPhone"),
+                                   m_customerPhoneEdit->text().trimmed());
+        outboundForm.fields.insert(QStringLiteral("salesOrderNumber"),
+                                   m_salesOrderEdit->text().trimmed());
+        outboundForm.fields.insert(QStringLiteral("logisticsCompany"),
+                                   m_logisticsCompanyEdit->text().trimmed());
+        outboundForm.fields.insert(QStringLiteral("trackingNumber"),
+                                   m_trackingNumberEdit->text().trimmed());
+    }
+    outboundForm.lines = OfficeTemplateService::materialLines(m_database, lines, &error);
+    if (outboundForm.lines.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("无法填写出库单模板"), error);
+        return;
+    }
+    DocumentTemplateDialog outboundDialog(outboundForm, this);
+    if (outboundDialog.exec() != QDialog::Accepted) return;
+    outboundForm = outboundDialog.document();
+
+    OfficeTemplateDocument deliveryForm;
+    if (salesOutbound) {
+        deliveryForm = outboundForm;
+        deliveryForm.kind = OfficeFormKind::DeliveryConfirmation;
+        for (OfficeTemplateLine &line : deliveryForm.lines)
+            line.orderNumber = m_salesOrderEdit->text().trimmed();
+        DocumentTemplateDialog deliveryDialog(deliveryForm, this);
+        if (deliveryDialog.exec() != QDialog::Accepted) return;
+        deliveryForm = deliveryDialog.document();
+    }
+
     if (QMessageBox::question(this, QStringLiteral("确认出库"),
         QStringLiteral("确认提交 %1 条出库明细？库存将整单扣减并生成流水。")
             .arg(lines.size())) != QMessageBox::Yes) return;
@@ -244,8 +297,32 @@ void StockOutPage::submit()
         return;
     }
     m_numberLabel->setText(posted.documentNumber);
-    QMessageBox::information(this, QStringLiteral("出库完成"),
-                             QStringLiteral("出库单 %1 已生效。").arg(posted.documentNumber));
+    outboundForm.documentNumber = posted.documentNumber;
+    QStringList formErrors;
+    QString formError;
+    if (!OfficeTemplateService::attachToDocument(outboundForm, m_database, m_session.userId,
+                                                  posted.documentId, &formError)) {
+        formErrors.append(QStringLiteral("出库单：%1").arg(formError));
+    }
+    if (salesOutbound) {
+        deliveryForm.documentNumber = posted.documentNumber;
+        formError.clear();
+        if (!OfficeTemplateService::attachToDocument(deliveryForm, m_database, m_session.userId,
+                                                      posted.documentId, &formError)) {
+            formErrors.append(QStringLiteral("送货确认单：%1").arg(formError));
+        }
+    }
+    if (formErrors.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("出库完成"),
+            QStringLiteral("出库单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹，并已自动打开。")
+                .arg(posted.documentNumber));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("出库已完成，但模板处理未全部完成"),
+            QStringLiteral("出库单 %1 已生效，但以下保存或打开步骤未完成：\n\n%2")
+                .arg(posted.documentNumber, formErrors.join(QStringLiteral("\n"))));
+    }
     resetSubmissionToken();
     m_notesEdit->clear();
     if (salesOutbound) {

@@ -29,7 +29,7 @@ signals:
     void stockChanged();
 
 private slots:
-    void loadProductMaterials();
+    void importProductBom();
     void submit();
 
 private:

@@ -23,12 +23,14 @@ set(WMS_SOURCES
     src/services/InventoryServiceDocuments.cpp
     src/services/InventoryServiceProduction.cpp
     src/services/MaterialCodeService.cpp
+    src/services/OfficeTemplateService.cpp
     src/services/InventoryReportService.cpp
     src/services/UserService.cpp
     src/ui/LoginDialog.cpp
     src/ui/MainWindow.cpp
     src/ui/dialogs/MaterialDialog.cpp
     src/ui/dialogs/InspectionDialog.cpp
+    src/ui/dialogs/DocumentTemplateDialog.cpp
     src/ui/pages/DashboardPage.cpp
     src/ui/pages/AttachmentPage.cpp
     src/ui/pages/AuditLogPage.cpp
@@ -64,12 +66,14 @@ set(WMS_SOURCES
     src/services/AttachmentService.h
     src/services/InventoryService.h
     src/services/MaterialCodeService.h
+    src/services/OfficeTemplateService.h
     src/services/InventoryReportService.h
     src/services/UserService.h
     src/ui/LoginDialog.h
     src/ui/MainWindow.h
     src/ui/dialogs/MaterialDialog.h
     src/ui/dialogs/InspectionDialog.h
+    src/ui/dialogs/DocumentTemplateDialog.h
     src/ui/pages/DashboardPage.h
     src/ui/pages/AttachmentPage.h
     src/ui/pages/AuditLogPage.h
@@ -112,6 +116,7 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/009_inbound_inspections.sql
         database/migrations/010_material_bom.sql
         resources/PdfPreview.qml
+        resources/fill_office_template.ps1
         resources/styles.qss
 )
 
@@ -119,6 +124,7 @@ target_include_directories(IceBeautyWms PRIVATE src)
 target_link_libraries(IceBeautyWms PRIVATE Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView Qt6::PrintSupport)
 
 install(TARGETS IceBeautyWms RUNTIME DESTINATION .)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/仓库系统表单模板" DESTINATION .)
 
 if(MSVC)
     target_compile_options(IceBeautyWms PRIVATE /utf-8 /W4)

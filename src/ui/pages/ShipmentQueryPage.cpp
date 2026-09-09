@@ -4,18 +4,26 @@
 
 #include <QAbstractItemView>
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QFrame>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlQueryModel>
 #include <QStringList>
 #include <QTableView>
+#include <QStandardPaths>
+#include <QUrl>
+#include <QUuid>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -104,9 +112,12 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, QWidget *parent)
     shipmentTitle->setObjectName(QStringLiteral("sectionTitle"));
     m_summaryLabel = new QLabel(shipmentPanel);
     m_summaryLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_openTemplateButton = new QPushButton(QStringLiteral("打开送货确认单"), shipmentPanel);
+    m_openTemplateButton->setEnabled(false);
     shipmentHeader->addWidget(shipmentTitle);
     shipmentHeader->addStretch();
     shipmentHeader->addWidget(m_summaryLabel);
+    shipmentHeader->addWidget(m_openTemplateButton);
     shipmentLayout->addLayout(shipmentHeader);
 
     m_shipmentTable = new QTableView(shipmentPanel);
@@ -135,6 +146,8 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, QWidget *parent)
     connect(searchButton, &QPushButton::clicked, this, &ShipmentQueryPage::loadShipments);
     connect(resetButton, &QPushButton::clicked, this, &ShipmentQueryPage::resetFilters);
     connect(m_orderEdit, &QLineEdit::returnPressed, this, &ShipmentQueryPage::loadShipments);
+    connect(m_openTemplateButton, &QPushButton::clicked,
+            this, &ShipmentQueryPage::openSelectedDeliveryForm);
     connect(m_shipmentTable->selectionModel(), &QItemSelectionModel::currentRowChanged,
             this, [this] { loadSelectedShipmentDetails(); });
 
@@ -289,6 +302,7 @@ void ShipmentQueryPage::loadShipments()
         m_shipmentTable->setCurrentIndex(m_shipmentModel->index(0, 1));
         loadSelectedShipmentDetails();
     } else {
+        m_openTemplateButton->setEnabled(false);
         m_detailModel->clear();
         m_detailTitle->setText(QStringLiteral("产品基础信息（没有符合条件的发货记录）"));
     }
@@ -298,11 +312,13 @@ void ShipmentQueryPage::loadSelectedShipmentDetails()
 {
     const QModelIndex current = m_shipmentTable->currentIndex();
     if (!current.isValid()) {
+        m_openTemplateButton->setEnabled(false);
         m_detailModel->clear();
         m_detailTitle->setText(QStringLiteral("产品基础信息（请选择一条发货记录）"));
         return;
     }
     const qlonglong documentId = m_shipmentModel->index(current.row(), 0).data().toLongLong();
+    m_openTemplateButton->setEnabled(documentId > 0);
     const QString documentNo = m_shipmentModel->index(current.row(), 1).data().toString();
     const QString orderNo = m_shipmentModel->index(current.row(), 3).data().toString();
     const QString customer = m_shipmentModel->index(current.row(), 4).data().toString();
@@ -310,6 +326,49 @@ void ShipmentQueryPage::loadSelectedShipmentDetails()
                                .arg(documentNo, orderNo.isEmpty() ? QStringLiteral("-") : orderNo,
                                     customer));
     loadShipmentDetails(documentId);
+}
+
+void ShipmentQueryPage::openSelectedDeliveryForm()
+{
+    const QModelIndex current = m_shipmentTable->currentIndex();
+    if (!current.isValid()) return;
+    const qlonglong documentId = m_shipmentModel->index(current.row(), 0).data().toLongLong();
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT original_file_name,file_data FROM attachments "
+        "WHERE business_type='business_document' AND business_id=? AND is_deleted=0 "
+        "AND original_file_name LIKE '送货确认单\\_%' ESCAPE '\\' "
+        "ORDER BY id DESC LIMIT 1"));
+    query.addBindValue(documentId);
+    if (!query.exec()) {
+        QMessageBox::warning(this, QStringLiteral("读取模板失败"), query.lastError().text());
+        return;
+    }
+    if (!query.next()) {
+        QMessageBox::information(
+            this, QStringLiteral("尚无送货确认单"),
+            QStringLiteral("该发货记录还没有模板附件。新提交的销售出库会自动生成并保存。"));
+        return;
+    }
+    const QString originalName = QFileInfo(query.value(0).toString()).fileName();
+    const QByteArray data = query.value(1).toByteArray();
+    const QString directory = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                  .filePath(QStringLiteral("IceBeautyWms/shipment-forms"));
+    QDir().mkpath(directory);
+    const QString path = QDir(directory).filePath(
+        QStringLiteral("%1_%2").arg(QUuid::createUuid().toString(QUuid::WithoutBraces),
+                                    originalName));
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size()) {
+        QMessageBox::warning(this, QStringLiteral("打开模板失败"),
+                             QStringLiteral("无法写入临时表单文件：%1").arg(file.errorString()));
+        return;
+    }
+    file.close();
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        QMessageBox::warning(this, QStringLiteral("打开模板失败"),
+                             QStringLiteral("Windows 无法打开已保存的送货确认单。"));
+    }
 }
 
 void ShipmentQueryPage::loadShipmentDetails(qlonglong documentId)

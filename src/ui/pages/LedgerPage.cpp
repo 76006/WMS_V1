@@ -59,6 +59,8 @@ LedgerPage::LedgerPage(QSqlDatabase database, Session session, QWidget *parent)
     m_typeCombo->addItem(QStringLiteral("生产退料"), QStringLiteral("SCTL"));
     m_typeCombo->addItem(QStringLiteral("成品入库"), QStringLiteral("CPRK"));
     m_typeCombo->addItem(QStringLiteral("销售出库"), QStringLiteral("XSCK"));
+    m_typeCombo->addItem(QStringLiteral("维修领用"), QStringLiteral("WXLY"));
+    m_typeCombo->addItem(QStringLiteral("研发领用"), QStringLiteral("YPLY"));
     m_typeCombo->addItem(QStringLiteral("其他出库"), QStringLiteral("QTCK"));
     m_typeCombo->addItem(QStringLiteral("库存调拨"), QStringLiteral("DB"));
     m_typeCombo->addItem(QStringLiteral("撤销"), QStringLiteral("CX"));

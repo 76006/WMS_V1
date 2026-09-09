@@ -1,9 +1,11 @@
 #include "ui/dialogs/InspectionDialog.h"
 
+#include "services/OfficeTemplateService.h"
+
 #include <QAbstractItemView>
 #include <QComboBox>
+#include <QDate>
 #include <QDateEdit>
-#include <QDateTime>
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QFileDialog>
@@ -15,14 +17,11 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeDatabase>
-#include <QPrintDialog>
-#include <QPrinter>
 #include <QPushButton>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QTableWidget>
-#include <QTextDocument>
 #include <QTextEdit>
-#include <QUuid>
 #include <QVBoxLayout>
 
 #include <utility>
@@ -33,6 +32,53 @@ constexpr qint64 MaximumAttachmentBytes = 50LL * 1024LL * 1024LL;
 QString displayQuantity(double value)
 {
     return QString::number(value, 'g', 12);
+}
+
+QString inspectionNumberPrefix(const QDate &date)
+{
+    return QStringLiteral("BMJ-JY-%1-").arg(date.toString(QStringLiteral("yyyyMMdd")));
+}
+
+bool isInspectionNumberForDate(const QString &number, const QDate &date)
+{
+    const QString prefix = inspectionNumberPrefix(date);
+    if (!number.startsWith(prefix) || number.size() != prefix.size() + 3) return false;
+    bool ok = false;
+    const int sequence = number.right(3).toInt(&ok);
+    return ok && sequence >= 1 && sequence <= 999
+        && number.right(3) == QStringLiteral("%1").arg(sequence, 3, 10, QLatin1Char('0'));
+}
+
+QString nextInspectionNumber(QSqlDatabase database, const QDate &date, QString *errorMessage)
+{
+    if (errorMessage) errorMessage->clear();
+    if (!date.isValid()) {
+        if (errorMessage) *errorMessage = QStringLiteral("送检日期无效。");
+        return {};
+    }
+    const QString prefix = inspectionNumberPrefix(date);
+    QSqlQuery query(database);
+    query.prepare(QStringLiteral(
+        "SELECT inspection_no FROM inbound_inspection_details WHERE inspection_no LIKE ?"));
+    query.addBindValue(prefix + QLatin1Char('%'));
+    if (!query.exec()) {
+        if (errorMessage) *errorMessage = query.lastError().text();
+        return {};
+    }
+    int maximumSequence = 0;
+    while (query.next()) {
+        const QString number = query.value(0).toString().trimmed();
+        if (!isInspectionNumberForDate(number, date)) continue;
+        maximumSequence = qMax(maximumSequence, number.right(3).toInt());
+    }
+    if (maximumSequence >= 999) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("%1的三位送检单流水号已用完。")
+                                .arg(date.toString(QStringLiteral("yyyy-MM-dd")));
+        }
+        return {};
+    }
+    return prefix + QStringLiteral("%1").arg(maximumSequence + 1, 3, 10, QLatin1Char('0'));
 }
 }
 
@@ -60,18 +106,39 @@ InspectionDialog::InspectionDialog(QSqlDatabase database,
 
     auto *form = new QFormLayout;
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    const QDate initialInspectionDate = m_inspection.inspectionDate.isValid()
+        ? m_inspection.inspectionDate : QDate::currentDate();
     m_numberEdit = new QLineEdit(this);
-    if (m_inspection.inspectionNumber.trimmed().isEmpty()) {
-        m_inspection.inspectionNumber = QStringLiteral("SJ%1-%2")
-            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMddHHmmss")),
-                 QUuid::createUuid().toString(QUuid::WithoutBraces).left(6).toUpper());
+    QString numberError;
+    if (!isInspectionNumberForDate(m_inspection.inspectionNumber.trimmed(),
+                                   initialInspectionDate)) {
+        m_inspection.inspectionNumber = nextInspectionNumber(
+            m_database, initialInspectionDate, &numberError);
     }
     m_numberEdit->setText(m_inspection.inspectionNumber);
-    m_dateEdit = new QDateEdit(m_inspection.inspectionDate.isValid()
-                                   ? m_inspection.inspectionDate : QDate::currentDate(), this);
+    m_numberEdit->setReadOnly(true);
+    m_numberEdit->setToolTip(QStringLiteral(
+        "送检单号按 BMJ-JY-年月日-三位当日流水号自动生成"));
+    m_dateEdit = new QDateEdit(initialInspectionDate, this);
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    const QDate arrivalDate = QDate::fromString(
+        m_inspection.templateFields.value(QStringLiteral("arrivalDate")),
+        QStringLiteral("yyyy-MM-dd"));
+    m_arrivalDateEdit = new QDateEdit(arrivalDate.isValid() ? arrivalDate : QDate::currentDate(), this);
+    m_arrivalDateEdit->setCalendarPopup(true);
+    m_arrivalDateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     m_inspectorEdit = new QLineEdit(m_inspection.inspectorName, this);
+    m_entrustedEdit = new QLineEdit(
+        m_inspection.templateFields.value(QStringLiteral("entrustedBy"),
+                                          m_inspection.inspectorName), this);
+    m_notificationDepartmentEdit = new QLineEdit(
+        m_inspection.templateFields.value(QStringLiteral("notificationDepartment"),
+                                          QStringLiteral("检验部")), this);
+    m_purchaseOrderEdit = new QLineEdit(
+        m_inspection.templateFields.value(QStringLiteral("purchaseOrderNumber")), this);
+    m_supplierEdit = new QLineEdit(
+        m_inspection.templateFields.value(QStringLiteral("supplier")), this);
     m_resultCombo = new QComboBox(this);
     m_resultCombo->addItem(QStringLiteral("待检验"), QStringLiteral("PENDING"));
     m_resultCombo->addItem(QStringLiteral("合格"), QStringLiteral("QUALIFIED"));
@@ -85,6 +152,11 @@ InspectionDialog::InspectionDialog(QSqlDatabase database,
 
     form->addRow(QStringLiteral("送检单号 *"), m_numberEdit);
     form->addRow(QStringLiteral("送检日期 *"), m_dateEdit);
+    form->addRow(QStringLiteral("到货日期 *"), m_arrivalDateEdit);
+    form->addRow(QStringLiteral("委托人员 *"), m_entrustedEdit);
+    form->addRow(QStringLiteral("通知单位 *"), m_notificationDepartmentEdit);
+    form->addRow(QStringLiteral("采购单号"), m_purchaseOrderEdit);
+    form->addRow(QStringLiteral("供应商"), m_supplierEdit);
     form->addRow(QStringLiteral("检验员 *"), m_inspectorEdit);
     form->addRow(QStringLiteral("检验结果 *"), m_resultCombo);
     form->addRow(QStringLiteral("检验说明"), m_conclusionEdit);
@@ -117,7 +189,7 @@ InspectionDialog::InspectionDialog(QSqlDatabase database,
     populateLines();
 
     auto *buttons = new QHBoxLayout;
-    auto *printButton = new QPushButton(QStringLiteral("打印送检单"), this);
+    auto *printButton = new QPushButton(QStringLiteral("打开模板预览/打印"), this);
     auto *saveButton = new QPushButton(QStringLiteral("保存并返回入库单"), this);
     saveButton->setProperty("primary", true);
     auto *cancelButton = new QPushButton(QStringLiteral("取消"), this);
@@ -131,6 +203,17 @@ InspectionDialog::InspectionDialog(QSqlDatabase database,
     connect(printButton, &QPushButton::clicked, this, &InspectionDialog::printInspectionForm);
     connect(saveButton, &QPushButton::clicked, this, &InspectionDialog::acceptInspection);
     connect(cancelButton, &QPushButton::clicked, this, &QDialog::reject);
+    connect(m_dateEdit, &QDateEdit::dateChanged, this, [this](const QDate &date) {
+        QString error;
+        const QString number = nextInspectionNumber(m_database, date, &error);
+        m_numberEdit->setText(number);
+        if (!error.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("生成送检单号失败"), error);
+        }
+    });
+    if (!numberError.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("生成送检单号失败"), numberError);
+    }
 }
 
 void InspectionDialog::populateLines()
@@ -195,37 +278,32 @@ QString InspectionDialog::resultText() const
     return m_resultCombo->currentText();
 }
 
-QString InspectionDialog::inspectionHtml() const
+OfficeTemplateDocument InspectionDialog::templateDocument() const
 {
-    QString rows;
-    for (int row = 0; row < m_lineTable->rowCount(); ++row) {
-        rows += QStringLiteral("<tr>");
-        for (int column = 0; column < m_lineTable->columnCount(); ++column) {
-            const QTableWidgetItem *item = m_lineTable->item(row, column);
-            rows += QStringLiteral("<td>%1</td>")
-                        .arg(item ? item->text().toHtmlEscaped() : QString());
-        }
-        rows += QStringLiteral("</tr>");
+    OfficeTemplateDocument document;
+    document.kind = OfficeFormKind::Inspection;
+    document.documentNumber = m_numberEdit->text().trimmed();
+    document.documentDate = m_dateEdit->date();
+    document.fields.insert(QStringLiteral("arrivalDate"),
+                           m_arrivalDateEdit->date().toString(QStringLiteral("yyyy-MM-dd")));
+    document.fields.insert(QStringLiteral("inspectionDate"),
+                           m_dateEdit->date().toString(QStringLiteral("yyyy-MM-dd")));
+    document.fields.insert(QStringLiteral("entrustedBy"), m_entrustedEdit->text().trimmed());
+    document.fields.insert(QStringLiteral("notificationDepartment"),
+                           m_notificationDepartmentEdit->text().trimmed());
+    document.fields.insert(QStringLiteral("purchaseOrderNumber"),
+                           m_purchaseOrderEdit->text().trimmed());
+    document.fields.insert(QStringLiteral("supplier"), m_supplierEdit->text().trimmed());
+    document.fields.insert(QStringLiteral("inspectionResult"), resultText());
+    document.fields.insert(QStringLiteral("conclusion"),
+                           m_conclusionEdit->toPlainText().trimmed());
+    QString error;
+    document.lines = OfficeTemplateService::materialLines(m_database, m_lines, &error);
+    for (OfficeTemplateLine &line : document.lines) {
+        line.orderNumber = m_purchaseOrderEdit->text().trimmed();
+        line.supplier = m_supplierEdit->text().trimmed();
     }
-    return QStringLiteral(
-        "<html><head><style>body{font-family:'Microsoft YaHei';font-size:10pt;}"
-        "h1{text-align:center;font-size:18pt;}table{border-collapse:collapse;width:100%;}"
-        "th,td{border:1px solid #333;padding:6px;}th{background:#eee;}"
-        ".meta td{border:0;padding:5px;}</style></head><body>"
-        "<h1>入库送检单</h1><table class='meta'>"
-        "<tr><td>送检单号：%1</td><td>送检日期：%2</td></tr>"
-        "<tr><td>检验员：%3</td><td>检验结果：%4</td></tr></table>"
-        "<table><tr><th>物料编码</th><th>产品名称</th><th>规格型号</th>"
-        "<th>送检数量</th><th>批次</th><th>入库仓库</th><th>入库库位</th></tr>%5</table>"
-        "<p><b>检验说明：</b>%6</p><p><b>附件：</b>%7</p>"
-        "<p style='margin-top:35px'>检验签字：________________　日期：________________</p>"
-        "</body></html>")
-        .arg(m_numberEdit->text().trimmed().toHtmlEscaped(),
-             m_dateEdit->date().toString(QStringLiteral("yyyy-MM-dd")),
-             m_inspectorEdit->text().trimmed().toHtmlEscaped(), resultText().toHtmlEscaped(),
-             rows, m_conclusionEdit->toPlainText().trimmed().toHtmlEscaped().replace('\n', "<br>"),
-             m_inspection.attachmentFileName.trimmed().isEmpty()
-                 ? QStringLiteral("未上传") : m_inspection.attachmentFileName.toHtmlEscaped());
+    return document;
 }
 
 void InspectionDialog::printInspectionForm()
@@ -241,13 +319,7 @@ void InspectionDialog::printInspectionForm()
                              QStringLiteral("请先返回入库单填写产品明细，再重新打开送检单打印。"));
         return;
     }
-    QPrinter printer(QPrinter::HighResolution);
-    QPrintDialog printDialog(&printer, this);
-    printDialog.setWindowTitle(QStringLiteral("打印送检单"));
-    if (printDialog.exec() != QDialog::Accepted) return;
-    QTextDocument document;
-    document.setHtml(inspectionHtml());
-    document.print(&printer);
+    OfficeTemplateService::openPreview(templateDocument(), this);
 }
 
 InboundInspectionRequest InspectionDialog::inspection() const
@@ -259,6 +331,14 @@ InboundInspectionRequest InspectionDialog::inspection() const
     result.inspectorName = m_inspectorEdit->text().trimmed();
     result.result = m_resultCombo->currentData().toString();
     result.conclusion = m_conclusionEdit->toPlainText().trimmed();
+    result.templateFields.insert(QStringLiteral("arrivalDate"),
+                                 m_arrivalDateEdit->date().toString(QStringLiteral("yyyy-MM-dd")));
+    result.templateFields.insert(QStringLiteral("entrustedBy"), m_entrustedEdit->text().trimmed());
+    result.templateFields.insert(QStringLiteral("notificationDepartment"),
+                                 m_notificationDepartmentEdit->text().trimmed());
+    result.templateFields.insert(QStringLiteral("purchaseOrderNumber"),
+                                 m_purchaseOrderEdit->text().trimmed());
+    result.templateFields.insert(QStringLiteral("supplier"), m_supplierEdit->text().trimmed());
     return result;
 }
 
@@ -266,9 +346,17 @@ void InspectionDialog::acceptInspection()
 {
     const InboundInspectionRequest value = inspection();
     if (value.inspectionNumber.isEmpty() || !value.inspectionDate.isValid()
-        || value.inspectorName.isEmpty()) {
+        || value.inspectorName.isEmpty()
+        || value.templateFields.value(QStringLiteral("entrustedBy")).isEmpty()
+        || value.templateFields.value(QStringLiteral("notificationDepartment")).isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("送检单不完整"),
-                             QStringLiteral("送检单号、送检日期和检验员不能为空。"));
+                             QStringLiteral("送检单号、送检日期、委托人员、通知单位和检验员不能为空。"));
+        return;
+    }
+    if (!isInspectionNumberForDate(value.inspectionNumber, value.inspectionDate)) {
+        QMessageBox::warning(
+            this, QStringLiteral("送检单号无效"),
+            QStringLiteral("送检单号必须符合 BMJ-JY-年月日-三位流水号，并与送检日期一致。"));
         return;
     }
     if (value.result == QStringLiteral("QUALIFIED")

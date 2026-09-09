@@ -1,6 +1,8 @@
 #include "ui/pages/ProductionIssuePage.h"
 
 #include "services/InventoryService.h"
+#include "services/OfficeTemplateService.h"
+#include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/widgets/ComboBoxSearch.h"
 #include "ui/widgets/StockLineTable.h"
 
@@ -16,6 +18,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -23,10 +26,6 @@
 #include <QVBoxLayout>
 
 #include <utility>
-
-namespace {
-constexpr int ProductCodeRole = Qt::UserRole + 1;
-}
 
 ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
                                          Session session,
@@ -78,7 +77,7 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_lines->setProductionUsageMode(true);
     m_lines->setProductionQuantity(m_plannedQuantity->value());
     m_usageHint = new QLabel(
-        QStringLiteral("选择成品后将递归展开BOM并带出全部末级物料；总用量按“生产台数 × BOM累计用量”计算，库存批次仍由用户指定。"),
+        QStringLiteral("领料明细默认保持为空。可点击“添加物料”逐项选择，也可点击“一键导入BOM用料”主动带出当前成品的全部末级用料；库存批次由用户指定。"),
         panel);
     m_usageHint->setObjectName(QStringLiteral("mutedText"));
     m_usageHint->setWordWrap(true);
@@ -109,8 +108,13 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     connect(m_submitButton, &QPushButton::clicked, this, &ProductionIssuePage::submit);
     connect(m_plannedQuantity, qOverload<double>(&QDoubleSpinBox::valueChanged),
             m_lines, &StockLineTable::setProductionQuantity);
-    connect(m_productCombo, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, &ProductionIssuePage::loadProductMaterials);
+    connect(m_lines, &StockLineTable::productionBomRequested,
+            this, &ProductionIssuePage::importProductBom);
+    connect(m_productCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        m_lines->clearLines();
+        m_usageHint->setText(
+            QStringLiteral("领料明细已清空。可逐项添加物料，或点击“一键导入BOM用料”。"));
+    });
     resetSubmissionToken();
     refreshReferenceData();
 }
@@ -131,35 +135,32 @@ void ProductionIssuePage::refreshReferenceData()
         "JOIN material_categories c ON c.id=m.category_id "
         "WHERE m.is_active=1 AND c.code='FINISHED' ORDER BY m.code"));
     while (products.next()) {
-        const int index = m_productCombo->count();
         m_productCombo->addItem(QStringLiteral("%1 - %2（%3）")
                                     .arg(products.value(1).toString(), products.value(2).toString(),
                                          products.value(3).toString()),
                                 products.value(0));
-        m_productCombo->setItemData(index, products.value(1), ProductCodeRole);
     }
     const int selectedIndex = m_productCombo->findData(selected);
     if (selectedIndex >= 0) m_productCombo->setCurrentIndex(selectedIndex);
     m_lines->refreshReferenceData();
-    loadProductMaterials();
     m_submitButton->setEnabled(m_session.canPostProduction()
                                && m_productCombo->count() > 0);
     refreshRecentDocuments();
 }
 
-void ProductionIssuePage::loadProductMaterials()
+void ProductionIssuePage::importProductBom()
 {
-    if (m_productCombo->currentIndex() < 0) {
-        m_lines->clearLines();
-        m_usageHint->setText(QStringLiteral("请先选择成品，系统将自动带出生产所需原材料。"));
+    const qlonglong productId = m_productCombo->currentData().toLongLong();
+    if (productId <= 0) {
+        QMessageBox::information(this, QStringLiteral("请选择成品"),
+                                 QStringLiteral("请先选择需要生产的成品物料。"));
         return;
     }
 
-    const qlonglong productId = m_productCombo->currentData().toLongLong();
-    const QString productCode = m_productCombo->currentData(ProductCodeRole).toString();
-    QList<QPair<qlonglong, double>> productionMaterials;
-    QSqlQuery materials(m_database);
-    materials.prepare(QStringLiteral(
+    QList<QPair<qlonglong, double>> materials;
+    QStringList inactiveMaterials;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
         "WITH RECURSIVE bom_tree(id,component_material_id,total_quantity) AS ("
         " SELECT id,component_material_id,quantity FROM material_bom_items "
         " WHERE product_material_id=? AND parent_item_id IS NULL"
@@ -169,38 +170,59 @@ void ProductionIssuePage::loadProductMaterials()
         " FROM material_bom_items child JOIN bom_tree parent "
         " ON child.parent_item_id=parent.id WHERE child.product_material_id=?"
         ") "
-        "SELECT tree.component_material_id,SUM(tree.total_quantity),m.code "
+        "SELECT tree.component_material_id,SUM(tree.total_quantity),m.code,m.name,m.is_active "
         "FROM bom_tree tree JOIN materials m ON m.id=tree.component_material_id "
-        "WHERE m.is_active=1 AND NOT EXISTS("
-        " SELECT 1 FROM material_bom_items child WHERE child.parent_item_id=tree.id) "
-        "GROUP BY tree.component_material_id,m.code ORDER BY m.code"));
-    materials.addBindValue(productId);
-    materials.addBindValue(productId);
-    if (!materials.exec()) {
-        m_lines->clearLines();
-        m_usageHint->setText(QStringLiteral("读取成品所需原材料失败，请重新进入页面后再试。"));
+        "WHERE NOT EXISTS(SELECT 1 FROM material_bom_items child "
+        "                 WHERE child.parent_item_id=tree.id) "
+        "GROUP BY tree.component_material_id,m.code,m.name,m.is_active ORDER BY m.code"));
+    query.addBindValue(productId);
+    query.addBindValue(productId);
+    if (!query.exec()) {
+        QMessageBox::warning(this, QStringLiteral("读取BOM失败"), query.lastError().text());
         return;
     }
-    while (materials.next()) {
-        productionMaterials.append({materials.value(0).toLongLong(),
-                                    materials.value(1).toDouble()});
+    while (query.next()) {
+        if (!query.value(4).toBool()) {
+            inactiveMaterials.append(
+                QStringLiteral("%1 - %2").arg(query.value(2).toString(),
+                                               query.value(3).toString()));
+            continue;
+        }
+        materials.append({query.value(0).toLongLong(), query.value(1).toDouble()});
+    }
+
+    if (!inactiveMaterials.isEmpty()) {
+        QMessageBox::warning(
+            this, QStringLiteral("BOM包含停用物料"),
+            QStringLiteral("以下BOM末级物料已停用，无法生成完整领料明细：\n\n%1\n\n"
+                           "请先在物料维护中启用或替换这些物料。")
+                .arg(inactiveMaterials.join(QLatin1Char('\n'))));
+        return;
+    }
+    if (materials.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("BOM没有可导入用料"),
+            QStringLiteral("当前成品尚未维护BOM，或BOM中没有末级领用物料。"));
+        return;
+    }
+
+    if (QMessageBox::question(
+            this, QStringLiteral("确认导入BOM用料"),
+            QStringLiteral("将按当前成品BOM导入 %1 种末级物料，并替换当前领料明细。\n\n"
+                           "总用量将按“生产台数 × BOM累计用量”计算，导入后仍需逐项指定库存批次。")
+                .arg(materials.size())) != QMessageBox::Yes) {
+        return;
     }
 
     QString error;
-    if (!m_lines->setProductionMaterials(productionMaterials, &error)) {
-        m_usageHint->setText(error);
-        return;
-    }
-    if (productionMaterials.isEmpty()) {
-        m_usageHint->setText(
-            QStringLiteral("成品 %1 尚未维护BOM，请先在物料维护的“BOM层级”中导入或添加BOM。")
-                .arg(productCode));
+    if (!m_lines->setProductionMaterials(materials, &error)) {
+        QMessageBox::warning(this, QStringLiteral("导入BOM用料失败"), error);
         return;
     }
     m_usageHint->setText(
-        QStringLiteral("已递归展开成品 %1 的BOM并汇总 %2 种末级物料；总领用量会随生产台数自动更新。")
-            .arg(productCode)
-            .arg(productionMaterials.size()));
+        QStringLiteral("已从当前成品BOM导入 %1 种末级物料；总用量已按 %2 台计算，请逐项确认仓库、库位和库存批次。")
+            .arg(materials.size())
+            .arg(m_plannedQuantity->value(), 0, 'f', 0));
 }
 
 void ProductionIssuePage::refreshRecentDocuments()
@@ -235,6 +257,33 @@ void ProductionIssuePage::submit()
         QMessageBox::warning(this, QStringLiteral("领料明细有误"), error);
         return;
     }
+
+    OfficeTemplateDocument issueForm;
+    issueForm.kind = OfficeFormKind::ProductionIssue;
+    issueForm.documentNumber = QStringLiteral("提交后自动生成");
+    issueForm.documentDate = m_dateEdit->date();
+    issueForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
+    issueForm.fields.insert(QStringLiteral("productionBatch"), m_batchEdit->text().trimmed());
+    issueForm.fields.insert(QStringLiteral("plannedQuantity"),
+                            QString::number(m_plannedQuantity->value(), 'g', 12));
+    QSqlQuery product(m_database);
+    product.prepare(QStringLiteral("SELECT name,specification FROM materials WHERE id=?"));
+    product.addBindValue(m_productCombo->currentData());
+    if (product.exec() && product.next()) {
+        issueForm.fields.insert(QStringLiteral("productName"), product.value(0).toString());
+        issueForm.fields.insert(QStringLiteral("productModel"), product.value(1).toString());
+    }
+    issueForm.lines = OfficeTemplateService::materialLines(m_database, movementLines, &error);
+    if (issueForm.lines.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("无法填写领料单模板"), error);
+        return;
+    }
+    for (OfficeTemplateLine &line : issueForm.lines)
+        line.unitUsage = line.quantity / m_plannedQuantity->value();
+    DocumentTemplateDialog issueDialog(issueForm, this);
+    if (issueDialog.exec() != QDialog::Accepted) return;
+    issueForm = issueDialog.document();
+
     if (QMessageBox::question(
             this, QStringLiteral("确认生产领料"),
             QStringLiteral("确认按 %1 台提交 %2 条领料明细？库存将整单扣减并生成库存流水。")
@@ -266,11 +315,23 @@ void ProductionIssuePage::submit()
         return;
     }
     m_numberLabel->setText(posted.documentNumber);
-    QMessageBox::information(this, QStringLiteral("生产领料完成"),
-                             QStringLiteral("领料单 %1 已生效。")
-                                 .arg(posted.documentNumber));
+    issueForm.documentNumber = posted.documentNumber;
+    QString formError;
+    if (OfficeTemplateService::attachToDocument(issueForm, m_database, m_session.userId,
+                                                posted.documentId, &formError)) {
+        QMessageBox::information(
+            this, QStringLiteral("生产领料完成"),
+            QStringLiteral("领料单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单\\领料单”，并已自动打开。")
+                .arg(posted.documentNumber));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("领料已完成，但模板处理未全部完成"),
+            QStringLiteral("领料单 %1 已生效，但以下保存或打开步骤未完成：\n\n%2")
+                .arg(posted.documentNumber, formError));
+    }
     resetSubmissionToken();
     m_notesEdit->clear();
+    m_lines->clearLines();
     emit stockChanged();
     refreshReferenceData();
 }

@@ -31,6 +31,7 @@ signals:
 private slots:
     void addMaterial();
     void editMaterial();
+    void editStock();
     void deleteMaterials();
     void batchEditMaterials();
     void importMaterials();
@@ -40,9 +41,11 @@ private slots:
     void loadCategories();
     void refreshBomProducts();
     void refreshBomTree();
+    void viewBomMaterialDetails();
     void addBomChild();
     void editBomQuantity();
     void removeBomItem();
+    void clearBom();
 
 private:
     qlonglong selectedMaterialId() const;
@@ -55,6 +58,7 @@ private:
     QComboBox *m_statusCombo = nullptr;
     QPushButton *m_addButton = nullptr;
     QPushButton *m_editButton = nullptr;
+    QPushButton *m_editStockButton = nullptr;
     QPushButton *m_deleteButton = nullptr;
     QPushButton *m_batchEditButton = nullptr;
     QPushButton *m_importButton = nullptr;
@@ -67,7 +71,9 @@ private:
     QComboBox *m_bomProductCombo = nullptr;
     QTreeWidget *m_bomTree = nullptr;
     QPushButton *m_importBomButton = nullptr;
+    QPushButton *m_viewBomMaterialButton = nullptr;
     QPushButton *m_addBomChildButton = nullptr;
     QPushButton *m_editBomQuantityButton = nullptr;
     QPushButton *m_removeBomItemButton = nullptr;
+    QPushButton *m_clearBomButton = nullptr;
 };

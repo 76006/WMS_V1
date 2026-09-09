@@ -240,6 +240,8 @@ QString InventoryReportService::documentTypeName(const QString &documentType)
     if (type == QStringLiteral("SCTL")) return QStringLiteral("生产退料");
     if (type == QStringLiteral("CPRK")) return QStringLiteral("成品入库");
     if (type == QStringLiteral("XSCK")) return QStringLiteral("销售出库");
+    if (type == QStringLiteral("WXLY")) return QStringLiteral("维修领用");
+    if (type == QStringLiteral("YPLY")) return QStringLiteral("研发领用");
     if (type == QStringLiteral("QTCK")) return QStringLiteral("其他出库");
     if (type == QStringLiteral("CX")) return QStringLiteral("撤销");
     if (type == QStringLiteral("PD")) return QStringLiteral("盘点调整");

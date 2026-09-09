@@ -24,6 +24,7 @@ public:
 private slots:
     void loadLocations();
     void refreshGeneratedCode();
+    void generateAvailableCode();
     void applyDefaultCategory();
     void chooseImage();
     void removeImage();
@@ -62,6 +63,7 @@ private:
     QString m_imageFileName;
     QString m_imageMimeType;
     bool m_imageChanged = false;
+    bool m_codeManuallyEdited = false;
     QLabel *m_errorLabel = nullptr;
     qlonglong m_pendingLocationId = 0;
 };

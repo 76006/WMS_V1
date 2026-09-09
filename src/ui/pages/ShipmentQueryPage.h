@@ -7,6 +7,7 @@
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QPushButton;
 class QSqlQueryModel;
 class QTableView;
 
@@ -23,6 +24,7 @@ public slots:
 private slots:
     void resetFilters();
     void loadSelectedShipmentDetails();
+    void openSelectedDeliveryForm();
 
 private:
     void loadFilterOptions();
@@ -37,6 +39,7 @@ private:
     QComboBox *m_projectCombo = nullptr;
     QLabel *m_summaryLabel = nullptr;
     QLabel *m_detailTitle = nullptr;
+    QPushButton *m_openTemplateButton = nullptr;
     QTableView *m_shipmentTable = nullptr;
     QTableView *m_detailTable = nullptr;
     QSqlQueryModel *m_shipmentModel = nullptr;

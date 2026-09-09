@@ -19,6 +19,7 @@
 /物料档案.xlsx
 /当前库存.xlsx
 /物料导入模板.xlsx
+/BMJ-BOM-*.xlsx
 ~$*.xlsx
 *.db
 *.db-wal

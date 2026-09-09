@@ -6,6 +6,8 @@
 #include <QList>
 #include <QSqlDatabase>
 
+#include "services/OfficeTemplateService.h"
+
 class QComboBox;
 class QDateEdit;
 class QLabel;
@@ -32,15 +34,20 @@ private slots:
 
 private:
     void populateLines();
-    QString inspectionHtml() const;
     QString resultText() const;
+    OfficeTemplateDocument templateDocument() const;
 
     QSqlDatabase m_database;
     QList<StockMovementRequest> m_lines;
     InboundInspectionRequest m_inspection;
     QLineEdit *m_numberEdit = nullptr;
     QDateEdit *m_dateEdit = nullptr;
+    QDateEdit *m_arrivalDateEdit = nullptr;
     QLineEdit *m_inspectorEdit = nullptr;
+    QLineEdit *m_entrustedEdit = nullptr;
+    QLineEdit *m_notificationDepartmentEdit = nullptr;
+    QLineEdit *m_purchaseOrderEdit = nullptr;
+    QLineEdit *m_supplierEdit = nullptr;
     QComboBox *m_resultCombo = nullptr;
     QTextEdit *m_conclusionEdit = nullptr;
     QLabel *m_attachmentLabel = nullptr;

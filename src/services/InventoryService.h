@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QDate>
 #include <QList>
+#include <QMap>
 #include <QSqlDatabase>
 #include <QStringList>
 #include <QVariant>
@@ -36,6 +37,7 @@ struct InboundInspectionRequest
     QString attachmentFileName;
     QString attachmentMimeType;
     QByteArray attachmentData;
+    QMap<QString, QString> templateFields;
 };
 
 struct StockDocumentRequest
@@ -141,6 +143,7 @@ struct InventoryCountLine
     QString batchNo;
     double systemQuantity = 0.0;
     double actualQuantity = 0.0;
+    QString supplier;
     QString differenceReason;
 };
 

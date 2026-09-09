@@ -58,9 +58,14 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     hint->setObjectName(QStringLiteral("mutedText"));
     auto *addButton = new QPushButton(QStringLiteral("添加物料"), this);
     addButton->setProperty("primary", true);
+    m_importProductionBomButton = new QPushButton(QStringLiteral("一键导入BOM用料"), this);
+    m_importProductionBomButton->setVisible(false);
+    m_importProductionBomButton->setToolTip(
+        QStringLiteral("递归导入当前成品BOM中的全部末级领用物料"));
     toolbar->addWidget(hint);
     toolbar->addStretch();
     toolbar->addWidget(addButton);
+    toolbar->addWidget(m_importProductionBomButton);
     root->addLayout(toolbar);
 
     m_table = new QTableWidget(0, 11, this);
@@ -87,6 +92,8 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     root->addWidget(m_table);
 
     connect(addButton, &QPushButton::clicked, this, &StockLineTable::addLine);
+    connect(m_importProductionBomButton, &QPushButton::clicked,
+            this, &StockLineTable::productionBomRequested);
     addLine();
 }
 
@@ -110,25 +117,23 @@ void StockLineTable::loadMaterials(QComboBox *combo, const QVariant &selected)
     combo->blockSignals(true);
     combo->clear();
     QSqlQuery query(m_database);
-    const QString sql = m_mode == Mode::Inbound
-        ? QStringLiteral(
-              "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
-              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
-              "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
-              "WHERE m.is_active=1 ORDER BY m.code")
-        : m_productionUsageMode
-        ? QStringLiteral(
-              "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
-              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
-              "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
-              "WHERE m.is_active=1 AND COALESCE(c.code,'')<>'FINISHED' ORDER BY m.code")
-        : QStringLiteral(
-              "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
-              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
-              "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
-              "WHERE m.is_active=1 AND EXISTS(SELECT 1 FROM stock_balances s "
-              "WHERE s.material_id=m.id AND s.quantity>0) ORDER BY m.code");
-    query.exec(sql);
+    QString sql = QStringLiteral(
+        "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
+        "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
+        "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
+        "WHERE m.is_active=1");
+    if (m_mode == Mode::Outbound && m_productionUsageMode) {
+        sql += QStringLiteral(" AND COALESCE(c.code,'')<>'FINISHED'");
+    } else if (m_mode == Mode::Outbound) {
+        sql += QStringLiteral(
+            " AND EXISTS(SELECT 1 FROM stock_balances s "
+            "WHERE s.material_id=m.id AND s.quantity>0)");
+    }
+    if (!m_materialCategoryFilter.isEmpty()) sql += QStringLiteral(" AND c.code=?");
+    sql += QStringLiteral(" ORDER BY m.code");
+    query.prepare(sql);
+    if (!m_materialCategoryFilter.isEmpty()) query.addBindValue(m_materialCategoryFilter);
+    query.exec();
     while (query.next()) {
         const int index = combo->count();
         combo->addItem(QStringLiteral("%1 - %2")
@@ -150,8 +155,10 @@ void StockLineTable::loadMaterials(QComboBox *combo, const QVariant &selected)
     const int selectedIndex = combo->findData(selected);
     if (selectedIndex >= 0) {
         combo->setCurrentIndex(selectedIndex);
-    } else if (combo->count() > 0) {
+    } else if (combo->count() > 0 && !m_requireExplicitMaterialSelection) {
         combo->setCurrentIndex(0);
+    } else {
+        combo->setCurrentIndex(-1);
     }
     combo->blockSignals(false);
 }
@@ -300,20 +307,23 @@ bool StockLineTable::setProductionMaterials(
 
     if (!missingMaterial.isEmpty()) {
         m_table->setRowCount(0);
-        addLine();
+        if (!m_keepEmptyWhenNoRows) addLine();
         if (errorMessage) {
             *errorMessage = QStringLiteral("物料 ID %1 已停用或不存在，无法自动生成领料明细。")
                                 .arg(missingMaterial);
         }
         return false;
     }
-    if (materials.isEmpty()) addLine();
+    if (materials.isEmpty() && !m_keepEmptyWhenNoRows) addLine();
     return true;
 }
 
 void StockLineTable::setProductionUsageMode(bool enabled)
 {
     m_productionUsageMode = m_mode == Mode::Outbound && enabled;
+    m_importProductionBomButton->setVisible(m_productionUsageMode);
+    m_keepEmptyWhenNoRows = m_productionUsageMode;
+    m_requireExplicitMaterialSelection = m_productionUsageMode;
     m_table->setColumnHidden(UnitUsageColumn, !m_productionUsageMode);
     m_table->setHorizontalHeaderItem(
         QuantityColumn,
@@ -333,6 +343,16 @@ void StockLineTable::setProductionUsageMode(bool enabled)
         }
         loadUnitUsage(row);
     }
+    if (m_productionUsageMode) m_table->setRowCount(0);
+    else if (m_table->rowCount() == 0) addLine();
+}
+
+void StockLineTable::setMaterialCategoryFilter(const QString &categoryCode)
+{
+    const QString normalized = categoryCode.trimmed().toUpper();
+    if (m_materialCategoryFilter == normalized) return;
+    m_materialCategoryFilter = normalized;
+    refreshReferenceData();
 }
 
 void StockLineTable::setProductionQuantity(double quantity)
@@ -427,7 +447,7 @@ QStringList StockLineTable::purchaseWarnings() const
 void StockLineTable::refreshReferenceData()
 {
     if (m_table->rowCount() == 0) {
-        addLine();
+        if (!m_keepEmptyWhenNoRows) addLine();
         return;
     }
     for (int row = 0; row < m_table->rowCount(); ++row) {
@@ -442,7 +462,7 @@ void StockLineTable::refreshReferenceData()
 void StockLineTable::clearLines()
 {
     m_table->setRowCount(0);
-    addLine();
+    if (!m_keepEmptyWhenNoRows) addLine();
 }
 
 void StockLineTable::loadWarehouses(int row)
