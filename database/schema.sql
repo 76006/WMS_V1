@@ -82,6 +82,19 @@ CREATE TABLE IF NOT EXISTS materials (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS material_bom_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_material_id INTEGER NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    parent_item_id INTEGER REFERENCES material_bom_items(id) ON DELETE CASCADE,
+    component_material_id INTEGER NOT NULL REFERENCES materials(id) ON DELETE RESTRICT,
+    quantity NUMERIC NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    source_sheet TEXT NOT NULL DEFAULT '',
+    source_row INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS number_rules (
     document_type TEXT PRIMARY KEY,
     prefix TEXT NOT NULL,
@@ -225,6 +238,18 @@ CREATE TABLE IF NOT EXISTS attachments (
     deleted_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS inbound_inspection_details (
+    document_id INTEGER PRIMARY KEY REFERENCES business_documents(id) ON DELETE RESTRICT,
+    requires_inspection INTEGER NOT NULL DEFAULT 0 CHECK (requires_inspection IN (0, 1)),
+    inspection_no TEXT NOT NULL DEFAULT '',
+    inspection_date TEXT,
+    inspector_name TEXT NOT NULL DEFAULT '',
+    inspection_result TEXT NOT NULL DEFAULT 'NOT_REQUIRED'
+        CHECK (inspection_result IN ('NOT_REQUIRED', 'PENDING', 'QUALIFIED', 'UNQUALIFIED')),
+    conclusion TEXT NOT NULL DEFAULT '',
+    inspection_attachment_id INTEGER REFERENCES attachments(id)
+);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),
@@ -236,12 +261,20 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_materials_name ON materials(name);
+CREATE INDEX IF NOT EXISTS idx_material_bom_product_parent
+    ON material_bom_items(product_material_id, parent_item_id, sort_order, id);
+CREATE INDEX IF NOT EXISTS idx_material_bom_component
+    ON material_bom_items(component_material_id);
 CREATE INDEX IF NOT EXISTS idx_documents_date_type ON business_documents(document_date, document_type);
 CREATE INDEX IF NOT EXISTS idx_ledger_material_time ON inventory_ledger(material_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ledger_document ON inventory_ledger(document_id);
 CREATE INDEX IF NOT EXISTS idx_stock_location ON stock_balances(warehouse_id, location_id);
 CREATE INDEX IF NOT EXISTS idx_serial_material_status ON serial_numbers(material_id, status);
 CREATE INDEX IF NOT EXISTS idx_attachments_business ON attachments(business_type, business_id, is_deleted);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_inspection_no
+    ON inbound_inspection_details(inspection_no) WHERE inspection_no <> '';
+CREATE INDEX IF NOT EXISTS idx_inbound_inspection_result
+    ON inbound_inspection_details(requires_inspection, inspection_result);
 
 INSERT OR IGNORE INTO roles(code, name, description) VALUES
     ('ADMIN', '管理员', '全部功能'),

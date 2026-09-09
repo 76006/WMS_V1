@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QMap>
 #include <QProcess>
 #include <QRegularExpression>
@@ -14,6 +15,7 @@
 #include <QXmlStreamReader>
 
 #include <cmath>
+#include <utility>
 
 namespace {
 using SheetCells = QMap<int, QMap<int, QString>>;
@@ -22,6 +24,7 @@ struct WorkbookSheet
 {
     QString name;
     SheetCells cells;
+    QMap<int, int> rowLevels;
 };
 
 void setImportError(QString *target, const QString &message)
@@ -91,7 +94,8 @@ bool loadSharedStrings(const QString &path, QStringList *values, QString *errorM
 }
 
 bool loadSheet(const QString &path, const QStringList &sharedStrings,
-               SheetCells *cells, QString *errorMessage)
+               SheetCells *cells, QMap<int, int> *rowLevels,
+               QString *errorMessage)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -101,6 +105,12 @@ bool loadSheet(const QString &path, const QStringList &sharedStrings,
     QXmlStreamReader xml(&file);
     while (!xml.atEnd()) {
         xml.readNext();
+        if (xml.isStartElement() && xml.name() == QStringLiteral("row")) {
+            const int row = attributeValue(xml.attributes(), QStringLiteral("r")).toInt();
+            const int level = attributeValue(xml.attributes(), QStringLiteral("outlineLevel")).toInt();
+            if (row > 0 && rowLevels) rowLevels->insert(row, level);
+            continue;
+        }
         if (!xml.isStartElement() || xml.name() != QStringLiteral("c")) continue;
         const QString reference = attributeValue(xml.attributes(), QStringLiteral("r"));
         const QString type = attributeValue(xml.attributes(), QStringLiteral("t"));
@@ -232,7 +242,8 @@ bool loadWorkbook(const QString &filePath, QList<WorkbookSheet> *sheets,
     for (const auto &sheetFile : std::as_const(sheetFiles)) {
         WorkbookSheet sheet;
         sheet.name = sheetFile.first;
-        if (!loadSheet(sheetFile.second, sharedStrings, &sheet.cells, errorMessage)) return false;
+        if (!loadSheet(sheetFile.second, sharedStrings, &sheet.cells,
+                       &sheet.rowLevels, errorMessage)) return false;
         sheets->append(sheet);
     }
     return true;
@@ -1011,6 +1022,322 @@ QString MaterialExcelImporter::statusText(MaterialImportStatus status)
     case MaterialImportStatus::Skipped: return QStringLiteral("跳过");
     }
     return {};
+}
+
+bool BomExcelImporter::parseFile(const QString &filePath,
+                                 BomImportResult *result,
+                                 QString *errorMessage)
+{
+    if (!result) {
+        setImportError(errorMessage, QStringLiteral("BOM导入结果容器无效。"));
+        return false;
+    }
+    *result = BomImportResult();
+    QList<WorkbookSheet> sheets;
+    if (!loadWorkbook(filePath, &sheets, errorMessage)) return false;
+
+    const WorkbookSheet *bomSheet = nullptr;
+    int headerRow = 0;
+    int codeColumn = 0;
+    int specificationColumn = 0;
+    int unitColumn = 0;
+    int quantityColumn = 0;
+    int processingColumn = 0;
+    for (const WorkbookSheet &sheet : std::as_const(sheets)) {
+        for (auto rowIt = sheet.cells.cbegin(); rowIt != sheet.cells.cend(); ++rowIt) {
+            int candidateCode = 0;
+            int candidateQuantity = 0;
+            int candidateSpecification = 0;
+            int candidateUnit = 0;
+            int candidateProcessing = 0;
+            for (auto cellIt = rowIt.value().cbegin(); cellIt != rowIt.value().cend(); ++cellIt) {
+                const QString title = cellIt.value().trimmed();
+                if (title.contains(QStringLiteral("料号"))) candidateCode = cellIt.key();
+                if (title == QStringLiteral("用量") || title == QStringLiteral("单台用量"))
+                    candidateQuantity = cellIt.key();
+                if (title.contains(QStringLiteral("规格型号")) || title == QStringLiteral("规格"))
+                    candidateSpecification = cellIt.key();
+                if (title == QStringLiteral("单位")) candidateUnit = cellIt.key();
+                if (title == QStringLiteral("加工方式")) candidateProcessing = cellIt.key();
+            }
+            if (candidateCode > 0 && candidateQuantity > 0) {
+                bomSheet = &sheet;
+                headerRow = rowIt.key();
+                codeColumn = candidateCode;
+                specificationColumn = candidateSpecification;
+                unitColumn = candidateUnit;
+                quantityColumn = candidateQuantity;
+                processingColumn = candidateProcessing;
+                break;
+            }
+        }
+        if (bomSheet) break;
+    }
+    if (!bomSheet) {
+        setImportError(errorMessage,
+                       QStringLiteral("Excel中找不到同时包含“料号”和“用量”的BOM清单。"));
+        return false;
+    }
+
+    const QRegularExpression materialCodePattern(
+        QStringLiteral("^[PWMO][A-Z0-9-]{3,}$"),
+        QRegularExpression::CaseInsensitiveOption);
+    QMap<int, int> lastIndexAtLevel;
+    int rootIndex = -1;
+    const int lastRow = bomSheet->cells.isEmpty() ? 0 : bomSheet->cells.lastKey();
+    for (int sourceRow = headerRow + 1; sourceRow <= lastRow; ++sourceRow) {
+        const QString code = cell(bomSheet->cells, sourceRow, codeColumn).trimmed().toUpper();
+        if (!materialCodePattern.match(code).hasMatch()) continue;
+
+        BomImportRow row;
+        row.sourceRow = sourceRow;
+        row.materialCode = code;
+        const QChar type = code.at(0);
+        if (type == QLatin1Char('P')) row.categoryCode = QStringLiteral("FINISHED");
+        else if (type == QLatin1Char('W')) row.categoryCode = QStringLiteral("SEMI");
+        else if (type == QLatin1Char('M')) row.categoryCode = QStringLiteral("RAW");
+        else row.categoryCode = QStringLiteral("CONSUMABLE");
+
+        if (codeColumn == 3 && specificationColumn >= 8) {
+            const int nameColumn = type == QLatin1Char('P') ? 4
+                : type == QLatin1Char('W') ? 5
+                : type == QLatin1Char('M') ? 6 : 7;
+            row.materialName = cell(bomSheet->cells, sourceRow, nameColumn);
+        } else {
+            const int lastNameColumn = specificationColumn > codeColumn
+                ? specificationColumn - 1 : codeColumn + 4;
+            for (int column = codeColumn + 1; column <= lastNameColumn; ++column) {
+                row.materialName = cell(bomSheet->cells, sourceRow, column);
+                if (!row.materialName.isEmpty()) break;
+            }
+        }
+        if (type == QLatin1Char('P')) {
+            const QRegularExpression productNamePattern(
+                QStringLiteral("产品名称\\s*[：:]\\s*(.*?)\\s+产品型号\\s*[：:]"));
+            for (int titleRow = 1; titleRow < headerRow; ++titleRow) {
+                for (const QString &title : bomSheet->cells.value(titleRow)) {
+                    const QRegularExpressionMatch match = productNamePattern.match(title);
+                    if (match.hasMatch() && !match.captured(1).trimmed().isEmpty()) {
+                        row.materialName = match.captured(1).trimmed();
+                        break;
+                    }
+                }
+                if (!row.materialName.isEmpty()
+                    && row.materialName != cell(bomSheet->cells, sourceRow, 4)) break;
+            }
+        }
+        row.specification = specificationColumn > 0
+            ? cell(bomSheet->cells, sourceRow, specificationColumn) : QString();
+        row.unit = unitColumn > 0 ? cell(bomSheet->cells, sourceRow, unitColumn) : QString();
+        if (row.unit.isEmpty() || row.unit == QStringLiteral("/"))
+            row.unit = (type == QLatin1Char('P') || type == QLatin1Char('W'))
+                ? QStringLiteral("套") : QStringLiteral("个");
+        row.processingMethod = processingColumn > 0
+            ? cell(bomSheet->cells, sourceRow, processingColumn) : QString();
+        if (row.processingMethod == QStringLiteral("/")) row.processingMethod.clear();
+
+        const QString rawQuantity = cell(bomSheet->cells, sourceRow, quantityColumn);
+        bool quantityOk = false;
+        const double quantity = rawQuantity.toDouble(&quantityOk);
+        if (quantityOk && quantity > 0.0) {
+            row.quantity = quantity;
+        } else if (type == QLatin1Char('P') || type == QLatin1Char('W')) {
+            row.quantity = 1.0;
+        } else {
+            setImportError(errorMessage,
+                QStringLiteral("工作表“%1”第%2行物料 %3 的用量不是大于0的数字。")
+                    .arg(bomSheet->name).arg(sourceRow).arg(code));
+            return false;
+        }
+        if (row.materialName.isEmpty()) {
+            setImportError(errorMessage,
+                QStringLiteral("工作表“%1”第%2行物料 %3 缺少名称。")
+                    .arg(bomSheet->name).arg(sourceRow).arg(code));
+            return false;
+        }
+
+        if (rootIndex < 0) {
+            if (type != QLatin1Char('P')) continue;
+            row.level = 0;
+            row.parentIndex = -1;
+            rootIndex = result->rows.size();
+            result->productCode = code;
+            result->rows.append(row);
+            lastIndexAtLevel.insert(0, rootIndex);
+            continue;
+        }
+        if (type == QLatin1Char('P')) {
+            setImportError(errorMessage,
+                QStringLiteral("工作表“%1”包含多个成品根节点，请每个BOM文件只保留一个成品。")
+                    .arg(bomSheet->name));
+            return false;
+        }
+
+        const int outlineLevel = bomSheet->rowLevels.value(sourceRow, 0);
+        row.level = outlineLevel <= 1 ? 1 : outlineLevel;
+        if (row.level == 1) {
+            row.parentIndex = rootIndex;
+        } else {
+            int parentLevel = row.level - 1;
+            while (parentLevel > 0 && !lastIndexAtLevel.contains(parentLevel)) --parentLevel;
+            row.parentIndex = lastIndexAtLevel.value(parentLevel, rootIndex);
+        }
+        const int rowIndex = result->rows.size();
+        result->rows.append(row);
+        if (outlineLevel > 0) {
+            const QList<int> levels = lastIndexAtLevel.keys();
+            for (int level : levels) if (level > row.level) lastIndexAtLevel.remove(level);
+            lastIndexAtLevel.insert(row.level, rowIndex);
+        }
+    }
+
+    if (rootIndex < 0 || result->rows.size() < 2) {
+        setImportError(errorMessage,
+                       QStringLiteral("BOM表中没有识别到成品根节点及其下级物料。"));
+        return false;
+    }
+    result->sourceSheet = bomSheet->name;
+    return true;
+}
+
+bool BomExcelImporter::importRows(QSqlDatabase database,
+                                  qlonglong operatorId,
+                                  const BomImportResult &result,
+                                  int *createdMaterialCount,
+                                  int *updatedMaterialCount,
+                                  QString *errorMessage)
+{
+    if (!database.isOpen() || operatorId <= 0 || result.rows.size() < 2) {
+        setImportError(errorMessage, QStringLiteral("数据库、当前用户或BOM数据无效。"));
+        return false;
+    }
+    if (!database.transaction()) {
+        setImportError(errorMessage, QStringLiteral("无法开始BOM导入事务：%1")
+                                       .arg(database.lastError().text()));
+        return false;
+    }
+
+    int created = 0;
+    int updated = 0;
+    QHash<QString, qlonglong> materialIds;
+    const QString now = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+    for (const BomImportRow &row : result.rows) {
+        if (materialIds.contains(row.materialCode)) continue;
+        QSqlQuery category(database);
+        category.prepare(QStringLiteral(
+            "SELECT id FROM material_categories WHERE code=? AND is_active=1"));
+        category.addBindValue(row.categoryCode);
+        if (!category.exec() || !category.next()) {
+            setImportError(errorMessage,
+                           QStringLiteral("物料 %1 对应的分类 %2 不存在或已停用。")
+                               .arg(row.materialCode, row.categoryCode));
+            database.rollback();
+            return false;
+        }
+
+        QSqlQuery existing(database);
+        existing.prepare(QStringLiteral("SELECT id FROM materials WHERE code=?"));
+        existing.addBindValue(row.materialCode);
+        const bool exists = existing.exec() && existing.next();
+        qlonglong materialId = exists ? existing.value(0).toLongLong() : 0;
+        QSqlQuery save(database);
+        if (exists) {
+            save.prepare(QStringLiteral(
+                "UPDATE materials SET name=?,specification=?,category_id=?,unit=?,"
+                "processing_method=?,is_active=1,updated_at=? WHERE id=?"));
+        } else {
+            save.prepare(QStringLiteral(
+                "INSERT INTO materials(code,name,specification,category_id,unit,unit_usage,"
+                "processing_method,is_active) VALUES(?,?,?,?,?,0,?,1)"));
+            save.addBindValue(row.materialCode);
+        }
+        save.addBindValue(row.materialName);
+        save.addBindValue(databaseText(row.specification));
+        save.addBindValue(category.value(0));
+        save.addBindValue(row.unit);
+        save.addBindValue(databaseText(row.processingMethod));
+        if (exists) {
+            save.addBindValue(now);
+            save.addBindValue(materialId);
+        }
+        if (!save.exec()) {
+            setImportError(errorMessage,
+                           QStringLiteral("保存物料 %1 失败：%2")
+                               .arg(row.materialCode, save.lastError().text()));
+            database.rollback();
+            return false;
+        }
+        if (!exists) materialId = save.lastInsertId().toLongLong();
+        materialIds.insert(row.materialCode, materialId);
+        if (exists) ++updated;
+        else ++created;
+    }
+
+    const qlonglong productMaterialId = materialIds.value(result.productCode);
+    QSqlQuery removeOld(database);
+    removeOld.prepare(QStringLiteral(
+        "DELETE FROM material_bom_items WHERE product_material_id=?"));
+    removeOld.addBindValue(productMaterialId);
+    if (!removeOld.exec()) {
+        setImportError(errorMessage,
+                       QStringLiteral("清理原BOM失败：%1").arg(removeOld.lastError().text()));
+        database.rollback();
+        return false;
+    }
+
+    QHash<int, qlonglong> itemIds;
+    for (int index = 1; index < result.rows.size(); ++index) {
+        const BomImportRow &row = result.rows.at(index);
+        QVariant parentItemId;
+        if (row.parentIndex > 0) {
+            if (!itemIds.contains(row.parentIndex)) {
+                setImportError(errorMessage,
+                               QStringLiteral("第%1行的上级BOM节点无效。")
+                                   .arg(row.sourceRow));
+                database.rollback();
+                return false;
+            }
+            parentItemId = itemIds.value(row.parentIndex);
+        }
+        QSqlQuery insert(database);
+        insert.prepare(QStringLiteral(
+            "INSERT INTO material_bom_items(product_material_id,parent_item_id,"
+            "component_material_id,quantity,sort_order,source_sheet,source_row) "
+            "VALUES(?,?,?,?,?,?,?)"));
+        insert.addBindValue(productMaterialId);
+        insert.addBindValue(parentItemId);
+        insert.addBindValue(materialIds.value(row.materialCode));
+        insert.addBindValue(row.quantity);
+        insert.addBindValue(index);
+        insert.addBindValue(result.sourceSheet);
+        insert.addBindValue(row.sourceRow);
+        if (!insert.exec()) {
+            setImportError(errorMessage,
+                           QStringLiteral("导入第%1行BOM关系失败：%2")
+                               .arg(row.sourceRow).arg(insert.lastError().text()));
+            database.rollback();
+            return false;
+        }
+        itemIds.insert(index, insert.lastInsertId().toLongLong());
+    }
+
+    QSqlQuery audit(database);
+    audit.prepare(QStringLiteral(
+        "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
+        "VALUES(?,'MATERIAL_BOM_IMPORT','material',?,?)"));
+    audit.addBindValue(operatorId);
+    audit.addBindValue(productMaterialId);
+    audit.addBindValue(QStringLiteral("%1：导入%2个BOM节点")
+                           .arg(result.productCode).arg(result.rows.size() - 1));
+    if (!audit.exec() || !database.commit()) {
+        setImportError(errorMessage, audit.lastError().text().isEmpty()
+            ? database.lastError().text() : audit.lastError().text());
+        database.rollback();
+        return false;
+    }
+    if (createdMaterialCount) *createdMaterialCount = created;
+    if (updatedMaterialCount) *updatedMaterialCount = updated;
+    return true;
 }
 
 bool OfficePreviewExtractor::previewXlsx(const QString &filePath,

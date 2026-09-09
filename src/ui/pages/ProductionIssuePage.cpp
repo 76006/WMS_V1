@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -22,6 +23,10 @@
 #include <QVBoxLayout>
 
 #include <utility>
+
+namespace {
+constexpr int ProductCodeRole = Qt::UserRole + 1;
+}
 
 ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
                                          Session session,
@@ -72,12 +77,12 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Outbound, panel);
     m_lines->setProductionUsageMode(true);
     m_lines->setProductionQuantity(m_plannedQuantity->value());
-    auto *usageHint = new QLabel(
-        QStringLiteral("单台用量默认从物料档案带出，也可在本次领料中调整；总用量按“生产台数 × 单台用量”自动计算，批次仍由用户指定。"),
+    m_usageHint = new QLabel(
+        QStringLiteral("选择成品后将递归展开BOM并带出全部末级物料；总用量按“生产台数 × BOM累计用量”计算，库存批次仍由用户指定。"),
         panel);
-    usageHint->setObjectName(QStringLiteral("mutedText"));
-    usageHint->setWordWrap(true);
-    panelLayout->addWidget(usageHint);
+    m_usageHint->setObjectName(QStringLiteral("mutedText"));
+    m_usageHint->setWordWrap(true);
+    panelLayout->addWidget(m_usageHint);
     panelLayout->addWidget(m_lines);
     auto *actions = new QHBoxLayout;
     actions->addStretch();
@@ -104,6 +109,8 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     connect(m_submitButton, &QPushButton::clicked, this, &ProductionIssuePage::submit);
     connect(m_plannedQuantity, qOverload<double>(&QDoubleSpinBox::valueChanged),
             m_lines, &StockLineTable::setProductionQuantity);
+    connect(m_productCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &ProductionIssuePage::loadProductMaterials);
     resetSubmissionToken();
     refreshReferenceData();
 }
@@ -116,6 +123,7 @@ void ProductionIssuePage::resetSubmissionToken()
 void ProductionIssuePage::refreshReferenceData()
 {
     const QVariant selected = m_productCombo->currentData();
+    const QSignalBlocker productBlocker(m_productCombo);
     m_productCombo->clear();
     QSqlQuery products(m_database);
     products.exec(QStringLiteral(
@@ -123,17 +131,76 @@ void ProductionIssuePage::refreshReferenceData()
         "JOIN material_categories c ON c.id=m.category_id "
         "WHERE m.is_active=1 AND c.code='FINISHED' ORDER BY m.code"));
     while (products.next()) {
+        const int index = m_productCombo->count();
         m_productCombo->addItem(QStringLiteral("%1 - %2（%3）")
                                     .arg(products.value(1).toString(), products.value(2).toString(),
                                          products.value(3).toString()),
                                 products.value(0));
+        m_productCombo->setItemData(index, products.value(1), ProductCodeRole);
     }
     const int selectedIndex = m_productCombo->findData(selected);
     if (selectedIndex >= 0) m_productCombo->setCurrentIndex(selectedIndex);
     m_lines->refreshReferenceData();
+    loadProductMaterials();
     m_submitButton->setEnabled(m_session.canPostProduction()
                                && m_productCombo->count() > 0);
     refreshRecentDocuments();
+}
+
+void ProductionIssuePage::loadProductMaterials()
+{
+    if (m_productCombo->currentIndex() < 0) {
+        m_lines->clearLines();
+        m_usageHint->setText(QStringLiteral("请先选择成品，系统将自动带出生产所需原材料。"));
+        return;
+    }
+
+    const qlonglong productId = m_productCombo->currentData().toLongLong();
+    const QString productCode = m_productCombo->currentData(ProductCodeRole).toString();
+    QList<QPair<qlonglong, double>> productionMaterials;
+    QSqlQuery materials(m_database);
+    materials.prepare(QStringLiteral(
+        "WITH RECURSIVE bom_tree(id,component_material_id,total_quantity) AS ("
+        " SELECT id,component_material_id,quantity FROM material_bom_items "
+        " WHERE product_material_id=? AND parent_item_id IS NULL"
+        " UNION ALL"
+        " SELECT child.id,child.component_material_id,"
+        "        parent.total_quantity*child.quantity"
+        " FROM material_bom_items child JOIN bom_tree parent "
+        " ON child.parent_item_id=parent.id WHERE child.product_material_id=?"
+        ") "
+        "SELECT tree.component_material_id,SUM(tree.total_quantity),m.code "
+        "FROM bom_tree tree JOIN materials m ON m.id=tree.component_material_id "
+        "WHERE m.is_active=1 AND NOT EXISTS("
+        " SELECT 1 FROM material_bom_items child WHERE child.parent_item_id=tree.id) "
+        "GROUP BY tree.component_material_id,m.code ORDER BY m.code"));
+    materials.addBindValue(productId);
+    materials.addBindValue(productId);
+    if (!materials.exec()) {
+        m_lines->clearLines();
+        m_usageHint->setText(QStringLiteral("读取成品所需原材料失败，请重新进入页面后再试。"));
+        return;
+    }
+    while (materials.next()) {
+        productionMaterials.append({materials.value(0).toLongLong(),
+                                    materials.value(1).toDouble()});
+    }
+
+    QString error;
+    if (!m_lines->setProductionMaterials(productionMaterials, &error)) {
+        m_usageHint->setText(error);
+        return;
+    }
+    if (productionMaterials.isEmpty()) {
+        m_usageHint->setText(
+            QStringLiteral("成品 %1 尚未维护BOM，请先在物料维护的“BOM层级”中导入或添加BOM。")
+                .arg(productCode));
+        return;
+    }
+    m_usageHint->setText(
+        QStringLiteral("已递归展开成品 %1 的BOM并汇总 %2 种末级物料；总领用量会随生产台数自动更新。")
+            .arg(productCode)
+            .arg(productionMaterials.size()));
 }
 
 void ProductionIssuePage::refreshRecentDocuments()

@@ -19,6 +19,7 @@ class MaterialPage;
 class ProductionIssuePage;
 class ProductionReturnPage;
 class SerialTracePage;
+class ShipmentQueryPage;
 class StockInPage;
 class StockOutPage;
 class SystemSettingsPage;
@@ -60,6 +61,7 @@ private:
     ProductionIssuePage *m_productionIssuePage = nullptr;
     ProductionReturnPage *m_productionReturnPage = nullptr;
     FinishedGoodsInPage *m_finishedGoodsInPage = nullptr;
+    ShipmentQueryPage *m_shipmentQueryPage = nullptr;
     InventoryPage *m_inventoryPage = nullptr;
     InventoryReportPage *m_inventoryReportPage = nullptr;
     LedgerPage *m_ledgerPage = nullptr;

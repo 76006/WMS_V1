@@ -2,6 +2,7 @@
 
 #include "services/InventoryService.h"
 
+#include <QPair>
 #include <QSqlDatabase>
 #include <QWidget>
 
@@ -21,6 +22,8 @@ public:
 
     QList<StockMovementRequest> lines(QString *errorMessage = nullptr) const;
     QStringList purchaseWarnings() const;
+    bool setProductionMaterials(const QList<QPair<qlonglong, double>> &materials,
+                                QString *errorMessage = nullptr);
 
 public slots:
     void refreshReferenceData();

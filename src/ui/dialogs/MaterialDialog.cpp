@@ -20,8 +20,10 @@
 #include <QPushButton>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QScrollArea>
 #include <QTextEdit>
 #include <QVBoxLayout>
+#include <QWidget>
 
 #include <utility>
 
@@ -37,63 +39,74 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
       m_operatorId(operatorId)
 {
     setWindowTitle(materialId > 0 ? QStringLiteral("编辑物料") : QStringLiteral("新增物料"));
-    setMinimumWidth(560);
+    resize(660, 700);
+    setMinimumSize(560, 420);
 
     auto *root = new QVBoxLayout(this);
+    auto *scrollArea = new QScrollArea(this);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto *formContent = new QWidget(scrollArea);
+    auto *formContentLayout = new QVBoxLayout(formContent);
+    formContentLayout->setContentsMargins(6, 6, 12, 6);
+    formContentLayout->setSizeConstraint(QLayout::SetMinimumSize);
+
     auto *form = new QFormLayout;
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     form->setSpacing(10);
 
-    m_typeCombo = new QComboBox(this);
+    m_typeCombo = new QComboBox(formContent);
     m_typeCombo->addItem(QStringLiteral("M - 原材料"), QStringLiteral("M"));
     m_typeCombo->addItem(QStringLiteral("P - 成品"), QStringLiteral("P"));
     m_typeCombo->addItem(QStringLiteral("O - 耗材/包装/附件"), QStringLiteral("O"));
-    m_projectCombo = new QComboBox(this);
-    m_disciplineCombo = new QComboBox(this);
+    m_projectCombo = new QComboBox(formContent);
+    m_disciplineCombo = new QComboBox(formContent);
     m_disciplineCombo->addItem(QStringLiteral("1 - 结构件"), QStringLiteral("1"));
     m_disciplineCombo->addItem(QStringLiteral("2 - 电子件"), QStringLiteral("2"));
     m_disciplineCombo->addItem(QStringLiteral("9 - 其他"), QStringLiteral("9"));
-    m_codeEdit = new QLineEdit(this);
+    m_codeEdit = new QLineEdit(formContent);
     m_codeEdit->setMaxLength(64);
     m_codeEdit->setReadOnly(true);
-    m_codeHint = new QLabel(QStringLiteral("编码保存后不可修改"), this);
+    m_codeHint = new QLabel(QStringLiteral("编码保存后不可修改"), formContent);
     m_codeHint->setObjectName(QStringLiteral("mutedText"));
-    m_nameEdit = new QLineEdit(this);
+    m_nameEdit = new QLineEdit(formContent);
     m_nameEdit->setMaxLength(128);
-    m_specificationEdit = new QLineEdit(this);
-    m_categoryCombo = new QComboBox(this);
-    m_brandEdit = new QLineEdit(this);
-    m_unitEdit = new QLineEdit(this);
+    m_specificationEdit = new QLineEdit(formContent);
+    m_categoryCombo = new QComboBox(formContent);
+    m_brandEdit = new QLineEdit(formContent);
+    m_unitEdit = new QLineEdit(formContent);
     m_unitEdit->setMaxLength(20);
-    m_unitUsageSpin = new QDoubleSpinBox(this);
+    m_unitUsageSpin = new QDoubleSpinBox(formContent);
     m_unitUsageSpin->setDecimals(6);
     m_unitUsageSpin->setRange(0, 999999999999.0);
-    m_processingMethodCombo = new QComboBox(this);
+    m_processingMethodCombo = new QComboBox(formContent);
     m_processingMethodCombo->setEditable(true);
     m_processingMethodCombo->addItem(QStringLiteral("未设置"), QString());
     m_processingMethodCombo->addItem(QStringLiteral("外购"), QStringLiteral("外购"));
     m_processingMethodCombo->addItem(QStringLiteral("自制"), QStringLiteral("自制"));
     m_processingMethodCombo->addItem(QStringLiteral("委外加工"), QStringLiteral("委外加工"));
-    m_minimumStockSpin = new QDoubleSpinBox(this);
+    m_minimumStockSpin = new QDoubleSpinBox(formContent);
     m_minimumStockSpin->setDecimals(6);
     m_minimumStockSpin->setRange(0, 999999999999.0);
-    m_warehouseCombo = new QComboBox(this);
-    m_locationCombo = new QComboBox(this);
-    m_batchCheck = new QCheckBox(QStringLiteral("启用批次管理"), this);
-    m_serialCheck = new QCheckBox(QStringLiteral("启用SN序列号管理"), this);
-    m_statusCombo = new QComboBox(this);
+    m_warehouseCombo = new QComboBox(formContent);
+    m_locationCombo = new QComboBox(formContent);
+    m_batchCheck = new QCheckBox(QStringLiteral("启用批次管理"), formContent);
+    m_serialCheck = new QCheckBox(QStringLiteral("启用SN序列号管理"), formContent);
+    m_statusCombo = new QComboBox(formContent);
     m_statusCombo->addItem(QStringLiteral("正常"), true);
     m_statusCombo->addItem(QStringLiteral("停用"), false);
-    m_notesEdit = new QTextEdit(this);
+    m_notesEdit = new QTextEdit(formContent);
     m_notesEdit->setMaximumHeight(85);
-    m_imagePreview = new QLabel(QStringLiteral("暂无图片"), this);
+    m_imagePreview = new QLabel(QStringLiteral("暂无图片"), formContent);
     m_imagePreview->setAlignment(Qt::AlignCenter);
     m_imagePreview->setMinimumSize(180, 120);
     m_imagePreview->setMaximumSize(260, 180);
     m_imagePreview->setFrameShape(QFrame::StyledPanel);
     auto *imageRow = new QHBoxLayout;
-    auto *chooseImageButton = new QPushButton(QStringLiteral("选择图片"), this);
-    auto *removeImageButton = new QPushButton(QStringLiteral("移除图片"), this);
+    auto *chooseImageButton = new QPushButton(QStringLiteral("选择图片"), formContent);
+    auto *removeImageButton = new QPushButton(QStringLiteral("移除图片"), formContent);
     auto *imageButtons = new QVBoxLayout;
     imageButtons->addWidget(chooseImageButton);
     imageButtons->addWidget(removeImageButton);
@@ -126,7 +139,10 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     form->addRow(QStringLiteral("物料状态"), m_statusCombo);
     form->addRow(QStringLiteral("物料图片"), imageRow);
     form->addRow(QStringLiteral("备注"), m_notesEdit);
-    root->addLayout(form);
+    formContentLayout->addLayout(form);
+    formContentLayout->addStretch();
+    scrollArea->setWidget(formContent);
+    root->addWidget(scrollArea, 1);
 
     m_errorLabel = new QLabel(this);
     m_errorLabel->setStyleSheet(QStringLiteral("color:#b91c1c;"));

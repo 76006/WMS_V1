@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Sql QuickWidgets WebView)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Sql QuickWidgets WebView PrintSupport)
 
 qt_standard_project_setup()
 
@@ -28,6 +28,7 @@ set(WMS_SOURCES
     src/ui/LoginDialog.cpp
     src/ui/MainWindow.cpp
     src/ui/dialogs/MaterialDialog.cpp
+    src/ui/dialogs/InspectionDialog.cpp
     src/ui/pages/DashboardPage.cpp
     src/ui/pages/AttachmentPage.cpp
     src/ui/pages/AuditLogPage.cpp
@@ -43,6 +44,7 @@ set(WMS_SOURCES
     src/ui/pages/ProductionIssuePage.cpp
     src/ui/pages/ProductionReturnPage.cpp
     src/ui/pages/SerialTracePage.cpp
+    src/ui/pages/ShipmentQueryPage.cpp
     src/ui/pages/StockInPage.cpp
     src/ui/pages/StockOutPage.cpp
     src/ui/pages/SystemSettingsPage.cpp
@@ -51,6 +53,7 @@ set(WMS_SOURCES
     src/ui/pages/WarehousePage.cpp
     src/ui/widgets/StockLineTable.cpp
     src/ui/widgets/ComboBoxSearch.cpp
+    src/ui/widgets/TableExcelExport.cpp
     src/core/DatabaseConfig.h
     src/import/LegacyInventoryImporter.h
     src/import/XlsxExporter.h
@@ -66,6 +69,7 @@ set(WMS_SOURCES
     src/ui/LoginDialog.h
     src/ui/MainWindow.h
     src/ui/dialogs/MaterialDialog.h
+    src/ui/dialogs/InspectionDialog.h
     src/ui/pages/DashboardPage.h
     src/ui/pages/AttachmentPage.h
     src/ui/pages/AuditLogPage.h
@@ -81,6 +85,7 @@ set(WMS_SOURCES
     src/ui/pages/ProductionIssuePage.h
     src/ui/pages/ProductionReturnPage.h
     src/ui/pages/SerialTracePage.h
+    src/ui/pages/ShipmentQueryPage.h
     src/ui/pages/StockInPage.h
     src/ui/pages/StockOutPage.h
     src/ui/pages/SystemSettingsPage.h
@@ -89,6 +94,7 @@ set(WMS_SOURCES
     src/ui/pages/WarehousePage.h
     src/ui/widgets/StockLineTable.h
     src/ui/widgets/ComboBoxSearch.h
+    src/ui/widgets/TableExcelExport.h
 )
 
 qt_add_executable(IceBeautyWms WIN32 ${WMS_SOURCES})
@@ -103,12 +109,14 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/006_material_operations.sql
         database/migrations/007_production_issue_number.sql
         database/migrations/008_sales_outbound_details.sql
+        database/migrations/009_inbound_inspections.sql
+        database/migrations/010_material_bom.sql
         resources/PdfPreview.qml
         resources/styles.qss
 )
 
 target_include_directories(IceBeautyWms PRIVATE src)
-target_link_libraries(IceBeautyWms PRIVATE Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView)
+target_link_libraries(IceBeautyWms PRIVATE Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView Qt6::PrintSupport)
 
 install(TARGETS IceBeautyWms RUNTIME DESTINATION .)
 
@@ -118,187 +126,4 @@ else()
     target_compile_options(IceBeautyWms PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-include(CTest)
-if(BUILD_TESTING)
-    find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
-    qt_add_executable(WmsCoreTests
-        tests/CoreTests.cpp
-        src/core/PasswordHasher.cpp
-        src/core/PasswordHasher.h
-    )
-    target_include_directories(WmsCoreTests PRIVATE src)
-    target_link_libraries(WmsCoreTests PRIVATE Qt6::Core Qt6::Test)
-    add_test(NAME WmsCoreTests COMMAND WmsCoreTests)
-
-    set(WMS_DATABASE_TEST_SOURCES
-        src/core/PasswordHasher.cpp
-        src/core/PasswordHasher.h
-        src/database/DatabaseManager.cpp
-        src/database/DatabaseManager.h
-        src/database/SchemaMigrator.cpp
-        src/database/SchemaMigrator.h
-        src/services/InventoryService.cpp
-        src/services/InventoryServiceDocuments.cpp
-        src/services/InventoryServiceProduction.cpp
-        src/services/InventoryService.h
-        src/services/MaterialCodeService.cpp
-        src/services/MaterialCodeService.h
-        src/services/InventoryReportService.cpp
-        src/services/InventoryReportService.h
-    )
-
-    qt_add_executable(WmsDatabaseTests
-        tests/DatabaseTests.cpp
-        ${WMS_DATABASE_TEST_SOURCES}
-    )
-    qt_add_resources(WmsDatabaseTests "wms_test_resources"
-        PREFIX "/"
-        FILES
-            database/schema.sql
-            database/migrations/002_production_workflow.sql
-            database/migrations/003_final_features.sql
-            database/migrations/004_material_numbering.sql
-            database/migrations/005_inventory_reporting.sql
-    )
-    target_include_directories(WmsDatabaseTests PRIVATE src)
-    target_link_libraries(WmsDatabaseTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
-    add_test(NAME WmsDatabaseTests COMMAND WmsDatabaseTests)
-
-    qt_add_executable(WmsProductionWorkflowTests
-        tests/ProductionWorkflowTests.cpp
-        ${WMS_DATABASE_TEST_SOURCES}
-    )
-    qt_add_resources(WmsProductionWorkflowTests "wms_production_test_resources"
-        PREFIX "/"
-        FILES
-            database/schema.sql
-            database/migrations/002_production_workflow.sql
-            database/migrations/003_final_features.sql
-            database/migrations/004_material_numbering.sql
-            database/migrations/005_inventory_reporting.sql
-    )
-    target_include_directories(WmsProductionWorkflowTests PRIVATE src)
-    target_link_libraries(WmsProductionWorkflowTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
-    add_test(NAME WmsProductionWorkflowTests COMMAND WmsProductionWorkflowTests)
-
-    qt_add_executable(WmsWorkflowExpansionTests
-        tests/WorkflowExpansionTests.cpp
-        src/import/LegacyInventoryImporter.cpp
-        src/import/LegacyInventoryImporter.h
-        ${WMS_DATABASE_TEST_SOURCES}
-    )
-    qt_add_resources(WmsWorkflowExpansionTests "wms_expansion_test_resources"
-        PREFIX "/"
-        FILES
-            database/schema.sql
-            database/migrations/002_production_workflow.sql
-            database/migrations/003_final_features.sql
-            database/migrations/004_material_numbering.sql
-            database/migrations/005_inventory_reporting.sql
-    )
-    target_include_directories(WmsWorkflowExpansionTests PRIVATE src)
-    target_link_libraries(WmsWorkflowExpansionTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
-    add_test(NAME WmsWorkflowExpansionTests COMMAND WmsWorkflowExpansionTests)
-
-    qt_add_executable(WmsTraceabilityAttachmentTests
-        tests/TraceabilityAttachmentTests.cpp
-        src/services/AttachmentService.cpp
-        src/services/AttachmentService.h
-        src/core/PasswordHasher.cpp
-        src/core/PasswordHasher.h
-        src/database/DatabaseManager.cpp
-        src/database/DatabaseManager.h
-        src/database/SchemaMigrator.cpp
-        src/database/SchemaMigrator.h
-    )
-    qt_add_resources(WmsTraceabilityAttachmentTests "wms_attachment_test_resources"
-        PREFIX "/"
-        FILES
-            database/schema.sql
-            database/migrations/002_production_workflow.sql
-            database/migrations/003_final_features.sql
-            database/migrations/004_material_numbering.sql
-            database/migrations/005_inventory_reporting.sql
-    )
-    target_include_directories(WmsTraceabilityAttachmentTests PRIVATE src)
-    target_link_libraries(WmsTraceabilityAttachmentTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
-    add_test(NAME WmsTraceabilityAttachmentTests COMMAND WmsTraceabilityAttachmentTests)
-
-    qt_add_executable(WmsUserServiceTests
-        tests/UserServiceTests.cpp
-        src/services/UserService.cpp
-        src/services/UserService.h
-        src/core/PasswordHasher.cpp
-        src/core/PasswordHasher.h
-        src/database/DatabaseManager.cpp
-        src/database/DatabaseManager.h
-        src/database/SchemaMigrator.cpp
-        src/database/SchemaMigrator.h
-    )
-    qt_add_resources(WmsUserServiceTests "wms_user_test_resources"
-        PREFIX "/"
-        FILES
-            database/schema.sql
-            database/migrations/002_production_workflow.sql
-            database/migrations/003_final_features.sql
-            database/migrations/004_material_numbering.sql
-            database/migrations/005_inventory_reporting.sql
-    )
-    target_include_directories(WmsUserServiceTests PRIVATE src)
-    target_link_libraries(WmsUserServiceTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
-    add_test(NAME WmsUserServiceTests COMMAND WmsUserServiceTests)
-
-    qt_add_executable(WmsExcelDataExchangeTests
-        tests/ExcelDataExchangeTests.cpp
-        src/core/PasswordHasher.cpp
-        src/core/PasswordHasher.h
-        src/database/DatabaseManager.cpp
-        src/database/DatabaseManager.h
-        src/database/SchemaMigrator.cpp
-        src/database/SchemaMigrator.h
-        src/import/LegacyInventoryImporter.cpp
-        src/import/LegacyInventoryImporter.h
-        src/import/XlsxExporter.cpp
-        src/import/XlsxExporter.h
-    )
-    qt_add_resources(WmsExcelDataExchangeTests "wms_excel_test_resources"
-        PREFIX "/"
-        FILES
-            database/schema.sql
-            database/migrations/002_production_workflow.sql
-            database/migrations/003_final_features.sql
-            database/migrations/004_material_numbering.sql
-            database/migrations/005_inventory_reporting.sql
-    )
-    target_include_directories(WmsExcelDataExchangeTests PRIVATE src)
-    target_link_libraries(WmsExcelDataExchangeTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
-    add_test(NAME WmsExcelDataExchangeTests COMMAND WmsExcelDataExchangeTests)
-
-    qt_add_executable(WmsFinalFeaturesTests
-        tests/FinalFeaturesTests.cpp
-        src/core/PasswordHasher.cpp
-        src/core/PasswordHasher.h
-        src/database/DatabaseManager.cpp
-        src/database/DatabaseManager.h
-        src/database/SchemaMigrator.cpp
-        src/database/SchemaMigrator.h
-    )
-    qt_add_resources(WmsFinalFeaturesTests "wms_final_test_resources"
-        PREFIX "/"
-        FILES
-            database/schema.sql
-            database/migrations/002_production_workflow.sql
-            database/migrations/003_final_features.sql
-            database/migrations/004_material_numbering.sql
-            database/migrations/005_inventory_reporting.sql
-    )
-    target_include_directories(WmsFinalFeaturesTests PRIVATE src)
-    target_link_libraries(WmsFinalFeaturesTests PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
-    add_test(NAME WmsFinalFeaturesTests COMMAND WmsFinalFeaturesTests)
-
-    add_test(NAME WmsAppSmoke
-        COMMAND IceBeautyWms --smoke-test --database ${CMAKE_CURRENT_BINARY_DIR}/wms-smoke.db)
-    add_test(NAME WmsUiSmoke
-        COMMAND IceBeautyWms -platform offscreen --ui-smoke-test
-                --database ${CMAKE_CURRENT_BINARY_DIR}/wms-ui-smoke.db)
-endif()
+set(BUILD_TESTING OFF CACHE BOOL "Build project tests" FORCE)

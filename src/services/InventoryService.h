@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QDate>
 #include <QList>
 #include <QSqlDatabase>
@@ -24,6 +25,19 @@ struct StockMovementRequest
     QStringList serialNumbers;
 };
 
+struct InboundInspectionRequest
+{
+    bool required = false;
+    QString inspectionNumber;
+    QDate inspectionDate;
+    QString inspectorName;
+    QString result = QStringLiteral("NOT_REQUIRED");
+    QString conclusion;
+    QString attachmentFileName;
+    QString attachmentMimeType;
+    QByteArray attachmentData;
+};
+
 struct StockDocumentRequest
 {
     QString documentType;
@@ -41,6 +55,7 @@ struct StockDocumentRequest
     QString notes;
     QString submissionToken;
     qlonglong productionRunId = 0;
+    InboundInspectionRequest inspection;
     QList<StockMovementRequest> lines;
 };
 

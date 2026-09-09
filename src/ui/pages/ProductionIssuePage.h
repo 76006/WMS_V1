@@ -29,6 +29,7 @@ signals:
     void stockChanged();
 
 private slots:
+    void loadProductMaterials();
     void submit();
 
 private:
@@ -44,6 +45,7 @@ private:
     QLineEdit *m_handlerEdit = nullptr;
     QTextEdit *m_notesEdit = nullptr;
     QLabel *m_numberLabel = nullptr;
+    QLabel *m_usageHint = nullptr;
     StockLineTable *m_lines = nullptr;
     QPushButton *m_submitButton = nullptr;
     QTableWidget *m_recentTable = nullptr;

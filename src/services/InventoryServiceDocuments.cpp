@@ -1,5 +1,6 @@
 #include "services/InventoryService.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QSet>
 #include <QSqlError>
@@ -10,6 +11,7 @@
 
 namespace {
 constexpr double DocumentQuantityTolerance = 0.0000001;
+constexpr qint64 MaximumInspectionAttachmentBytes = 50LL * 1024LL * 1024LL;
 
 void setDocumentError(QString *target, const QString &message)
 {
@@ -82,6 +84,27 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                          QStringLiteral("销售出库必须填写客户公司名称和销售目的地/收货地址。"));
         return false;
     }
+    if (inbound && request.inspection.required) {
+        if (request.inspection.inspectionNumber.trimmed().isEmpty()
+            || !request.inspection.inspectionDate.isValid()
+            || request.inspection.inspectorName.trimmed().isEmpty()) {
+            setDocumentError(errorMessage, QStringLiteral("送检单号、送检日期和检验员不能为空。"));
+            return false;
+        }
+        if (request.inspection.result.trimmed().toUpper() != QStringLiteral("QUALIFIED")) {
+            setDocumentError(errorMessage, QStringLiteral("只有检验结果为合格的送检单才能入库。"));
+            return false;
+        }
+        if (request.inspection.attachmentFileName.trimmed().isEmpty()
+            || request.inspection.attachmentData.isEmpty()) {
+            setDocumentError(errorMessage, QStringLiteral("检验合格后必须上传检验附件才能入库。"));
+            return false;
+        }
+        if (request.inspection.attachmentData.size() > MaximumInspectionAttachmentBytes) {
+            setDocumentError(errorMessage, QStringLiteral("送检附件不能超过50 MB。"));
+            return false;
+        }
+    }
     if (!beginImmediate(errorMessage)) return false;
 
     const QString number = nextDocumentNumber(type, request.documentDate, errorMessage);
@@ -103,6 +126,63 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         if (!supplier.exec()) {
             setDocumentError(errorMessage,
                              QStringLiteral("保存供应商失败：%1").arg(supplier.lastError().text()));
+            rollback();
+            return false;
+        }
+    }
+    if (inbound) {
+        QVariant inspectionAttachmentId;
+        if (request.inspection.required) {
+            QSqlQuery attachment(m_database);
+            attachment.prepare(QStringLiteral(
+                "INSERT INTO attachments(business_type,business_id,original_file_name,mime_type,"
+                "file_size,sha256,file_data,uploaded_by) "
+                "VALUES('business_document',?,?,?,?,?,?,?)"));
+            attachment.addBindValue(documentId);
+            attachment.addBindValue(normalizedText(request.inspection.attachmentFileName));
+            attachment.addBindValue(normalizedText(request.inspection.attachmentMimeType));
+            attachment.addBindValue(request.inspection.attachmentData.size());
+            attachment.addBindValue(QString::fromLatin1(QCryptographicHash::hash(
+                request.inspection.attachmentData, QCryptographicHash::Sha256).toHex()));
+            attachment.addBindValue(request.inspection.attachmentData);
+            attachment.addBindValue(m_operatorId);
+            if (!attachment.exec()) {
+                setDocumentError(errorMessage,
+                                 QStringLiteral("保存送检附件失败：%1")
+                                     .arg(attachment.lastError().text()));
+                rollback();
+                return false;
+            }
+            inspectionAttachmentId = attachment.lastInsertId();
+        }
+
+        QSqlQuery inspection(m_database);
+        inspection.prepare(QStringLiteral(
+            "INSERT INTO inbound_inspection_details(document_id,requires_inspection,inspection_no,"
+            "inspection_date,inspector_name,inspection_result,conclusion,inspection_attachment_id) "
+            "VALUES(?,?,?,?,?,?,?,?)"));
+        inspection.addBindValue(documentId);
+        inspection.addBindValue(request.inspection.required ? 1 : 0);
+        inspection.addBindValue(request.inspection.required
+                                    ? normalizedText(request.inspection.inspectionNumber)
+                                    : QString());
+        inspection.addBindValue(request.inspection.required
+                                    ? request.inspection.inspectionDate.toString(Qt::ISODate)
+                                    : QVariant());
+        inspection.addBindValue(request.inspection.required
+                                    ? normalizedText(request.inspection.inspectorName)
+                                    : QString());
+        inspection.addBindValue(request.inspection.required
+                                    ? QStringLiteral("QUALIFIED")
+                                    : QStringLiteral("NOT_REQUIRED"));
+        inspection.addBindValue(request.inspection.required
+                                    ? normalizedText(request.inspection.conclusion)
+                                    : QString());
+        inspection.addBindValue(inspectionAttachmentId);
+        if (!inspection.exec()) {
+            setDocumentError(errorMessage,
+                             QStringLiteral("保存入库送检资料失败：%1")
+                                 .arg(inspection.lastError().text()));
             rollback();
             return false;
         }

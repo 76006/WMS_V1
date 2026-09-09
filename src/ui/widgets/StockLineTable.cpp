@@ -116,6 +116,12 @@ void StockLineTable::loadMaterials(QComboBox *combo, const QVariant &selected)
               "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
               "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
               "WHERE m.is_active=1 ORDER BY m.code")
+        : m_productionUsageMode
+        ? QStringLiteral(
+              "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
+              "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
+              "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
+              "WHERE m.is_active=1 AND COALESCE(c.code,'')<>'FINISHED' ORDER BY m.code")
         : QStringLiteral(
               "SELECT m.id,m.code,m.name,m.require_batch,m.require_serial,"
               "m.default_warehouse_id,m.default_location_id,m.specification,c.name,m.unit,m.unit_usage "
@@ -257,6 +263,52 @@ void StockLineTable::addLine()
     quantity->setButtonSymbols(m_productionUsageMode ? QAbstractSpinBox::NoButtons
                                                       : QAbstractSpinBox::UpDownArrows);
     loadWarehouses(row);
+}
+
+bool StockLineTable::setProductionMaterials(
+    const QList<QPair<qlonglong, double>> &materials,
+    QString *errorMessage)
+{
+    if (!m_productionUsageMode) {
+        if (errorMessage) *errorMessage = QStringLiteral("当前明细表不是生产领料模式。");
+        return false;
+    }
+
+    m_table->setUpdatesEnabled(false);
+    m_table->setRowCount(0);
+    QString missingMaterial;
+    for (const auto &productionMaterial : materials) {
+        const qlonglong materialId = productionMaterial.first;
+        addLine();
+        const int row = m_table->rowCount() - 1;
+        QComboBox *material = comboAt(row, MaterialColumn);
+        const int materialIndex = material ? material->findData(materialId) : -1;
+        if (materialIndex < 0) {
+            missingMaterial = QString::number(materialId);
+            break;
+        }
+        material->setCurrentIndex(materialIndex);
+        auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
+            m_table->cellWidget(row, UnitUsageColumn));
+        if (unitUsage) {
+            const QSignalBlocker blocker(unitUsage);
+            unitUsage->setValue(productionMaterial.second);
+            updateProductionQuantity(row);
+        }
+    }
+    m_table->setUpdatesEnabled(true);
+
+    if (!missingMaterial.isEmpty()) {
+        m_table->setRowCount(0);
+        addLine();
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("物料 ID %1 已停用或不存在，无法自动生成领料明细。")
+                                .arg(missingMaterial);
+        }
+        return false;
+    }
+    if (materials.isEmpty()) addLine();
+    return true;
 }
 
 void StockLineTable::setProductionUsageMode(bool enabled)

@@ -1,5 +1,7 @@
 #include "ui/pages/InventoryPage.h"
 
+#include "ui/widgets/TableExcelExport.h"
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateEdit>
@@ -302,5 +304,6 @@ void InventoryPage::showSelectedHistory()
     buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
+    TableExcelExport::install(&dialog, QStringLiteral("完整库存记录"));
     dialog.exec();
 }

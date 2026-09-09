@@ -93,6 +93,41 @@ public:
     static QString statusText(MaterialImportStatus status);
 };
 
+struct BomImportRow
+{
+    int sourceRow = 0;
+    int level = 0;
+    int parentIndex = -1;
+    QString materialCode;
+    QString materialName;
+    QString specification;
+    QString categoryCode;
+    QString unit;
+    double quantity = 1.0;
+    QString processingMethod;
+};
+
+struct BomImportResult
+{
+    QString sourceSheet;
+    QString productCode;
+    QList<BomImportRow> rows;
+};
+
+class BomExcelImporter
+{
+public:
+    static bool parseFile(const QString &filePath,
+                          BomImportResult *result,
+                          QString *errorMessage = nullptr);
+    static bool importRows(QSqlDatabase database,
+                           qlonglong operatorId,
+                           const BomImportResult &result,
+                           int *createdMaterialCount,
+                           int *updatedMaterialCount,
+                           QString *errorMessage = nullptr);
+};
+
 struct SpreadsheetPreviewSheet
 {
     QString name;

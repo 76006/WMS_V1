@@ -15,12 +15,14 @@
 #include "ui/pages/ProductionIssuePage.h"
 #include "ui/pages/ProductionReturnPage.h"
 #include "ui/pages/SerialTracePage.h"
+#include "ui/pages/ShipmentQueryPage.h"
 #include "ui/pages/StockInPage.h"
 #include "ui/pages/StockOutPage.h"
 #include "ui/pages/SystemSettingsPage.h"
 #include "ui/pages/TransferPage.h"
 #include "ui/pages/UserManagementPage.h"
 #include "ui/pages/WarehousePage.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QButtonGroup>
 #include <QFileInfo>
@@ -97,11 +99,14 @@ void MainWindow::buildUi()
     m_pageTitle = new QLabel(QStringLiteral("首页"), topBar);
     m_pageTitle->setObjectName(QStringLiteral("pageTitle"));
     auto *refreshButton = new QPushButton(QStringLiteral("刷新"), topBar);
+    auto *exportButton = new QPushButton(QStringLiteral("导出Excel"), topBar);
     auto *userLabel = new QLabel(QStringLiteral("%1（%2）")
                                      .arg(m_session.displayName, m_session.roleCode), topBar);
     userLabel->setObjectName(QStringLiteral("mutedText"));
     topLayout->addWidget(m_pageTitle);
     topLayout->addStretch();
+    topLayout->addWidget(exportButton);
+    topLayout->addSpacing(8);
     topLayout->addWidget(refreshButton);
     topLayout->addSpacing(10);
     topLayout->addWidget(userLabel);
@@ -112,6 +117,7 @@ void MainWindow::buildUi()
 
     auto add = [&](const QString &title, QWidget *page, bool enabled = true) {
         const int index = m_stack->addWidget(page);
+        TableExcelExport::install(page, title);
         auto *button = new QPushButton(title, navWidget);
         button->setProperty("nav", true);
         button->setCheckable(true);
@@ -130,6 +136,7 @@ void MainWindow::buildUi()
     m_excelImportPage = new ExcelImportPage(m_database, m_session, m_stack);
     m_stockInPage = new StockInPage(m_database, m_session, m_stack);
     m_stockOutPage = new StockOutPage(m_database, m_session, m_stack);
+    m_shipmentQueryPage = new ShipmentQueryPage(m_database, m_stack);
     m_productionIssuePage = new ProductionIssuePage(m_database, m_session, m_stack);
     m_productionReturnPage = new ProductionReturnPage(m_database, m_session, m_stack);
     m_finishedGoodsInPage = new FinishedGoodsInPage(m_database, m_session, m_stack);
@@ -152,6 +159,7 @@ void MainWindow::buildUi()
     add(QStringLiteral("库存Excel导入"), m_excelImportPage, m_session.canManageWarehouse());
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
     add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
+    add(QStringLiteral("发货查询"), m_shipmentQueryPage, m_session.canViewInventory());
     add(QStringLiteral("生产领料"), m_productionIssuePage, m_session.canPostProduction());
     add(QStringLiteral("生产退料"), m_productionReturnPage, m_session.canPostProduction());
     add(QStringLiteral("成品入库"), m_finishedGoodsInPage, m_session.canPostProduction());
@@ -175,6 +183,9 @@ void MainWindow::buildUi()
     setCentralWidget(central);
 
     connect(refreshButton, &QPushButton::clicked, this, &MainWindow::refreshCurrentPage);
+    connect(exportButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::exportPage(m_stack->currentWidget(), m_pageTitle->text(), this);
+    });
     connect(m_materialPage, &MaterialPage::dataChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_warehousePage, &WarehousePage::dataChanged, m_stockInPage, &StockInPage::refreshReferenceData);
     connect(m_warehousePage, &WarehousePage::dataChanged, m_stockOutPage, &StockOutPage::refreshReferenceData);
@@ -213,6 +224,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_excelImportPage) m_excelImportPage->refreshReferenceData();
     else if (page == m_stockInPage) m_stockInPage->refreshReferenceData();
     else if (page == m_stockOutPage) m_stockOutPage->refreshReferenceData();
+    else if (page == m_shipmentQueryPage) m_shipmentQueryPage->refresh();
     else if (page == m_productionIssuePage) m_productionIssuePage->refreshReferenceData();
     else if (page == m_productionReturnPage) m_productionReturnPage->refreshReferenceData();
     else if (page == m_finishedGoodsInPage) m_finishedGoodsInPage->refreshReferenceData();
@@ -237,6 +249,7 @@ void MainWindow::refreshInventoryViews()
     m_ledgerPage->refresh();
     m_stockInPage->refreshReferenceData();
     m_stockOutPage->refreshReferenceData();
+    m_shipmentQueryPage->refresh();
     m_excelImportPage->refreshReferenceData();
     m_transferPage->refreshReferenceData();
     m_countPage->refreshReferenceData();
