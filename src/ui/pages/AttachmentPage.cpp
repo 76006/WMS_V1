@@ -2,6 +2,7 @@
 
 #include "import/LegacyInventoryImporter.h"
 #include "services/AttachmentService.h"
+#include "services/OfficeTemplateService.h"
 
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -61,6 +62,7 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     searchRow->addWidget(search);
     documentLayout->addLayout(searchRow);
     m_documentTable = new QTableWidget(0, 5, documentPanel);
+    m_documentTable->setProperty("businessDocumentTable", true);
     m_documentTable->setHorizontalHeaderLabels({QStringLiteral("单据号"), QStringLiteral("日期"),
                                                 QStringLiteral("类型"), QStringLiteral("状态"),
                                                 QStringLiteral("经办人")});
@@ -80,6 +82,7 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     toolbar->addWidget(new QLabel(QStringLiteral("所选单据附件"), attachmentPanel));
     toolbar->addStretch();
     m_showDeleted = new QCheckBox(QStringLiteral("显示已删除"), attachmentPanel);
+    m_retryFormsButton = new QPushButton(QStringLiteral("重新生成未完成表单"), attachmentPanel);
     m_uploadButton = new QPushButton(QStringLiteral("上传附件"), attachmentPanel);
     m_uploadButton->setProperty("primary", true);
     m_downloadButton = new QPushButton(QStringLiteral("下载"), attachmentPanel);
@@ -87,6 +90,7 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     m_deleteButton = new QPushButton(QStringLiteral("删除"), attachmentPanel);
     m_deleteButton->setProperty("danger", true);
     toolbar->addWidget(m_showDeleted);
+    toolbar->addWidget(m_retryFormsButton);
     toolbar->addWidget(m_uploadButton);
     toolbar->addWidget(m_openButton);
     toolbar->addWidget(m_downloadButton);
@@ -114,6 +118,7 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     connect(m_attachmentTable, &QTableWidget::itemSelectionChanged,
             this, &AttachmentPage::updateActions);
     connect(m_showDeleted, &QCheckBox::toggled, this, &AttachmentPage::loadAttachments);
+    connect(m_retryFormsButton, &QPushButton::clicked, this, &AttachmentPage::retryIncompleteForms);
     connect(m_uploadButton, &QPushButton::clicked, this, &AttachmentPage::upload);
     connect(m_downloadButton, &QPushButton::clicked, this, &AttachmentPage::download);
     connect(m_openButton, &QPushButton::clicked, this, &AttachmentPage::openAttachment);
@@ -157,6 +162,7 @@ void AttachmentPage::loadDocuments()
         m_documentTable->insertRow(row);
         auto *number = new QTableWidgetItem(query.value(1).toString());
         number->setData(IdRole, query.value(0));
+        number->setData(Qt::UserRole, query.value(0));
         m_documentTable->setItem(row, 0, number);
         for (int column = 1; column < 5; ++column)
             m_documentTable->setItem(row, column,
@@ -209,7 +215,11 @@ void AttachmentPage::loadAttachments()
 void AttachmentPage::updateActions()
 {
     const bool canManage = m_session.canManageAttachments();
-    m_uploadButton->setEnabled(canManage && selectedDocumentId() > 0);
+    const qlonglong documentId = selectedDocumentId();
+    m_uploadButton->setEnabled(canManage && documentId > 0);
+    m_retryFormsButton->setEnabled(
+        canManage && documentId > 0
+        && OfficeTemplateService::hasIncompleteDocumentForms(m_database, documentId));
     const int row = m_attachmentTable->currentRow();
     const bool selected = row >= 0;
     m_downloadButton->setEnabled(selected);
@@ -417,4 +427,40 @@ void AttachmentPage::deleteOrRestore()
         return;
     }
     loadAttachments();
+}
+
+void AttachmentPage::retryIncompleteForms()
+{
+    const qlonglong documentId = selectedDocumentId();
+    if (documentId <= 0) return;
+    if (QMessageBox::question(
+            this, QStringLiteral("重新生成未完成表单"),
+            QStringLiteral("将重新生成该业务单据尚未完成的 Excel 表单，只重新生成并保存表单文件。\n\n"
+                           "本操作不会重新过账、不会改变任何库存数量、库存流水和单据状态。\n\n"
+                           "是否继续？"))
+        != QMessageBox::Yes) {
+        return;
+    }
+    QStringList completedTitles;
+    QStringList errors;
+    OfficeTemplateService::retryIncompleteDocumentForms(m_database, m_session.userId, documentId,
+                                                        &completedTitles, &errors);
+    loadAttachments();
+    if (errors.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("表单重新生成完成"),
+            completedTitles.isEmpty()
+                ? QStringLiteral("该单据没有需要重新生成的表单。")
+                : QStringLiteral("以下表单已重新生成并保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹：\n\n%1")
+                      .arg(completedTitles.join(QStringLiteral("\n"))));
+        return;
+    }
+    QString message;
+    if (!completedTitles.isEmpty()) {
+        message = QStringLiteral("已重新生成并保存：\n%1\n\n")
+                      .arg(completedTitles.join(QStringLiteral("\n")));
+    }
+    message += QStringLiteral("以下表单或步骤未完成：\n\n%1")
+                   .arg(errors.join(QStringLiteral("\n")));
+    QMessageBox::warning(this, QStringLiteral("部分表单未完成"), message);
 }

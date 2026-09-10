@@ -12,6 +12,7 @@
 #include <QCheckBox>
 #include <QBrush>
 #include <QColor>
+#include <QCryptographicHash>
 #include <QDateEdit>
 #include <QDateTime>
 #include <QDialog>
@@ -48,6 +49,7 @@
 #include <QUuid>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <utility>
@@ -818,7 +820,7 @@ void MaterialPage::editStock()
     heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
     layout->addWidget(heading);
     auto *hint = new QLabel(
-        QStringLiteral("可直接把指定仓库、库位和批次的库存改为目标数量。保存后系统自动生成盘点调整单和库存流水，不会覆盖历史记录。"),
+        QStringLiteral("可直接把指定仓库、库位和批次的库存数量或批次供应商改为新值。保存后系统自动生成盘点调整单；数量有差异时同时生成库存流水，不会覆盖历史记录。"),
         &dialog);
     hint->setObjectName(QStringLiteral("mutedText"));
     hint->setWordWrap(true);
@@ -1061,14 +1063,32 @@ void MaterialPage::editStock()
                                              QStringLiteral("库存数量和供应商均未发生变化。"));
                     return;
                 }
+                const bool quantityChanged =
+                    std::abs(targetQuantity - systemQuantity) > 0.0000001;
+                QString changeDescription;
+                if (quantityChanged) {
+                    changeDescription = QStringLiteral("库存数量由 %1 修改为 %2")
+                        .arg(QString::number(systemQuantity, 'g', 12),
+                             QString::number(targetQuantity, 'g', 12));
+                } else {
+                    changeDescription = QStringLiteral("库存数量保持 %1 不变")
+                        .arg(QString::number(systemQuantity, 'g', 12));
+                }
+                if (supplier != originalSupplier) {
+                    changeDescription += QStringLiteral("；批次供应商由 %1 改为 %2")
+                        .arg(originalSupplier.isEmpty() ? QStringLiteral("未填写") : originalSupplier,
+                             supplier.isEmpty() ? QStringLiteral("未填写") : supplier);
+                }
                 if (QMessageBox::warning(
                         &dialog, QStringLiteral("确认直接编辑库存"),
-                        QStringLiteral("确认将 %1 在当前位置%2的库存由 %3 修改为 %4？\n\n"
-                                       "系统将自动生成盘点调整单和库存流水。")
+                        QStringLiteral("确认将 %1 在当前位置%2的库存资料调整如下？\n\n%3\n\n"
+                                       "系统将自动生成盘点调整单%4，不会覆盖历史记录。")
                             .arg(materialCode,
                                  batchNo.isEmpty() ? QString() : QStringLiteral("、批次 %1").arg(batchNo),
-                                 QString::number(systemQuantity, 'g', 12),
-                                 QString::number(targetQuantity, 'g', 12)),
+                                 changeDescription,
+                                 quantityChanged
+                                     ? QStringLiteral("和库存流水")
+                                     : QStringLiteral("（数量无差异，不产生库存流水）")),
                         QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
                     != QMessageBox::Yes) {
                     return;
@@ -1099,8 +1119,8 @@ void MaterialPage::editStock()
                 emit dataChanged();
                 QMessageBox::information(
                     this, QStringLiteral("库存已更新"),
-                    QStringLiteral("物料 %1 的库存已修改，调整单号：%2")
-                        .arg(materialCode, posted.documentNumber));
+                    QStringLiteral("物料 %1 的库存资料已更新（%2），调整单号：%3")
+                        .arg(materialCode, changeDescription, posted.documentNumber));
             });
     dialog.exec();
 }
@@ -2007,6 +2027,41 @@ void MaterialPage::clearBom()
             .arg(productText).arg(nodeCount));
 }
 
+namespace {
+
+QString canonicalQuantityText(double value)
+{
+    return QString::number(value, 'g', 15);
+}
+
+// 期初库存的提交标识必须可重放：同一批内容无论重试多少次都要得到同一个标识。
+// 因此只对规范化后的导入内容（物料编码、批次、数量、SN）加上仓库与库位做SHA-256，
+// 与文件路径、文件名和随机数无关，排序后保证顺序稳定。
+QString initialStockSubmissionToken(const InitialInventoryRequest &request)
+{
+    QStringList entries;
+    entries.reserve(request.lines.size());
+    for (const InitialInventoryLine &line : request.lines) {
+        QStringList serials = line.serialNumbers;
+        std::sort(serials.begin(), serials.end());
+        entries.append(QStringLiteral("%1|%2|%3|%4")
+                           .arg(line.materialCode.trimmed().toUpper(),
+                                line.batchNo.trimmed().toUpper(),
+                                canonicalQuantityText(line.quantity),
+                                serials.join(QLatin1Char(','))));
+    }
+    std::sort(entries.begin(), entries.end());
+    const QString canonical = QStringLiteral("%1|%2|%3")
+                                  .arg(request.warehouseId)
+                                  .arg(request.locationId)
+                                  .arg(entries.join(QLatin1Char('\n')));
+    return QStringLiteral("material-stock-import:%1")
+        .arg(QString::fromLatin1(QCryptographicHash::hash(canonical.toUtf8(),
+                                                          QCryptographicHash::Sha256).toHex()));
+}
+
+} // namespace
+
 void MaterialPage::importMaterials()
 {
     const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择物料导入Excel"), {},
@@ -2159,14 +2214,12 @@ void MaterialPage::importMaterials()
             .arg(readyCount + warningCount)) != QMessageBox::Yes) return;
     int created = 0;
     int updated = 0;
-    if (!MaterialExcelImporter::importRows(m_database, m_session.userId, rows,
-                                           &created, &updated, &error)) {
-        QMessageBox::warning(this, QStringLiteral("导入失败"), error);
-        return;
-    }
+    int initialStock = 0;
 
+    // 先把所有库存行需要的仓库与库位解析并校验完毕，再开始任何写库动作；
+    // 任何引用发生变化都在事务开始前中止，保证不会出现“物料已写入、库存未写入”。
     QMap<QString, InitialInventoryRequest> stockRequests;
-    QStringList stockErrors;
+    QString referenceError;
     for (const MaterialImportRow &row : std::as_const(rows)) {
         if (!row.importCurrentStock || row.currentStock <= 0.0000001
             || (row.status != MaterialImportStatus::Ready
@@ -2178,8 +2231,8 @@ void MaterialPage::importMaterials()
         location.addBindValue(row.defaultWarehouseCode);
         location.addBindValue(row.defaultLocationCode);
         if (!location.exec() || !location.next()) {
-            stockErrors.append(QStringLiteral("第%1行：仓库或库位已变化").arg(row.sourceRow));
-            continue;
+            referenceError = QStringLiteral("第%1行：仓库或库位已变化").arg(row.sourceRow);
+            break;
         }
         const qlonglong warehouseId = location.value(0).toLongLong();
         const qlonglong locationId = location.value(1).toLongLong();
@@ -2203,33 +2256,64 @@ void MaterialPage::importMaterials()
         line.notes = QStringLiteral("物料档案第%1行现有库存").arg(row.sourceRow);
         request.lines.append(line);
     }
+    if (!referenceError.isEmpty()) {
+        QMessageBox::warning(
+            this, QStringLiteral("导入失败"),
+            QStringLiteral("%1。本次未写入任何物料或库存数据，请重新预览后再试。")
+                .arg(referenceError));
+        return;
+    }
+    for (auto iterator = stockRequests.begin(); iterator != stockRequests.end(); ++iterator)
+        iterator.value().submissionToken = initialStockSubmissionToken(iterator.value());
 
-    int initialStock = 0;
-    InventoryService inventory(m_database, m_session.userId);
-    for (auto iterator = stockRequests.begin(); iterator != stockRequests.end(); ++iterator) {
-        InitialInventoryRequest request = iterator.value();
-        request.submissionToken = QStringLiteral("material-stock-import:%1")
-                                      .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-        QString stockError;
-        if (!inventory.importInitialInventory(request, nullptr, &stockError)) {
-            stockErrors.append(stockError);
-            continue;
+    // 物料档案与所有分组的期初库存共用同一个外层事务：要么全部成功，要么全部回滚。
+    QSqlQuery begin(m_database);
+    if (!begin.exec(QStringLiteral("BEGIN IMMEDIATE TRANSACTION"))) {
+        QMessageBox::warning(
+            this, QStringLiteral("导入失败"),
+            QStringLiteral("无法开始导入事务：%1。本次未写入任何物料或库存数据。")
+                .arg(begin.lastError().text()));
+        return;
+    }
+    bool succeeded = MaterialExcelImporter::importRowsInCurrentTransaction(
+        m_database, m_session.userId, rows, &created, &updated, &error);
+    if (succeeded && !stockRequests.isEmpty()) {
+        InventoryService inventory(m_database, m_session.userId);
+        for (auto iterator = stockRequests.begin(); iterator != stockRequests.end(); ++iterator) {
+            InitialInventoryRequest request = iterator.value();
+            QString stockError;
+            if (!inventory.importInitialInventoryInCurrentTransaction(request, nullptr,
+                                                                      &stockError)) {
+                error = stockError;
+                succeeded = false;
+                break;
+            }
+            initialStock += request.lines.size();
         }
-        initialStock += request.lines.size();
+    }
+    if (succeeded) {
+        QSqlQuery commit(m_database);
+        if (!commit.exec(QStringLiteral("COMMIT"))) {
+            error = QStringLiteral("导入事务提交失败：%1").arg(commit.lastError().text());
+            succeeded = false;
+        }
+    }
+    if (!succeeded) {
+        QSqlQuery(m_database).exec(QStringLiteral("ROLLBACK"));
+        if (error.isEmpty()) error = QStringLiteral("导入过程中发生未知错误。");
+        QMessageBox::warning(
+            this, QStringLiteral("导入失败"),
+            QStringLiteral("%1\n\n本次导入已整体回滚，未写入任何物料或库存数据。").arg(error));
+        return;
     }
 
     refresh();
     emit dataChanged();
-    const QString result = QStringLiteral(
-        "新增 %1 条，更新 %2 条，现有库存入账 %3 条，跳过重复 %4 条、错误 %5 条。")
-        .arg(created).arg(updated).arg(initialStock).arg(skippedCount).arg(errorCount);
-    if (stockErrors.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("导入完成"), result);
-    } else {
-        QMessageBox::warning(this, QStringLiteral("物料已导入，部分库存未入账"),
-                             result + QStringLiteral("\n\n库存入账问题：\n")
-                                 + stockErrors.join(QLatin1Char('\n')));
-    }
+    QMessageBox::information(
+        this, QStringLiteral("导入完成"),
+        QStringLiteral("已在同一事务中原子完成：新增 %1 条，更新 %2 条，现有库存入账 %3 条，"
+                       "跳过重复 %4 条、错误 %5 条。")
+            .arg(created).arg(updated).arg(initialStock).arg(skippedCount).arg(errorCount));
 }
 
 void MaterialPage::exportMaterials()

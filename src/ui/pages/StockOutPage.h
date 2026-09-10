@@ -52,6 +52,7 @@ private:
     QLineEdit *m_salesOrderEdit = nullptr;
     QLineEdit *m_logisticsCompanyEdit = nullptr;
     QLineEdit *m_trackingNumberEdit = nullptr;
+    QDateEdit *m_deliveryDateEdit = nullptr;
     QTextEdit *m_notesEdit = nullptr;
     StockLineTable *m_lines = nullptr;
     QPushButton *m_submitButton = nullptr;

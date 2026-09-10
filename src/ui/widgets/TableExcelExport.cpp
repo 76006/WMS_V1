@@ -11,10 +11,14 @@
 #include <QDateTime>
 #include <QDateTimeEdit>
 #include <QDir>
+#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QItemSelectionModel>
+#include <QLabel>
+#include <QLayout>
+#include <QBoxLayout>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
@@ -108,6 +112,24 @@ QList<QTableView *> visibleTables(QWidget *page)
     }
     return result;
 }
+
+qlonglong selectedBusinessDocumentId(QTableView *table)
+{
+    if (!table || !table->model() || !table->currentIndex().isValid()) return 0;
+    const int row = table->currentIndex().row();
+    const QVariant idColumnProperty = table->property("businessDocumentIdColumn");
+    const int idColumn = idColumnProperty.toInt();
+    if (idColumnProperty.isValid() && idColumn >= 0
+        && idColumn < table->model()->columnCount()) {
+        const qlonglong documentId = table->model()->index(row, idColumn).data().toLongLong();
+        if (documentId > 0) return documentId;
+    }
+    for (int column = 0; column < table->model()->columnCount(); ++column) {
+        const QVariant value = table->model()->index(row, column).data(Qt::UserRole);
+        if (value.isValid() && value.toLongLong() > 0) return value.toLongLong();
+    }
+    return 0;
+}
 }
 
 void TableExcelExport::install(QWidget *page, const QString &pageTitle)
@@ -140,6 +162,83 @@ void TableExcelExport::install(QWidget *page, const QString &pageTitle)
                                               safeTable.data());
             }
         });
+    }
+}
+
+void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
+                                       QWidget *dialogParent)
+{
+    if (!table || table->property("tableFullScreenActive").toBool()) return;
+    QPointer<QWidget> originalWindow = table->window();
+    QPointer<QWidget> originalParent = table->parentWidget();
+    QPointer<QLayout> originalLayout = originalParent ? originalParent->layout() : nullptr;
+    const int originalIndex = originalLayout ? originalLayout->indexOf(table) : -1;
+    if (!originalParent || !originalLayout || originalIndex < 0) {
+        QMessageBox::information(dialogParent, QStringLiteral("无法全屏"),
+                                 QStringLiteral("当前表格不在可恢复的页面布局中。"));
+        return;
+    }
+
+    QDialog fullScreen(dialogParent ? dialogParent->window() : table->window());
+    fullScreen.setWindowTitle(QStringLiteral("%1（全屏）").arg(title));
+    fullScreen.setWindowFlag(Qt::Window, true);
+    auto *root = new QVBoxLayout(&fullScreen);
+    root->setContentsMargins(12, 16, 16, 16);
+    root->setSpacing(10);
+    auto *toolbar = new QHBoxLayout;
+    auto *heading = new QLabel(title, &fullScreen);
+    heading->setStyleSheet(QStringLiteral("font-size:18px;font-weight:600;"));
+    QPushButton *editButton = nullptr;
+    if (table->property("businessDocumentTable").toBool()) {
+        editButton = new QPushButton(QStringLiteral("修改单据"), &fullScreen);
+        editButton->setProperty("primary", true);
+    }
+    auto *exitButton = new QPushButton(QStringLiteral("退出全屏"), &fullScreen);
+    toolbar->addWidget(heading);
+    toolbar->addStretch();
+    if (editButton) toolbar->addWidget(editButton);
+    toolbar->addWidget(exitButton);
+    root->addLayout(toolbar);
+
+    originalLayout->removeWidget(table);
+    table->setProperty("tableFullScreenActive", true);
+    table->setParent(&fullScreen);
+    root->addWidget(table, 1);
+    table->show();
+    qlonglong documentIdToEdit = 0;
+    if (editButton) {
+        QObject::connect(editButton, &QPushButton::clicked, &fullScreen,
+                         [&fullScreen, table, &documentIdToEdit] {
+            documentIdToEdit = selectedBusinessDocumentId(table);
+            if (documentIdToEdit <= 0) {
+                QMessageBox::information(&fullScreen, QStringLiteral("请选择单据"),
+                                         QStringLiteral("请先在表格中选中一行单据。"));
+                return;
+            }
+            fullScreen.accept();
+        });
+    }
+    QObject::connect(exitButton, &QPushButton::clicked, &fullScreen, &QDialog::accept);
+    fullScreen.showFullScreen();
+    fullScreen.exec();
+
+    root->removeWidget(table);
+    table->setProperty("tableFullScreenActive", false);
+    if (originalParent && originalLayout) {
+        table->setParent(originalParent);
+        if (auto *box = qobject_cast<QBoxLayout *>(originalLayout.data()))
+            box->insertWidget(originalIndex, table);
+        else
+            originalLayout->addWidget(table);
+        table->show();
+    } else {
+        table->setParent(dialogParent);
+    }
+
+    if (documentIdToEdit > 0 && originalWindow) {
+        QMetaObject::invokeMethod(originalWindow.data(), "editDocumentById",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(qlonglong, documentIdToEdit));
     }
 }
 

@@ -1,7 +1,10 @@
 #include "ui/pages/ProductionReturnPage.h"
 
 #include "services/InventoryService.h"
+#include "services/OfficeTemplateService.h"
+#include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/widgets/ComboBoxSearch.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -19,6 +22,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSet>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -108,15 +112,26 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     auto *recentPanel = new QFrame(this);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
-    recentLayout->addWidget(new QLabel(QStringLiteral("近期生产退料单"), recentPanel));
+    auto *recentToolbar = new QHBoxLayout;
+    recentToolbar->addWidget(new QLabel(QStringLiteral("近期生产退料单"), recentPanel));
+    recentToolbar->addStretch();
+    auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(fullScreenRecentButton);
+    recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 4, recentPanel);
+    m_recentTable->setProperty("businessDocumentTable", true);
     m_recentTable->setHorizontalHeaderLabels({QStringLiteral("退料单号"), QStringLiteral("日期"),
                                               QStringLiteral("生产批次"), QStringLiteral("原领料单")});
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     recentLayout->addWidget(m_recentTable);
     root->addWidget(recentPanel, 1);
 
+    connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::fullScreenTable(
+            m_recentTable, QStringLiteral("近期生产退料单"), this);
+    });
     connect(m_runCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &ProductionReturnPage::loadDocuments);
     connect(m_documentCombo, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -331,7 +346,7 @@ void ProductionReturnPage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.document_no,d.document_date,p.batch_no,s.document_no "
+        "SELECT d.id,d.document_no,d.document_date,p.batch_no,s.document_no "
         "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
         "JOIN business_documents s ON s.id=d.source_document_id "
         "WHERE d.document_type='SCTL' ORDER BY d.id DESC LIMIT 20"));
@@ -339,10 +354,89 @@ void ProductionReturnPage::refreshRecentDocuments()
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);
         for (int column = 0; column < 4; ++column) {
-            m_recentTable->setItem(row, column,
-                                   new QTableWidgetItem(query.value(column).toString()));
+            auto *item = new QTableWidgetItem(query.value(column + 1).toString());
+            item->setData(Qt::UserRole, query.value(0));
+            m_recentTable->setItem(row, column, item);
         }
     }
+}
+
+bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &request,
+                                           OfficeTemplateDocument *form,
+                                           QString *errorMessage) const
+{
+    if (!form) return false;
+    QSqlQuery source(m_database);
+    source.prepare(QStringLiteral(
+        "SELECT d.document_no,p.batch_no,p.product_name,p.product_model,p.planned_quantity "
+        "FROM business_documents d LEFT JOIN production_runs p ON p.id=d.production_run_id "
+        "WHERE d.id=? AND d.document_type='SCLL'"));
+    source.addBindValue(request.sourceDocumentId);
+    if (!source.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("读取原领料单资料失败：%1")
+                                .arg(source.lastError().text());
+        }
+        return false;
+    }
+    if (!source.next()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("找不到原领料单，无法填写领料单模板。");
+        }
+        return false;
+    }
+    const QString issueNumber = source.value(0).toString();
+    const double plannedQuantity = source.value(4).toDouble();
+
+    OfficeTemplateDocument document;
+    document.kind = OfficeFormKind::ProductionIssue;
+    document.documentNumber = QStringLiteral("提交后自动生成");
+    document.documentDate = request.documentDate;
+    document.fields.insert(QStringLiteral("handler"), request.handlerName);
+    document.fields.insert(QStringLiteral("productionBatch"), source.value(1).toString());
+    document.fields.insert(QStringLiteral("productName"), source.value(2).toString());
+    document.fields.insert(QStringLiteral("productModel"), source.value(3).toString());
+    document.fields.insert(QStringLiteral("plannedQuantity"),
+                           QString::number(plannedQuantity, 'g', 12));
+    document.fields.insert(QStringLiteral("originalIssueNumber"), issueNumber);
+
+    QSqlQuery item(m_database);
+    item.prepare(QStringLiteral(
+        "SELECT m.code,m.name,m.specification,m.unit,i.batch_no,i.quantity,i.notes "
+        "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
+        "WHERE i.id=? AND i.document_id=?"));
+    for (const ProductionReturnLine &line : request.lines) {
+        item.bindValue(0, line.sourceItemId);
+        item.bindValue(1, request.sourceDocumentId);
+        if (!item.exec() || !item.next()) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("找不到原领料明细（%1），无法填写领料单模板。")
+                                    .arg(line.sourceItemId);
+            }
+            return false;
+        }
+        OfficeTemplateLine templateLine;
+        templateLine.materialCode = item.value(0).toString();
+        templateLine.materialName = item.value(1).toString();
+        templateLine.specification = item.value(2).toString();
+        templateLine.unit = item.value(3).toString();
+        templateLine.batchNo = item.value(4).toString();
+        templateLine.quantity = item.value(5).toDouble();
+        if (plannedQuantity > 0.0) {
+            templateLine.unitUsage = templateLine.quantity / plannedQuantity;
+        }
+        templateLine.returnQuantity = line.quantity;
+        templateLine.serialNumbers = line.serialNumbers.join(QStringLiteral("、"));
+        QStringList notes;
+        notes << QStringLiteral("本次退料：%1").arg(QString::number(line.quantity, 'g', 12));
+        notes << QStringLiteral("原领料单：%1").arg(issueNumber);
+        const QString sourceNotes = item.value(6).toString().trimmed();
+        if (!sourceNotes.isEmpty() && !notes.contains(sourceNotes)) notes << sourceNotes;
+        templateLine.notes = notes.join(QStringLiteral("；"));
+        document.lines.append(templateLine);
+    }
+    *form = document;
+    return true;
 }
 
 void ProductionReturnPage::submit()
@@ -387,6 +481,17 @@ void ProductionReturnPage::submit()
                              QStringLiteral("请选择原领料单并勾选至少一条退料明细。"));
         return;
     }
+
+    OfficeTemplateDocument returnForm;
+    QString formError;
+    if (!buildReturnForm(request, &returnForm, &formError)) {
+        QMessageBox::warning(this, QStringLiteral("无法填写领料单模板"), formError);
+        return;
+    }
+    DocumentTemplateDialog formDialog(returnForm, this);
+    if (formDialog.exec() != QDialog::Accepted) return;
+    returnForm = formDialog.document();
+
     if (QMessageBox::question(this, QStringLiteral("确认生产退料"),
         QStringLiteral("确认提交 %1 条退料明细？库存将整单增加并生成流水。")
             .arg(request.lines.size())) != QMessageBox::Yes) {
@@ -402,8 +507,20 @@ void ProductionReturnPage::submit()
         QMessageBox::warning(this, QStringLiteral("生产退料失败"), error);
         return;
     }
-    QMessageBox::information(this, QStringLiteral("生产退料完成"),
-                             QStringLiteral("退料单 %1 已生效。").arg(posted.documentNumber));
+    returnForm.documentNumber = posted.documentNumber;
+    if (OfficeTemplateService::attachToDocument(returnForm, m_database, m_session.userId,
+                                                posted.documentId, &formError)) {
+        QMessageBox::information(
+            this, QStringLiteral("生产退料完成"),
+            QStringLiteral("退料单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单\\领料单”，并已自动打开。")
+                .arg(posted.documentNumber));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("退料已完成，但模板处理未全部完成"),
+            QStringLiteral("退料单 %1 及本次库存退料已生效，请勿重复提交退料；"
+                           "以下表单保存或打开步骤未完成：\n\n%2")
+                .arg(posted.documentNumber, formError));
+    }
     resetSubmissionToken();
     m_notesEdit->clear();
     emit stockChanged();

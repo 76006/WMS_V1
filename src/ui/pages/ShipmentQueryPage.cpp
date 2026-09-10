@@ -121,6 +121,8 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, QWidget *parent)
     shipmentLayout->addLayout(shipmentHeader);
 
     m_shipmentTable = new QTableView(shipmentPanel);
+    m_shipmentTable->setProperty("businessDocumentTable", true);
+    m_shipmentTable->setProperty("businessDocumentIdColumn", 0);
     m_shipmentModel = new QSqlQueryModel(this);
     m_shipmentTable->setModel(m_shipmentModel);
     configureTable(m_shipmentTable);
@@ -233,7 +235,8 @@ void ShipmentQueryPage::loadShipments()
 
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT d.id,d.document_no,d.document_date,s.sales_order_no,s.customer_company,"
+        "SELECT d.id,d.document_no,"
+        "COALESCE(NULLIF(s.delivery_date,''),d.document_date),s.sales_order_no,s.customer_company,"
         "s.destination,s.contact_name,s.contact_phone,s.logistics_company,s.tracking_no,"
         "d.handler_name,COUNT(i.id),COALESCE(SUM(i.quantity),0),"
         "COALESCE(SUM(i.reversed_quantity),0),"
@@ -251,10 +254,11 @@ void ShipmentQueryPage::loadShipments()
         "JOIN materials pm ON pm.id=pi.material_id WHERE pi.document_id=d.id "
         "AND length(pm.code)=length(?)+5 "
         "AND substr(pm.code,2,length(?))=? COLLATE NOCASE)) "
-        "GROUP BY d.id,d.document_no,d.document_date,s.sales_order_no,s.customer_company,"
+        "GROUP BY d.id,d.document_no,COALESCE(NULLIF(s.delivery_date,''),d.document_date),"
+        "s.sales_order_no,s.customer_company,"
         "s.destination,s.contact_name,s.contact_phone,s.logistics_company,s.tracking_no,"
         "d.handler_name,d.status,d.notes "
-        "ORDER BY d.document_date DESC,d.id DESC"));
+        "ORDER BY COALESCE(NULLIF(s.delivery_date,''),d.document_date) DESC,d.id DESC"));
     query.addBindValue(orderKeyword);
     query.addBindValue(orderKeyword);
     query.addBindValue(customer);

@@ -8,7 +8,6 @@
 #include <QCryptographicHash>
 #include <QDateEdit>
 #include <QDir>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -25,6 +24,19 @@
 
 #include <utility>
 
+namespace {
+// 与导入器保持一致：可入账记录为状态“可导入/警告”，且物料编码、名称有效。
+bool isImportableRow(const LegacyImportRow &row)
+{
+    if (row.status != LegacyImportStatus::Ready && row.status != LegacyImportStatus::Warning) {
+        return false;
+    }
+    const QString code = row.materialCode.trimmed();
+    return !code.isEmpty() && code != QStringLiteral("/")
+        && !row.materialName.trimmed().isEmpty();
+}
+}
+
 ExcelImportPage::ExcelImportPage(QSqlDatabase database, Session session, QWidget *parent)
     : QWidget(parent), m_database(std::move(database)), m_session(std::move(session))
 {
@@ -39,7 +51,8 @@ ExcelImportPage::ExcelImportPage(QSqlDatabase database, Session session, QWidget
     heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
     layout->addWidget(heading);
     auto *hint = new QLabel(QStringLiteral(
-        "适配“冰美肌库存-0629.xlsx”结构。先预览再导入；零库存自动跳过，负库存和无编码数据不会入账。"), panel);
+        "适配“冰美肌库存-0629.xlsx”结构。先预览再导入；零库存、负数和数量缺失的物料只建立物料档案（不含库存），"
+        "无编码或数量非法的数据不会入账。"), panel);
     hint->setWordWrap(true);
     hint->setObjectName(QStringLiteral("mutedText"));
     layout->addWidget(hint);
@@ -237,28 +250,34 @@ void ExcelImportPage::preview()
     int warnings = 0;
     int errors = 0;
     int skipped = 0;
+    int importable = 0;
     for (const LegacyImportRow &item : std::as_const(m_rows)) {
         if (item.status == LegacyImportStatus::Ready) ++ready;
         else if (item.status == LegacyImportStatus::Warning) ++warnings;
         else if (item.status == LegacyImportStatus::Error) ++errors;
         else ++skipped;
+        const bool canImport = isImportableRow(item);
+        if (canImport) ++importable;
         const int row = m_table->rowCount();
         m_table->insertRow(row);
         const QString source = item.sourceRow > 0
             ? QStringLiteral("%1 第%2行").arg(item.sourceSheet).arg(item.sourceRow)
             : item.sourceSheet;
-        const QString quantity = item.rawQuantity.isEmpty()
-            ? QString() : (item.status == LegacyImportStatus::Ready
-                               ? QString::number(item.quantity, 'g', 15) : item.rawQuantity);
+        // 可入账记录显示归一化后的数量：零库存和负数归零都显示 0。
+        const QString quantity = canImport
+            ? QString::number(item.quantity, 'g', 15)
+            : (item.rawQuantity.isEmpty() ? QString() : item.rawQuantity);
         const QStringList columns = {LegacyInventoryImporter::statusText(item.status), source,
                                      item.materialCode, item.materialName, item.specification,
                                      item.categoryCode, item.batchNo, quantity, item.message};
         for (int column = 0; column < columns.size(); ++column)
             m_table->setItem(row, column, new QTableWidgetItem(columns.at(column)));
     }
-    m_summaryLabel->setText(QStringLiteral("解析完成：可导入 %1 条，警告 %2 条，错误 %3 条，零库存跳过 %4 条。")
-                                .arg(ready).arg(warnings).arg(errors).arg(skipped));
-    m_importButton->setEnabled(m_session.canManageWarehouse() && ready > 0
+    m_summaryLabel->setText(QStringLiteral(
+        "解析完成：可导入 %1 条，警告 %2 条，错误 %3 条，跳过 %4 条；共提交 %5 条，"
+        "零库存或已归零的物料只建立物料档案、不产生库存。")
+                                .arg(ready).arg(warnings).arg(errors).arg(skipped).arg(importable));
+    m_importButton->setEnabled(m_session.canManageWarehouse() && importable > 0
                                && m_locationCombo->currentIndex() >= 0);
 }
 
@@ -275,7 +294,8 @@ void ExcelImportPage::importInventory()
     request.warehouseId = m_warehouseCombo->currentData().toLongLong();
     request.locationId = m_locationCombo->currentData().toLongLong();
     for (const LegacyImportRow &item : std::as_const(m_rows)) {
-        if (item.status != LegacyImportStatus::Ready) continue;
+        // 可导入和可入账的警告（负数、空数量归零）都保留物料档案；错误和跳过不入账。
+        if (!isImportableRow(item)) continue;
         InitialInventoryLine line;
         line.materialCode = item.materialCode;
         line.materialName = item.materialName;
@@ -285,20 +305,39 @@ void ExcelImportPage::importInventory()
         line.batchNo = item.batchNo;
         line.quantity = item.quantity;
         line.notes = QStringLiteral("来源：%1 第%2行").arg(item.sourceSheet).arg(item.sourceRow);
+        if (item.status == LegacyImportStatus::Warning && !item.message.trimmed().isEmpty()) {
+            line.notes += QStringLiteral("；") + item.message.trimmed();
+        }
         request.lines.append(line);
     }
-    QFile file(m_fileEdit->text().trimmed());
-    if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, QStringLiteral("读取失败"), QStringLiteral("无法重新读取所选Excel文件。"));
+    if (request.lines.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("没有可导入记录"),
+                             QStringLiteral("请先解析文件并确认存在可入账的物料记录。"));
         return;
     }
+    // 提交标识按归一化后的可导入明细内容计算：另存为或仅修改Excel元数据不会改变明细，
+    // 因此重复导入同一批数据仍然得到同一个标识，由服务层和唯一索引共同拦截。
+    QStringList canonicalLines;
+    canonicalLines.reserve(request.lines.size());
+    for (const InitialInventoryLine &line : std::as_const(request.lines)) {
+        canonicalLines.append(QStringLiteral("%1|%2|%3|%4|%5|%6|%7")
+                                  .arg(line.materialCode.trimmed().toUpper(),
+                                       line.materialName.trimmed(),
+                                       line.specification.trimmed(),
+                                       line.categoryCode.trimmed().toUpper(),
+                                       line.unit.trimmed(),
+                                       line.batchNo.trimmed().toUpper(),
+                                       QString::number(qMax(0.0, line.quantity), 'g', 15)));
+    }
+    canonicalLines.sort();
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(&file);
+    hash.addData(canonicalLines.join(QLatin1Char('\n')).toUtf8());
     request.submissionToken = QStringLiteral("legacy-import:%1:%2:%3")
                                   .arg(QString::fromLatin1(hash.result().toHex()))
                                   .arg(request.warehouseId).arg(request.locationId);
     if (QMessageBox::question(this, QStringLiteral("确认导入"),
-        QStringLiteral("确认把 %1 条有效记录导入所选库位？系统会自动创建缺少的物料并生成期初入库单。")
+        QStringLiteral("确认处理 %1 条记录？零库存或负数归零的物料只建立物料档案、不产生库存；"
+                       "系统会自动创建缺少的物料并生成期初入库单。")
             .arg(request.lines.size())) != QMessageBox::Yes) return;
     InventoryService service(m_database, m_session.userId);
     PostedDocument posted;
@@ -309,7 +348,8 @@ void ExcelImportPage::importInventory()
     }
     m_importButton->setEnabled(false);
     QMessageBox::information(this, QStringLiteral("导入完成"),
-                             QStringLiteral("已导入 %1 条库存，期初入库单：%2")
+                             QStringLiteral("已处理 %1 条记录（零库存或已归零的物料只建立档案、不产生库存），"
+                                            "期初入库单：%2")
                                  .arg(request.lines.size()).arg(posted.documentNumber));
     emit stockChanged();
 }

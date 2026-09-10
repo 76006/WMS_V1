@@ -12,6 +12,9 @@ class QPushButton;
 class QTableWidget;
 class QTextEdit;
 
+struct OfficeTemplateDocument;
+struct ProductionReturnRequest;
+
 class ProductionReturnPage final : public QWidget
 {
     Q_OBJECT
@@ -36,6 +39,9 @@ private:
     void chooseSerials(int row);
     void refreshRecentDocuments();
     void resetSubmissionToken();
+    bool buildReturnForm(const ProductionReturnRequest &request,
+                         OfficeTemplateDocument *form,
+                         QString *errorMessage) const;
 
     QSqlDatabase m_database;
     Session m_session;

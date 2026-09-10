@@ -28,10 +28,22 @@ private slots:
     void loadLocations();
     void loadSnapshot();
     void filterMaterials();
+    void addGainMaterial();
     void submit();
 
 private:
     void resetSubmissionToken();
+    int appendCountRow(qlonglong materialId,
+                       const QString &materialText,
+                       qlonglong warehouseId,
+                       const QString &warehouseCode,
+                       qlonglong locationId,
+                       const QString &locationCode,
+                       const QString &batchNo,
+                       bool requireSerial,
+                       double systemQuantity,
+                       double actualQuantity,
+                       const QString &differenceReason);
 
     QSqlDatabase m_database;
     Session m_session;

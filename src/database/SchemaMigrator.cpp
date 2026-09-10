@@ -47,7 +47,70 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     if (!applyMaterialBomMigration(database, errorMessage)) {
         return false;
     }
+    if (!applyDocumentFormsMigration(database, errorMessage)) {
+        return false;
+    }
+    if (!applySalesDeliveryDateMigration(database, errorMessage)) {
+        return false;
+    }
+    if (!applyInspectionNoticesMigration(database, errorMessage)) {
+        return false;
+    }
     return ensureDefaultAdministrator(database, errorMessage);
+}
+
+bool SchemaMigrator::applyInspectionNoticesMigration(QSqlDatabase database,
+                                                      QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=13"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/013_inspection_notices.sql"),
+                              QStringLiteral("升级数据库到版本13"),
+                              errorMessage);
+}
+
+bool SchemaMigrator::applySalesDeliveryDateMigration(QSqlDatabase database,
+                                                     QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=12"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/012_sales_delivery_date.sql"),
+                              QStringLiteral("升级数据库到版本12"),
+                              errorMessage);
+}
+
+bool SchemaMigrator::applyDocumentFormsMigration(QSqlDatabase database,
+                                                  QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=11"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/011_document_forms.sql"),
+                              QStringLiteral("升级数据库到版本11"),
+                              errorMessage);
 }
 
 bool SchemaMigrator::applyMaterialBomMigration(QSqlDatabase database,

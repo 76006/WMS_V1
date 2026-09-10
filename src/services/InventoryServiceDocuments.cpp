@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QDate>
 #include <QDateTime>
+#include <QMap>
 #include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -39,6 +40,103 @@ bool isValidInspectionNumber(const QString &number, const QDate &date)
     const int sequence = number.right(3).toInt(&ok);
     return ok && sequence >= 1 && sequence <= 999
         && number.right(3) == QStringLiteral("%1").arg(sequence, 3, 10, QLatin1Char('0'));
+}
+
+struct InspectionNoticeSnapshot
+{
+    QString inspectionNumber;
+    QDate inspectionDate;
+    QString inspectorName;
+    QString conclusion;
+    qlonglong attachmentId = 0;
+};
+
+QString inspectionLineKey(qlonglong materialId, const QString &batchNumber)
+{
+    Q_UNUSED(batchNumber);
+    return QString::number(materialId);
+}
+
+bool loadAndValidateInspectionNotice(QSqlDatabase database,
+                                     qlonglong noticeId,
+                                     const QList<StockMovementRequest> &requestLines,
+                                     InspectionNoticeSnapshot *snapshot,
+                                     QString *errorMessage)
+{
+    QSqlQuery notice(database);
+    notice.prepare(QStringLiteral(
+        "SELECT inspection_no,status,inspection_date,inspector_name,inspection_result,"
+        "conclusion,inspection_attachment_id,linked_document_id "
+        "FROM inspection_notices WHERE id=?"));
+    notice.addBindValue(noticeId);
+    if (!notice.exec() || !notice.next()) {
+        setDocumentError(errorMessage, QStringLiteral("选择的送检通知不存在或读取失败：%1")
+                                           .arg(notice.lastError().text()));
+        return false;
+    }
+    if (notice.value(1).toString() != QStringLiteral("QUALIFIED")
+        || notice.value(4).toString() != QStringLiteral("QUALIFIED")
+        || !notice.value(7).isNull()) {
+        setDocumentError(errorMessage, QStringLiteral("选择的送检通知尚未合格或已经用于其他入库单。"));
+        return false;
+    }
+    const qlonglong attachmentId = notice.value(6).toLongLong();
+    QSqlQuery attachment(database);
+    attachment.prepare(QStringLiteral(
+        "SELECT 1 FROM attachments WHERE id=? AND business_type='inspection_notice' "
+        "AND business_id=? AND is_deleted=0 AND file_size>0"));
+    attachment.addBindValue(attachmentId);
+    attachment.addBindValue(noticeId);
+    if (attachmentId <= 0 || !attachment.exec() || !attachment.next()) {
+        setDocumentError(errorMessage, QStringLiteral("选择的合格送检通知缺少有效检验附件。"));
+        return false;
+    }
+
+    QMap<QString, double> noticeQuantities;
+    QSqlQuery items(database);
+    items.prepare(QStringLiteral(
+        "SELECT material_id,batch_no,quantity FROM inspection_notice_items "
+        "WHERE notice_id=? ORDER BY line_number"));
+    items.addBindValue(noticeId);
+    if (!items.exec()) {
+        setDocumentError(errorMessage, QStringLiteral("读取送检通知明细失败：%1")
+                                           .arg(items.lastError().text()));
+        return false;
+    }
+    while (items.next()) {
+        const QString key = inspectionLineKey(items.value(0).toLongLong(),
+                                              items.value(1).toString());
+        noticeQuantities[key] += items.value(2).toDouble();
+    }
+    QMap<QString, double> inboundQuantities;
+    for (const StockMovementRequest &line : requestLines) {
+        if (line.materialId <= 0 || !std::isfinite(line.quantity)
+            || line.quantity <= DocumentQuantityTolerance) {
+            setDocumentError(errorMessage, QStringLiteral("入库明细包含无效物料或数量。"));
+            return false;
+        }
+        inboundQuantities[inspectionLineKey(line.materialId, line.batchNo)] += line.quantity;
+    }
+    if (noticeQuantities.size() != inboundQuantities.size()) {
+        setDocumentError(errorMessage, QStringLiteral("入库物料与所选送检通知不一致。"));
+        return false;
+    }
+    for (auto it = noticeQuantities.cbegin(); it != noticeQuantities.cend(); ++it) {
+        const auto inbound = inboundQuantities.constFind(it.key());
+        if (inbound == inboundQuantities.cend()
+            || std::abs(inbound.value() - it.value()) > DocumentQuantityTolerance) {
+            setDocumentError(errorMessage, QStringLiteral("入库物料或数量与所选送检通知不一致。"));
+            return false;
+        }
+    }
+    if (snapshot) {
+        snapshot->inspectionNumber = notice.value(0).toString();
+        snapshot->inspectionDate = QDate::fromString(notice.value(2).toString(), Qt::ISODate);
+        snapshot->inspectorName = notice.value(3).toString();
+        snapshot->conclusion = notice.value(5).toString();
+        snapshot->attachmentId = attachmentId;
+    }
+    return true;
 }
 }
 
@@ -89,14 +187,41 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         return false;
     }
     const QString type = request.documentType.trimmed().toUpper();
-    if (!inbound && type == QStringLiteral("XSCK")
-        && (request.customerCompany.trimmed().isEmpty()
-            || request.destination.trimmed().isEmpty())) {
+    if ((!inbound && request.inspectionNoticeId > 0)
+        || (request.inspectionNoticeId > 0 && request.inspection.required)) {
         setDocumentError(errorMessage,
-                         QStringLiteral("销售出库必须填写客户公司名称和销售目的地/收货地址。"));
+                         request.inspectionNoticeId > 0 && request.inspection.required
+                             ? QStringLiteral("不能同时使用独立送检通知和旧版内嵌送检资料。")
+                             : QStringLiteral("只有入库单可以关联送检通知。"));
         return false;
     }
-    if (inbound && request.inspection.required) {
+    if (!inbound && type == QStringLiteral("XSCK")) {
+        // 发货资料由服务层独立校验，避免绕过界面写入不完整的销售出库单。
+        QStringList missing;
+        if (request.customerCompany.trimmed().isEmpty())
+            missing.append(QStringLiteral("客户公司名称"));
+        if (request.destination.trimmed().isEmpty())
+            missing.append(QStringLiteral("销售目的地/收货地址"));
+        if (request.customerContact.trimmed().isEmpty())
+            missing.append(QStringLiteral("客户联系人"));
+        if (request.customerPhone.trimmed().isEmpty())
+            missing.append(QStringLiteral("联系电话"));
+        if (request.salesOrderNumber.trimmed().isEmpty())
+            missing.append(QStringLiteral("客户合同号/订单号"));
+        if (request.logisticsCompany.trimmed().isEmpty())
+            missing.append(QStringLiteral("物流/快递公司"));
+        if (request.trackingNumber.trimmed().isEmpty())
+            missing.append(QStringLiteral("运单号"));
+        if (!request.deliveryDate.isValid())
+            missing.append(QStringLiteral("送货日期"));
+        if (!missing.isEmpty()) {
+            setDocumentError(errorMessage,
+                             QStringLiteral("销售出库必须完整填写以下发货资料：%1。")
+                                 .arg(missing.join(QStringLiteral("、"))));
+            return false;
+        }
+    }
+    if (inbound && request.inspectionNoticeId <= 0 && request.inspection.required) {
         if (request.inspection.inspectionNumber.trimmed().isEmpty()
             || !request.inspection.inspectionDate.isValid()
             || request.inspection.inspectorName.trimmed().isEmpty()) {
@@ -125,6 +250,14 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
     }
     if (!beginImmediate(errorMessage)) return false;
 
+    InspectionNoticeSnapshot inspectionNotice;
+    if (inbound && request.inspectionNoticeId > 0
+        && !loadAndValidateInspectionNotice(m_database, request.inspectionNoticeId,
+                                            request.lines, &inspectionNotice, errorMessage)) {
+        rollback();
+        return false;
+    }
+
     const QString number = nextDocumentNumber(type, request.documentDate, errorMessage);
     const qlonglong documentId = number.isEmpty()
         ? 0
@@ -150,7 +283,9 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
     }
     if (inbound) {
         QVariant inspectionAttachmentId;
-        if (request.inspection.required) {
+        if (request.inspectionNoticeId > 0) {
+            inspectionAttachmentId = inspectionNotice.attachmentId;
+        } else if (request.inspection.required) {
             QSqlQuery attachment(m_database);
             attachment.prepare(QStringLiteral(
                 "INSERT INTO attachments(business_type,business_id,original_file_name,mime_type,"
@@ -176,33 +311,44 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
 
         QSqlQuery inspection(m_database);
         inspection.prepare(QStringLiteral(
-            "INSERT INTO inbound_inspection_details(document_id,requires_inspection,inspection_no,"
+            "INSERT INTO inbound_inspection_details(document_id,inspection_notice_id,requires_inspection,inspection_no,"
             "inspection_date,inspector_name,inspection_result,conclusion,inspection_attachment_id) "
-            "VALUES(?,?,?,?,?,?,?,?)"));
+            "VALUES(?,?,?,?,?,?,?,?,?)"));
         inspection.addBindValue(documentId);
-        inspection.addBindValue(request.inspection.required ? 1 : 0);
-        inspection.addBindValue(request.inspection.required
-                                    ? normalizedText(request.inspection.inspectionNumber)
-                                    : QString());
-        inspection.addBindValue(request.inspection.required
-                                    ? request.inspection.inspectionDate.toString(Qt::ISODate)
-                                    : QVariant());
-        inspection.addBindValue(request.inspection.required
-                                    ? normalizedText(request.inspection.inspectorName)
-                                    : QString());
-        inspection.addBindValue(request.inspection.required
-                                    ? QStringLiteral("QUALIFIED")
-                                    : QStringLiteral("NOT_REQUIRED"));
-        inspection.addBindValue(request.inspection.required
-                                    ? normalizedText(request.inspection.conclusion)
-                                    : QString());
+        inspection.addBindValue(request.inspectionNoticeId > 0
+                                    ? QVariant(request.inspectionNoticeId) : QVariant());
+        const bool inspected = request.inspectionNoticeId > 0 || request.inspection.required;
+        inspection.addBindValue(inspected ? 1 : 0);
+        inspection.addBindValue(request.inspectionNoticeId > 0
+                                    ? normalizedText(inspectionNotice.inspectionNumber)
+                                    : (request.inspection.required
+                                           ? normalizedText(request.inspection.inspectionNumber)
+                                           : QString()));
+        inspection.addBindValue(request.inspectionNoticeId > 0
+                                    ? inspectionNotice.inspectionDate.toString(Qt::ISODate)
+                                    : (request.inspection.required
+                                           ? QVariant(request.inspection.inspectionDate.toString(Qt::ISODate))
+                                           : QVariant()));
+        inspection.addBindValue(request.inspectionNoticeId > 0
+                                    ? normalizedText(inspectionNotice.inspectorName)
+                                    : (request.inspection.required
+                                           ? normalizedText(request.inspection.inspectorName)
+                                           : QString()));
+        inspection.addBindValue(inspected ? QStringLiteral("QUALIFIED")
+                                          : QStringLiteral("NOT_REQUIRED"));
+        inspection.addBindValue(request.inspectionNoticeId > 0
+                                    ? normalizedText(inspectionNotice.conclusion)
+                                    : (request.inspection.required
+                                           ? normalizedText(request.inspection.conclusion)
+                                           : QString()));
         inspection.addBindValue(inspectionAttachmentId);
         if (!inspection.exec()) {
             const QString detail = inspection.lastError().text();
             setDocumentError(
                 errorMessage,
                 detail.contains(QStringLiteral("UNIQUE"), Qt::CaseInsensitive)
-                    ? QStringLiteral("送检单号已存在，请重新打开送检单生成新的流水号。")
+                    ? QStringLiteral("送检单号已被占用，请重新打开送检单，"
+                                     "系统会自动生成新的当日流水号。")
                     : QStringLiteral("保存入库送检资料失败：%1").arg(detail));
             rollback();
             return false;
@@ -212,8 +358,8 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         QSqlQuery sales(m_database);
         sales.prepare(QStringLiteral(
             "INSERT INTO sales_outbound_details(document_id,customer_company,destination,"
-            "contact_name,contact_phone,sales_order_no,logistics_company,tracking_no) "
-            "VALUES(?,?,?,?,?,?,?,?)"));
+            "contact_name,contact_phone,sales_order_no,logistics_company,tracking_no,"
+            "delivery_date) VALUES(?,?,?,?,?,?,?,?,?)"));
         sales.addBindValue(documentId);
         sales.addBindValue(normalizedText(request.customerCompany));
         sales.addBindValue(normalizedText(request.destination));
@@ -222,6 +368,7 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         sales.addBindValue(normalizedText(request.salesOrderNumber));
         sales.addBindValue(normalizedText(request.logisticsCompany));
         sales.addBindValue(normalizedText(request.trackingNumber));
+        sales.addBindValue(request.deliveryDate.toString(Qt::ISODate));
         if (!sales.exec()) {
             setDocumentError(errorMessage,
                              QStringLiteral("保存销售出库信息失败：%1")
@@ -306,7 +453,8 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                 "CASE WHEN excluded.supplier<>'' THEN excluded.supplier ELSE batches.supplier END"));
             batch.addBindValue(movement.materialId);
             batch.addBindValue(normalizedText(movement.batchNo));
-            batch.addBindValue(normalizedText(request.supplier));
+            batch.addBindValue(normalizedText(movement.supplier.trimmed().isEmpty()
+                                                  ? request.supplier : movement.supplier));
             batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
             if (!batch.exec()) {
                 setDocumentError(errorMessage, lineError(index + 1, batch.lastError().text()));
@@ -319,6 +467,37 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
             : attachSerialsToOutbound(movement, documentId, ledgerId, &detail);
         if (!serialsOk) {
             setDocumentError(errorMessage, lineError(index + 1, detail));
+            rollback();
+            return false;
+        }
+    }
+
+    if (inbound && request.inspectionNoticeId > 0) {
+        const QString now = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+        QSqlQuery useNotice(m_database);
+        useNotice.prepare(QStringLiteral(
+            "UPDATE inspection_notices SET status='USED',linked_document_id=?,updated_by=?,"
+            "updated_at=? WHERE id=? AND status='QUALIFIED' AND linked_document_id IS NULL"));
+        useNotice.addBindValue(documentId);
+        useNotice.addBindValue(m_operatorId);
+        useNotice.addBindValue(now);
+        useNotice.addBindValue(request.inspectionNoticeId);
+        if (!useNotice.exec() || useNotice.numRowsAffected() != 1) {
+            setDocumentError(errorMessage,
+                             QStringLiteral("送检通知已被其他入库单使用，请刷新后重试。"));
+            rollback();
+            return false;
+        }
+        QSqlQuery audit(m_database);
+        audit.prepare(QStringLiteral(
+            "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
+            "VALUES(?,'INSPECTION_NOTICE_USE','inspection_notice',?,?)"));
+        audit.addBindValue(m_operatorId);
+        audit.addBindValue(request.inspectionNoticeId);
+        audit.addBindValue(number);
+        if (!audit.exec()) {
+            setDocumentError(errorMessage, QStringLiteral("记录送检通知入库日志失败：%1")
+                                               .arg(audit.lastError().text()));
             rollback();
             return false;
         }
@@ -342,14 +521,33 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
                                               PostedDocument *postedDocument,
                                               QString *errorMessage)
 {
+    return importInitialInventoryInternal(request, postedDocument, true, errorMessage);
+}
+
+bool InventoryService::importInitialInventoryInCurrentTransaction(
+    const InitialInventoryRequest &request,
+    PostedDocument *postedDocument,
+    QString *errorMessage)
+{
+    return importInitialInventoryInternal(request, postedDocument, false, errorMessage);
+}
+
+bool InventoryService::importInitialInventoryInternal(const InitialInventoryRequest &request,
+                                                      PostedDocument *postedDocument,
+                                                      bool manageTransaction,
+                                                      QString *errorMessage)
+{
     if (!m_database.isOpen() || m_operatorId <= 0 || !request.documentDate.isValid()
         || request.warehouseId <= 0 || request.locationId <= 0 || request.lines.isEmpty()
         || request.submissionToken.trimmed().isEmpty()) {
         setDocumentError(errorMessage, QStringLiteral("期初库存导入资料不完整。"));
         return false;
     }
+    const auto rollbackIfOwned = [this, manageTransaction]() {
+        if (manageTransaction) rollback();
+    };
     if (!validateLocation(request.warehouseId, request.locationId, errorMessage)
-        || !beginImmediate(errorMessage)) return false;
+        || (manageTransaction && !beginImmediate(errorMessage))) return false;
 
     const QString number = nextDocumentNumber(QStringLiteral("QTRK"), request.documentDate,
                                                errorMessage);
@@ -361,7 +559,7 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
                          QStringLiteral("期初库存导入"), notes, QVariant(), errorMessage);
     if (documentId <= 0
         || !setDocumentSubmissionToken(documentId, request.submissionToken, errorMessage)) {
-        rollback();
+        rollbackIfOwned();
         return false;
     }
 
@@ -371,17 +569,18 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
         const QString code = source.materialCode.trimmed().toUpper();
         const QString name = source.materialName.trimmed();
         const QString batchNo = source.batchNo.trimmed();
-        if (code.isEmpty() || name.isEmpty() || source.quantity <= DocumentQuantityTolerance) {
+        // 期初库存允许为0（只建立物料档案），但不允许任何负数，小数点后的极小负值同样拒绝。
+        if (code.isEmpty() || name.isEmpty() || source.quantity < 0.0) {
             setDocumentError(errorMessage,
-                             lineError(index + 1, QStringLiteral("物料编码、名称或数量无效。")));
-            rollback();
+                             lineError(index + 1, QStringLiteral("物料编码、名称无效或数量为负数。")));
+            rollbackIfOwned();
             return false;
         }
         const QString identity = code + QLatin1Char('|') + batchNo.toUpper();
         if (identities.contains(identity)) {
             setDocumentError(errorMessage,
                              lineError(index + 1, QStringLiteral("物料编码和批次重复。")));
-            rollback();
+            rollbackIfOwned();
             return false;
         }
         identities.insert(identity);
@@ -392,14 +591,14 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
         existing.addBindValue(code);
         if (!existing.exec()) {
             setDocumentError(errorMessage, existing.lastError().text());
-            rollback();
+            rollbackIfOwned();
             return false;
         }
         if (existing.next()) {
             if (!existing.value(1).toBool()) {
                 setDocumentError(errorMessage,
                                  lineError(index + 1, QStringLiteral("已有同编码物料处于停用状态。")));
-                rollback();
+                rollbackIfOwned();
                 return false;
             }
             materialId = existing.value(0).toLongLong();
@@ -413,7 +612,7 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
             if (!category.exec() || !category.next()) {
                 setDocumentError(errorMessage,
                                  lineError(index + 1, QStringLiteral("物料分类不存在或已停用。")));
-                rollback();
+                rollbackIfOwned();
                 return false;
             }
             QSqlQuery insert(m_database);
@@ -435,10 +634,47 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
                 setDocumentError(errorMessage,
                                  lineError(index + 1, QStringLiteral("创建物料失败：%1")
                                                                .arg(insert.lastError().text())));
-                rollback();
+                rollbackIfOwned();
                 return false;
             }
             materialId = insert.lastInsertId().toLongLong();
+        }
+
+        // 零库存记录只建立/保留物料档案，不校验出入库规则，也不产生单据明细、库存、流水、SN或批次。
+        if (source.quantity <= DocumentQuantityTolerance) continue;
+
+        // 期初库存的权威防重：目标物料+仓库+库位+批次只要已有库存记录（即使数量为0），
+        // 就说明该批次已经入过账，必须改用库存盘点或正常出入库业务处理，整单回滚。
+        QSqlQuery existingBalance(m_database);
+        existingBalance.prepare(QStringLiteral(
+            "SELECT s.quantity,w.name,l.name FROM stock_balances s "
+            "JOIN warehouses w ON w.id=s.warehouse_id "
+            "JOIN locations l ON l.id=s.location_id "
+            "WHERE s.material_id=? AND s.warehouse_id=? AND s.location_id=? AND s.batch_no=?"));
+        existingBalance.addBindValue(materialId);
+        existingBalance.addBindValue(request.warehouseId);
+        existingBalance.addBindValue(request.locationId);
+        existingBalance.addBindValue(normalizedText(batchNo));
+        if (!existingBalance.exec()) {
+            setDocumentError(errorMessage, existingBalance.lastError().text());
+            rollbackIfOwned();
+            return false;
+        }
+        if (existingBalance.next()) {
+            setDocumentError(
+                errorMessage,
+                lineError(index + 1,
+                          QStringLiteral("物料 %1（批次 %2）在仓库 %3 库位 %4 已有库存记录"
+                                         "（当前数量 %5），期初库存不能重复导入；"
+                                         "请改用库存盘点或正常出入库业务处理。")
+                              .arg(code,
+                                   batchNo.isEmpty() ? QStringLiteral("无批次") : batchNo,
+                                   existingBalance.value(1).toString(),
+                                   existingBalance.value(2).toString(),
+                                   QString::number(existingBalance.value(0).toDouble(),
+                                                   'g', 12))));
+            rollbackIfOwned();
+            return false;
         }
 
         StockMovementRequest movement;
@@ -455,7 +691,7 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
         const MaterialRules rules = materialRules(materialId, &detail);
         if (!rules.valid || !validateMovement(movement, rules, &detail)) {
             setDocumentError(errorMessage, lineError(index + 1, detail));
-            rollback();
+            rollbackIfOwned();
             return false;
         }
         const qlonglong itemId = createDocumentItem(documentId, index + 1, movement,
@@ -466,7 +702,7 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
             || !changeBalance(materialId, request.warehouseId, request.locationId, batchNo,
                               source.quantity, &before, &after, &detail)) {
             setDocumentError(errorMessage, lineError(index + 1, detail));
-            rollback();
+            rollbackIfOwned();
             return false;
         }
         const qlonglong ledgerId = createLedger(
@@ -476,7 +712,7 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
         if (ledgerId <= 0
             || !attachSerialsToInbound(movement, documentId, ledgerId, &detail)) {
             setDocumentError(errorMessage, lineError(index + 1, detail));
-            rollback();
+            rollbackIfOwned();
             return false;
         }
         if (!batchNo.isEmpty()) {
@@ -488,7 +724,7 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
             batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
             if (!batch.exec()) {
                 setDocumentError(errorMessage, lineError(index + 1, batch.lastError().text()));
-                rollback();
+                rollbackIfOwned();
                 return false;
             }
         }
@@ -498,8 +734,8 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
         || !writeAudit(QStringLiteral("IMPORT"), QStringLiteral("business_document"),
                        documentId, QStringLiteral("%1；%2 行").arg(number).arg(request.lines.size()),
                        errorMessage)
-        || !commit(errorMessage)) {
-        rollback();
+        || (manageTransaction && !commit(errorMessage))) {
+        rollbackIfOwned();
         return false;
     }
     if (postedDocument) {
@@ -608,7 +844,8 @@ bool InventoryService::postInventoryCount(const InventoryCountRequest &request,
             rollback();
             return false;
         }
-        if (!line.batchNo.trimmed().isEmpty() && line.actualQuantity > DocumentQuantityTolerance) {
+        // 批次档案与盘点差异无关：实盘为0也要落库，否则零库存批次的供应商等资料无法维护。
+        if (!line.batchNo.trimmed().isEmpty()) {
             QSqlQuery batch(m_database);
             if (line.supplier.isNull()) {
                 batch.prepare(QStringLiteral(
@@ -623,7 +860,12 @@ bool InventoryService::postInventoryCount(const InventoryCountRequest &request,
             batch.addBindValue(normalizedText(line.batchNo));
             batch.addBindValue(line.supplier.isNull()
                                    ? QStringLiteral("") : normalizedText(line.supplier));
-            batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+            // 新建的零库存批次没有实际入库时间，写入 SQL NULL；冲突时保留已有 first_in_at。
+            QVariant firstInAt;
+            if (line.actualQuantity > DocumentQuantityTolerance) {
+                firstInAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+            }
+            batch.addBindValue(firstInAt);
             if (!batch.exec()) {
                 setDocumentError(errorMessage,
                                  lineError(index + 1,

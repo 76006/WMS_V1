@@ -1,14 +1,16 @@
 #include "ui/pages/StockInPage.h"
 
 #include "services/InventoryService.h"
+#include "services/InspectionService.h"
 #include "services/OfficeTemplateService.h"
 #include "ui/dialogs/DocumentTemplateDialog.h"
-#include "ui/dialogs/InspectionDialog.h"
 #include "ui/widgets/StockLineTable.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
 #include <QDateEdit>
+#include <QDir>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHeaderView>
@@ -58,10 +60,9 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     m_numberLabel = new QLabel(QStringLiteral("提交时自动生成"), panel);
     m_numberLabel->setObjectName(QStringLiteral("mutedText"));
     m_inspectionCombo = new QComboBox(panel);
-    m_inspectionCombo->addItem(QStringLiteral("否（直接入库）"), false);
-    m_inspectionCombo->addItem(QStringLiteral("是（先填写送检单）"), true);
-    m_inspectionButton = new QPushButton(QStringLiteral("填写送检单"), panel);
-    m_inspectionStatusLabel = new QLabel(QStringLiteral("无需送检"), panel);
+    m_inspectionCombo->addItem(QStringLiteral("直接入库（不关联送检通知）"), qlonglong(0));
+    m_inspectionButton = new QPushButton(QStringLiteral("送检通知在独立模块填写"), panel);
+    m_inspectionStatusLabel = new QLabel(QStringLiteral("可直接入库"), panel);
     m_inspectionStatusLabel->setObjectName(QStringLiteral("mutedText"));
     auto *inspectionRow = new QWidget(panel);
     auto *inspectionLayout = new QHBoxLayout(inspectionRow);
@@ -76,12 +77,13 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     form->addRow(QStringLiteral("经办人员"), m_handlerEdit);
     form->addRow(QStringLiteral("供应商"), m_supplierEdit);
     form->addRow(QStringLiteral("业务用途"), m_purposeEdit);
-    form->addRow(QStringLiteral("是否送检 *"), inspectionRow);
+    form->addRow(QStringLiteral("关联已合格检验通知"), inspectionRow);
     form->addRow(QStringLiteral("入库单号"), m_numberLabel);
     form->addRow(QStringLiteral("备注"), m_notesEdit);
     layout->addLayout(form);
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Inbound, panel);
     m_lines->setPurchaseMode(true);
+    m_lines->setDocumentDate(m_dateEdit->date());
     layout->addWidget(m_lines);
     auto *actions = new QHBoxLayout;
     actions->addStretch();
@@ -94,18 +96,31 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     auto *recentPanel = new QFrame(this);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
-    recentLayout->addWidget(new QLabel(QStringLiteral("近期在线入库单"), recentPanel));
+    auto *recentToolbar = new QHBoxLayout;
+    recentToolbar->addWidget(new QLabel(QStringLiteral("近期在线入库单"), recentPanel));
+    recentToolbar->addStretch();
+    auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(fullScreenRecentButton);
+    recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 8, recentPanel);
+    m_recentTable->setProperty("businessDocumentTable", true);
     m_recentTable->setHorizontalHeaderLabels({QStringLiteral("单据号"), QStringLiteral("类型"),
                                               QStringLiteral("日期"), QStringLiteral("是否送检"),
                                               QStringLiteral("送检单号"), QStringLiteral("检验结果"),
                                               QStringLiteral("检验附件"), QStringLiteral("明细数")});
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     recentLayout->addWidget(m_recentTable);
     root->addWidget(recentPanel, 1);
 
+    connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::fullScreenTable(
+            m_recentTable, QStringLiteral("近期在线入库单"), this);
+    });
     connect(m_submitButton, &QPushButton::clicked, this, &StockInPage::submit);
+    connect(m_dateEdit, &QDateEdit::dateChanged,
+            m_lines, &StockLineTable::setDocumentDate);
     connect(m_inspectionCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &StockInPage::updateInspectionRequirement);
     connect(m_inspectionButton, &QPushButton::clicked,
@@ -130,7 +145,33 @@ void StockInPage::refreshReferenceData()
 {
     m_lines->refreshReferenceData();
     m_submitButton->setEnabled(m_session.canManageWarehouse());
+    const qlonglong previous = m_inspectionCombo->currentData().toLongLong();
+    m_inspectionCombo->blockSignals(true);
+    m_inspectionCombo->clear();
+    m_inspectionCombo->addItem(QStringLiteral("直接入库（不关联送检通知）"), qlonglong(0));
+    InspectionService inspectionService(m_database, m_session.userId);
+    QList<InspectionNotice> notices;
+    QString noticeError;
+    if (inspectionService.listQualifiedUnused(&notices, &noticeError)) {
+        for (const InspectionNotice &notice : std::as_const(notices)) {
+            m_inspectionCombo->addItem(
+                QStringLiteral("%1｜%2｜%3条")
+                    .arg(notice.inspectionNumber, notice.supplier)
+                    .arg(notice.lineCount),
+                notice.id);
+        }
+    }
+    const int previousIndex = m_inspectionCombo->findData(previous);
+    m_inspectionCombo->setCurrentIndex(previousIndex >= 0 ? previousIndex : 0);
+    m_inspectionCombo->blockSignals(false);
+    updateInspectionRequirement();
     refreshRecentDocuments();
+}
+
+void StockInPage::refreshInspectionNotices()
+{
+    m_loadedInspectionNoticeId = 0;
+    refreshReferenceData();
 }
 
 void StockInPage::refreshRecentDocuments()
@@ -138,7 +179,7 @@ void StockInPage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.document_no,d.document_type,d.document_date,"
+        "SELECT d.id,d.document_no,d.document_type,d.document_date,"
         "CASE WHEN COALESCE(q.requires_inspection,0)=1 THEN '是' ELSE '否' END,"
         "COALESCE(q.inspection_no,''),"
         "CASE COALESCE(q.inspection_result,'NOT_REQUIRED') "
@@ -153,57 +194,63 @@ void StockInPage::refreshRecentDocuments()
     while (query.next()) {
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);
-        for (int column = 0; column < 8; ++column)
-            m_recentTable->setItem(row, column, new QTableWidgetItem(query.value(column).toString()));
+        for (int column = 0; column < 8; ++column) {
+            auto *item = new QTableWidgetItem(query.value(column + 1).toString());
+            item->setData(Qt::UserRole, query.value(0));
+            m_recentTable->setItem(row, column, item);
+        }
     }
     m_recentTable->resizeColumnsToContents();
 }
 
 void StockInPage::updateInspectionRequirement()
 {
-    const bool required = m_inspectionCombo->currentData().toBool();
-    m_inspectionButton->setVisible(required);
-    if (!required) {
-        m_inspection = InboundInspectionRequest{};
+    const qlonglong noticeId = m_inspectionCombo->currentData().toLongLong();
+    m_inspectionButton->setVisible(noticeId <= 0);
+    if (noticeId <= 0) {
+        m_loadedInspectionNoticeId = 0;
         m_inspectionStatusLabel->setText(QStringLiteral("无需送检，可直接提交入库"));
         return;
     }
-    m_inspection.required = true;
-    if (m_inspection.inspectorName.trimmed().isEmpty()) {
-        m_inspection.inspectorName = m_handlerEdit->text().trimmed();
+    InspectionService service(m_database, m_session.userId);
+    InspectionNotice notice;
+    QString error;
+    if (!service.readNotice(noticeId, &notice, &error)) {
+        QMessageBox::warning(this, QStringLiteral("读取检验通知失败"), error);
+        m_inspectionCombo->setCurrentIndex(0);
+        return;
     }
-    m_inspectionStatusLabel->setText(QStringLiteral("尚未完成合格送检单"));
-    openInspectionForm();
+    if (m_loadedInspectionNoticeId != noticeId) {
+        QList<StockMovementRequest> materials;
+        for (const InspectionNoticeLine &source : std::as_const(notice.lines)) {
+            StockMovementRequest line;
+            line.materialId = source.materialId;
+            line.quantity = source.quantity;
+            line.orderedQuantity = source.quantity;
+            line.batchNo = source.batchNumber;
+            line.supplier = source.supplier;
+            materials.append(line);
+        }
+        if (!m_lines->setInboundMaterials(materials, &error)) {
+            QMessageBox::warning(this, QStringLiteral("载入送检物料失败"), error);
+            m_inspectionCombo->setCurrentIndex(0);
+            return;
+        }
+        m_loadedInspectionNoticeId = noticeId;
+        if (m_supplierEdit->text().trimmed().isEmpty()) m_supplierEdit->setText(notice.supplier);
+        if (m_purposeEdit->text().trimmed().isEmpty())
+            m_purposeEdit->setText(notice.purchaseOrderNumber);
+    }
+    m_inspectionStatusLabel->setText(
+        QStringLiteral("已关联 %1（合格，%2条明细）")
+            .arg(notice.inspectionNumber).arg(notice.lines.size()));
 }
 
 void StockInPage::openInspectionForm()
 {
-    if (!m_inspectionCombo->currentData().toBool()) return;
-    m_inspection.templateFields.insert(QStringLiteral("supplier"),
-                                       m_supplierEdit->text().trimmed());
-    m_inspection.templateFields.insert(QStringLiteral("purchaseOrderNumber"),
-                                       m_purposeEdit->text().trimmed());
-    m_inspection.templateFields.insert(QStringLiteral("arrivalDate"),
-                                       m_dateEdit->date().toString(QStringLiteral("yyyy-MM-dd")));
-    if (m_inspection.templateFields.value(QStringLiteral("entrustedBy")).isEmpty()) {
-        m_inspection.templateFields.insert(QStringLiteral("entrustedBy"),
-                                           m_handlerEdit->text().trimmed());
-    }
-    QString ignoredError;
-    const QList<StockMovementRequest> currentLines = m_lines->lines(&ignoredError);
-    InspectionDialog dialog(m_database, currentLines, m_inspection, this);
-    if (dialog.exec() != QDialog::Accepted) return;
-    m_inspection = dialog.inspection();
-    QString resultText = QStringLiteral("待检验");
-    if (m_inspection.result == QStringLiteral("QUALIFIED")) resultText = QStringLiteral("合格");
-    else if (m_inspection.result == QStringLiteral("UNQUALIFIED")) resultText = QStringLiteral("不合格");
-    const QString attachmentText = m_inspection.attachmentFileName.trimmed().isEmpty()
-        ? QStringLiteral("未上传附件")
-        : QStringLiteral("附件：%1").arg(m_inspection.attachmentFileName);
-    m_inspectionStatusLabel->setText(QStringLiteral("%1｜%2｜%3")
-                                         .arg(m_inspection.inspectionNumber, resultText,
-                                              attachmentText));
-    m_inspectionButton->setText(QStringLiteral("查看/修改送检单"));
+    QMessageBox::information(
+        this, QStringLiteral("材料送检已独立"),
+        QStringLiteral("请在左侧“材料送检”模块在线填写检验通知单；检验合格并上传附件后，回到这里从下拉列表关联。"));
 }
 
 void StockInPage::submit()
@@ -214,16 +261,7 @@ void StockInPage::submit()
         QMessageBox::warning(this, QStringLiteral("入库明细有误"), error);
         return;
     }
-    const bool requiresInspection = m_inspectionCombo->currentData().toBool();
-    if (requiresInspection
-        && (m_inspection.result != QStringLiteral("QUALIFIED")
-            || m_inspection.attachmentFileName.trimmed().isEmpty()
-            || m_inspection.attachmentData.isEmpty())) {
-        QMessageBox::warning(this, QStringLiteral("送检尚未完成"),
-                             QStringLiteral("需要送检的入库单，必须检验合格并上传检验附件后才能入库。"));
-        openInspectionForm();
-        return;
-    }
+    const qlonglong inspectionNoticeId = m_inspectionCombo->currentData().toLongLong();
 
     OfficeTemplateDocument inboundForm;
     inboundForm.kind = m_typeCombo->currentData().toString() == QStringLiteral("SCWG")
@@ -265,10 +303,9 @@ void StockInPage::submit()
                                 + warnings.join(QStringLiteral("\n• "));
         }
     }
-    if (requiresInspection) {
-        confirmation += QStringLiteral("\n\n送检单：%1\n检验结果：合格\n检验附件：%2")
-                            .arg(m_inspection.inspectionNumber,
-                                 m_inspection.attachmentFileName);
+    if (inspectionNoticeId > 0) {
+        confirmation += QStringLiteral("\n\n将关联已合格检验通知：%1")
+                            .arg(m_inspectionCombo->currentText());
     } else {
         confirmation += QStringLiteral("\n\n该入库单选择无需送检。");
     }
@@ -283,7 +320,7 @@ void StockInPage::submit()
     request.purpose = m_purposeEdit->text().trimmed();
     request.notes = m_notesEdit->toPlainText().trimmed();
     request.submissionToken = m_submissionToken;
-    request.inspection = requiresInspection ? m_inspection : InboundInspectionRequest{};
+    request.inspectionNoticeId = inspectionNoticeId;
     request.lines = lines;
     m_submitButton->setEnabled(false);
     InventoryService service(m_database, m_session.userId);
@@ -303,30 +340,6 @@ void StockInPage::submit()
         formErrors.append(QStringLiteral("%1：%2")
                               .arg(OfficeTemplateService::formTitle(inboundForm.kind), formError));
     }
-    if (requiresInspection) {
-        OfficeTemplateDocument inspectionForm;
-        inspectionForm.kind = OfficeFormKind::Inspection;
-        inspectionForm.documentNumber = m_inspection.inspectionNumber;
-        inspectionForm.documentDate = m_inspection.inspectionDate;
-        inspectionForm.fields = m_inspection.templateFields;
-        inspectionForm.fields.insert(QStringLiteral("inspectionDate"),
-                                     m_inspection.inspectionDate.toString(QStringLiteral("yyyy-MM-dd")));
-        inspectionForm.fields.insert(
-            QStringLiteral("inspectionResult"),
-            m_inspection.result == QStringLiteral("QUALIFIED") ? QStringLiteral("合格")
-                                                                 : QStringLiteral("不合格"));
-        inspectionForm.fields.insert(QStringLiteral("conclusion"), m_inspection.conclusion);
-        inspectionForm.lines = OfficeTemplateService::materialLines(m_database, lines, &formError);
-        for (OfficeTemplateLine &line : inspectionForm.lines) {
-            line.orderNumber = m_inspection.templateFields.value(QStringLiteral("purchaseOrderNumber"));
-            line.supplier = m_inspection.templateFields.value(QStringLiteral("supplier"));
-        }
-        formError.clear();
-        if (!OfficeTemplateService::attachToDocument(inspectionForm, m_database, m_session.userId,
-                                                      posted.documentId, &formError)) {
-            formErrors.append(QStringLiteral("送检单：%1").arg(formError));
-        }
-    }
     if (formErrors.isEmpty()) {
         QMessageBox::information(
             this, QStringLiteral("入库完成"),
@@ -343,7 +356,7 @@ void StockInPage::submit()
     m_notesEdit->clear();
     m_lines->clearLines();
     m_inspectionCombo->setCurrentIndex(0);
-    m_inspectionButton->setText(QStringLiteral("填写送检单"));
+    m_loadedInspectionNoticeId = 0;
     emit stockChanged();
     refreshReferenceData();
 }

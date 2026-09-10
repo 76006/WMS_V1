@@ -280,8 +280,10 @@ LegacyImportRow makeRow(const QString &sheet, int row, const QString &code,
         return result;
     }
     if (result.rawQuantity.isEmpty() || result.rawQuantity == QStringLiteral("/")) {
+        // 数量缺失的历史物料仍要保留档案，只是不产生库存。
         result.status = LegacyImportStatus::Warning;
-        result.message = QStringLiteral("库存数量为空或为斜杠，已跳过");
+        result.quantity = 0.0;
+        result.message = QStringLiteral("库存数量为空或为斜杠，已按0处理，只导入物料档案（不含库存）");
         return result;
     }
     bool ok = false;
@@ -290,11 +292,13 @@ LegacyImportRow makeRow(const QString &sheet, int row, const QString &code,
         result.status = LegacyImportStatus::Error;
         result.message = QStringLiteral("库存数量不是有效数字");
     } else if (result.quantity < 0.0) {
-        result.status = LegacyImportStatus::Error;
-        result.message = QStringLiteral("系统不允许负库存，请先核对历史欠料");
-    } else if (qFuzzyIsNull(result.quantity)) {
-        result.status = LegacyImportStatus::Skipped;
-        result.message = QStringLiteral("零库存，无需导入");
+        // 历史欠料不能形成负库存，统一归零后只保留物料档案。
+        result.status = LegacyImportStatus::Warning;
+        result.quantity = 0.0;
+        result.message = QStringLiteral("库存数量为负数，已归零处理，只导入物料档案（不含库存）");
+    } else if (result.quantity == 0.0) {
+        result.status = LegacyImportStatus::Ready;
+        result.message = QStringLiteral("零库存，只导入物料档案（不含库存）");
     } else {
         result.status = LegacyImportStatus::Ready;
         result.message = QStringLiteral("可导入");
@@ -387,24 +391,58 @@ void parseFinishedSheet(const QString &name, const SheetCells &cells,
     }
 }
 
-void aggregateReadyRows(QList<LegacyImportRow> *rows)
+// 可入账的记录：状态为可导入或警告，且物料编码、名称有效（错误和跳过一律不参与）。
+bool isImportableLegacyRow(const LegacyImportRow &row)
 {
-    QMap<QString, int> positions;
+    if (row.status != LegacyImportStatus::Ready && row.status != LegacyImportStatus::Warning) {
+        return false;
+    }
+    const QString code = row.materialCode.trimmed();
+    return !code.isEmpty() && code != QStringLiteral("/")
+        && !row.materialName.trimmed().isEmpty();
+}
+
+void aggregateImportableRows(QList<LegacyImportRow> *rows)
+{
+    struct AggregateGroup
+    {
+        int position = 0;
+        QStringList warnings;
+    };
+    QMap<QString, AggregateGroup> groups;
     QList<LegacyImportRow> result;
     for (const LegacyImportRow &row : std::as_const(*rows)) {
-        if (row.status != LegacyImportStatus::Ready) {
+        if (!isImportableLegacyRow(row)) {
             result.append(row);
             continue;
         }
+        // 同一物料同一批次只保留一条记录，避免服务层出现重复明细。
         const QString key = row.materialCode.toUpper() + QLatin1Char('|') + row.batchNo.toUpper();
-        if (!positions.contains(key)) {
-            positions.insert(key, result.size());
+        auto group = groups.find(key);
+        if (group == groups.end()) {
             result.append(row);
-        } else {
-            LegacyImportRow &existing = result[positions.value(key)];
-            existing.quantity += row.quantity;
-            existing.rawQuantity = QString::number(existing.quantity, 'g', 15);
-            existing.message = QStringLiteral("同物料同批次已合并");
+            AggregateGroup created;
+            created.position = static_cast<int>(result.size()) - 1;
+            if (row.status == LegacyImportStatus::Warning && !row.message.trimmed().isEmpty()) {
+                created.warnings.append(row.message.trimmed());
+            }
+            groups.insert(key, created);
+            continue;
+        }
+        LegacyImportRow &existing = result[group->position];
+        existing.quantity += row.quantity;
+        existing.rawQuantity = QString::number(existing.quantity, 'g', 15);
+        // 合并的来源中只要有一个是警告，合并结果就保持警告状态并保留原因。
+        if (row.status == LegacyImportStatus::Warning) {
+            existing.status = LegacyImportStatus::Warning;
+            const QString message = row.message.trimmed();
+            if (!message.isEmpty() && !group->warnings.contains(message)) {
+                group->warnings.append(message);
+            }
+        }
+        existing.message = QStringLiteral("同物料同批次已合并");
+        if (!group->warnings.isEmpty()) {
+            existing.message += QStringLiteral("；") + group->warnings.join(QStringLiteral("；"));
         }
     }
     *rows = result;
@@ -472,14 +510,15 @@ bool LegacyInventoryImporter::parseFile(const QString &filePath,
         } else if (sheet.name == QStringLiteral("期初库存")) {
             parseInitialTemplate(sheet.name, sheet.cells, rows);
         } else if (sheet.name == QStringLiteral("Sheet1")) {
-            LegacyImportRow warning;
-            warning.status = LegacyImportStatus::Warning;
-            warning.sourceSheet = sheet.name;
-            warning.message = QStringLiteral("此表为外借/异地记录且没有标准物料编码，未纳入期初库存");
-            rows->append(warning);
+            // 外借/异地记录没有标准物料编码，不属于物料档案，直接跳过。
+            LegacyImportRow skipped;
+            skipped.status = LegacyImportStatus::Skipped;
+            skipped.sourceSheet = sheet.name;
+            skipped.message = QStringLiteral("此表为外借/异地记录且没有标准物料编码，未纳入期初库存");
+            rows->append(skipped);
         }
     }
-    aggregateReadyRows(rows);
+    aggregateImportableRows(rows);
     return true;
 }
 
@@ -873,12 +912,16 @@ void MaterialExcelImporter::validateReferences(QSqlDatabase database,
     }
 }
 
-bool MaterialExcelImporter::importRows(QSqlDatabase database,
-                                       qlonglong operatorId,
-                                       const QList<MaterialImportRow> &rows,
-                                       int *createdCount,
-                                       int *updatedCount,
-                                       QString *errorMessage)
+namespace {
+// 物料导入的共享实现。manageTransaction 为 true 时自行开启/提交/回滚事务，
+// 为 false 时事务完全归调用方所有，本实现绝不开始、提交或回滚。
+bool importMaterialRows(QSqlDatabase database,
+                        qlonglong operatorId,
+                        const QList<MaterialImportRow> &rows,
+                        int *createdCount,
+                        int *updatedCount,
+                        bool manageTransaction,
+                        QString *errorMessage)
 {
     if (!database.isOpen() || operatorId <= 0) {
         setImportError(errorMessage, QStringLiteral("数据库未连接或当前用户无效。"));
@@ -894,7 +937,10 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
         setImportError(errorMessage, QStringLiteral("没有可导入的物料记录。"));
         return false;
     }
-    if (!database.transaction()) {
+    const auto rollbackIfOwned = [&database, manageTransaction]() {
+        if (manageTransaction) database.rollback();
+    };
+    if (manageTransaction && !database.transaction()) {
         setImportError(errorMessage, QStringLiteral("无法开始物料导入事务：%1")
                                        .arg(database.lastError().text()));
         return false;
@@ -910,7 +956,7 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
         if (!category.exec() || !category.next()) {
             setImportError(errorMessage, QStringLiteral("第%1行分类编码已发生变化，请重新预览。")
                                            .arg(row.sourceRow));
-            database.rollback();
+            rollbackIfOwned();
             return false;
         }
         QVariant warehouseId;
@@ -923,7 +969,7 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
             if (!warehouse.exec() || !warehouse.next()) {
                 setImportError(errorMessage, QStringLiteral("第%1行默认仓库已发生变化，请重新预览。")
                                                .arg(row.sourceRow));
-                database.rollback();
+                rollbackIfOwned();
                 return false;
             }
             warehouseId = warehouse.value(0);
@@ -936,7 +982,7 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
                 if (!location.exec() || !location.next()) {
                     setImportError(errorMessage, QStringLiteral("第%1行默认库位已发生变化，请重新预览。")
                                                    .arg(row.sourceRow));
-                    database.rollback();
+                    rollbackIfOwned();
                     return false;
                 }
                 locationId = location.value(0);
@@ -982,7 +1028,7 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
         if (!save.exec()) {
             setImportError(errorMessage, QStringLiteral("第%1行物料保存失败：%2")
                                            .arg(row.sourceRow).arg(save.lastError().text()));
-            database.rollback();
+            rollbackIfOwned();
             return false;
         }
         const qlonglong savedId = exists ? materialId : save.lastInsertId().toLongLong();
@@ -997,13 +1043,13 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
         audit.addBindValue(row.materialCode + QStringLiteral(" - ") + row.materialName);
         if (!audit.exec()) {
             setImportError(errorMessage, audit.lastError().text());
-            database.rollback();
+            rollbackIfOwned();
             return false;
         }
         if (exists) ++updated;
         else ++created;
     }
-    if (!database.commit()) {
+    if (manageTransaction && !database.commit()) {
         setImportError(errorMessage, QStringLiteral("提交物料导入失败：%1").arg(database.lastError().text()));
         database.rollback();
         return false;
@@ -1011,6 +1057,29 @@ bool MaterialExcelImporter::importRows(QSqlDatabase database,
     if (createdCount) *createdCount = created;
     if (updatedCount) *updatedCount = updated;
     return true;
+}
+} // namespace
+
+bool MaterialExcelImporter::importRows(QSqlDatabase database,
+                                       qlonglong operatorId,
+                                       const QList<MaterialImportRow> &rows,
+                                       int *createdCount,
+                                       int *updatedCount,
+                                       QString *errorMessage)
+{
+    return importMaterialRows(database, operatorId, rows, createdCount, updatedCount,
+                              true, errorMessage);
+}
+
+bool MaterialExcelImporter::importRowsInCurrentTransaction(QSqlDatabase database,
+                                                           qlonglong operatorId,
+                                                           const QList<MaterialImportRow> &rows,
+                                                           int *createdCount,
+                                                           int *updatedCount,
+                                                           QString *errorMessage)
+{
+    return importMaterialRows(database, operatorId, rows, createdCount, updatedCount,
+                              false, errorMessage);
 }
 
 QString MaterialExcelImporter::statusText(MaterialImportStatus status)

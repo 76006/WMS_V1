@@ -90,6 +90,14 @@ public:
                            int *createdCount,
                            int *updatedCount,
                            QString *errorMessage = nullptr);
+    // 在调用方已开启的事务内导入物料：本函数绝不开始、提交或回滚事务，
+    // 失败时只返回 false 并报告错误，事务处理完全由调用方负责。
+    static bool importRowsInCurrentTransaction(QSqlDatabase database,
+                                               qlonglong operatorId,
+                                               const QList<MaterialImportRow> &rows,
+                                               int *createdCount,
+                                               int *updatedCount,
+                                               QString *errorMessage = nullptr);
     static QString statusText(MaterialImportStatus status);
 };
 

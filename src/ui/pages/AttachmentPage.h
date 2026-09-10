@@ -26,6 +26,7 @@ private slots:
     void download();
     void openAttachment();
     void deleteOrRestore();
+    void retryIncompleteForms();
     void updateActions();
 
 private:
@@ -38,6 +39,7 @@ private:
     QTableWidget *m_documentTable = nullptr;
     QTableWidget *m_attachmentTable = nullptr;
     QCheckBox *m_showDeleted = nullptr;
+    QPushButton *m_retryFormsButton = nullptr;
     QPushButton *m_uploadButton = nullptr;
     QPushButton *m_downloadButton = nullptr;
     QPushButton *m_openButton = nullptr;

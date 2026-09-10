@@ -24,6 +24,7 @@ public:
 
 public slots:
     void refreshReferenceData();
+    void refreshInspectionNotices();
 
 signals:
     void stockChanged();
@@ -53,5 +54,5 @@ private:
     QPushButton *m_submitButton = nullptr;
     QTableWidget *m_recentTable = nullptr;
     QString m_submissionToken;
-    InboundInspectionRequest m_inspection;
+    qlonglong m_loadedInspectionNoticeId = 0;
 };

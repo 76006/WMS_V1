@@ -30,6 +30,29 @@ QString databaseText(const QString &value)
     const QString trimmed = value.trimmed();
     return trimmed.isNull() ? QString::fromLatin1("", 0) : trimmed;
 }
+
+// SN一旦经撤销单（CX）从原单撤出，即使之后重新入库恢复为在库状态，
+// 也不能再次参与该原单的撤销；仅排除 source_document_id 指向本原单的CX单。
+// 片段内占位符固定位于SQL末尾，调用方必须在其余绑定之后绑定原单ID。
+QString notReversedBySourceDocumentSql()
+{
+    return QStringLiteral(
+        " AND NOT EXISTS(SELECT 1 FROM inventory_ledger_serials cx_ils "
+        "JOIN inventory_ledger cx_l ON cx_l.id=cx_ils.ledger_id "
+        "JOIN business_documents cx_d ON cx_d.id=cx_l.document_id "
+        "WHERE cx_ils.serial_id=sn.id AND cx_d.document_type='CX' "
+        "AND cx_d.source_document_id=?)");
+}
+
+QString serialStatusText(const QString &status)
+{
+    if (status == QStringLiteral("IN_STOCK")) return QStringLiteral("在库");
+    if (status == QStringLiteral("OUTBOUND")) return QStringLiteral("已出库");
+    if (status == QStringLiteral("CONSUMED")) return QStringLiteral("已消耗");
+    if (status == QStringLiteral("SCRAPPED")) return QStringLiteral("已报废");
+    if (status == QStringLiteral("VOIDED")) return QStringLiteral("已作废");
+    return status;
+}
 }
 
 InventoryService::InventoryService(QSqlDatabase database, qlonglong operatorId)
@@ -569,6 +592,124 @@ bool InventoryService::reverseTransfer(const ReversalRequest &request,
     return true;
 }
 
+QStringList InventoryService::reversibleSerialNumbers(qlonglong sourceItemId,
+                                                      QString *errorMessage) const
+{
+    if (errorMessage) errorMessage->clear();
+    if (sourceItemId <= 0) {
+        setError(errorMessage, QStringLiteral("找不到需要撤销的原业务明细。"));
+        return {};
+    }
+    QSqlQuery source(m_database);
+    source.prepare(QStringLiteral(
+        "SELECT i.document_id, d.document_no, d.stock_direction, d.document_type, "
+        "i.material_id, i.batch_no, i.warehouse_id, i.location_id, m.require_serial "
+        "FROM business_document_items i "
+        "JOIN business_documents d ON d.id=i.document_id "
+        "JOIN materials m ON m.id=i.material_id WHERE i.id=?"));
+    source.addBindValue(sourceItemId);
+    if (!source.exec()) {
+        setError(errorMessage, source.lastError().text());
+        return {};
+    }
+    if (!source.next()) {
+        setError(errorMessage, QStringLiteral("找不到需要撤销的原业务明细。"));
+        return {};
+    }
+    const qlonglong sourceDocumentId = source.value(0).toLongLong();
+    const QString sourceNumber = source.value(1).toString();
+    const QString direction = source.value(2).toString();
+    const QString sourceType = source.value(3).toString();
+    const qlonglong materialId = source.value(4).toLongLong();
+    const QString batchNo = source.value(5).toString();
+    const qlonglong warehouseId = source.value(6).toLongLong();
+    const qlonglong locationId = source.value(7).toLongLong();
+    const bool requireSerial = source.value(8).toBool();
+
+    // 以下判断与 reverseItem 保持一致，避免界面提供必然失败的可撤销SN。
+    if (sourceType == QStringLiteral("CX")) {
+        setError(errorMessage, QStringLiteral(
+            "撤销单（%1）是反向单据，不能再次撤销；如需恢复请在原业务中重新办理。")
+            .arg(sourceNumber));
+        return {};
+    }
+    if (direction != QStringLiteral("IN") && direction != QStringLiteral("OUT")) {
+        setError(errorMessage, QStringLiteral("当前版本仅支持入库和出库明细的部分撤销。"));
+        return {};
+    }
+    if (!requireSerial) {
+        setError(errorMessage, QStringLiteral("该明细不是SN管理物料，无需选择SN。"));
+        return {};
+    }
+
+    QString sql;
+    if (direction == QStringLiteral("OUT")) {
+        if (sourceType == QStringLiteral("SCLL")) {
+            // 生产领料：SN可能已被后续业务流转，必须沿原领料明细的流水关联回溯。
+            sql = QStringLiteral(
+                "SELECT sn.serial_no FROM serial_numbers sn "
+                "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
+                "JOIN inventory_ledger l ON l.id=ils.ledger_id "
+                "WHERE sn.material_id=? AND sn.status='OUTBOUND' "
+                "AND l.document_item_id=? AND l.business_type='SCLL'")
+                + notReversedBySourceDocumentSql();
+        } else {
+            // 普通出库撤销：同一物料可能出现在多行，必须同时沿原明细的流水关联匹配。
+            sql = QStringLiteral(
+                "SELECT sn.serial_no FROM serial_numbers sn "
+                "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
+                "JOIN inventory_ledger l ON l.id=ils.ledger_id "
+                "WHERE sn.material_id=? AND sn.status='OUTBOUND' "
+                "AND sn.last_document_id=? AND l.document_item_id=?")
+                + notReversedBySourceDocumentSql();
+        }
+    } else {
+        // 入库撤销：SN必须在原仓库/库位/批次在库，且经流水关联到该原明细。
+        sql = QStringLiteral(
+            "SELECT sn.serial_no FROM serial_numbers sn "
+            "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
+            "JOIN inventory_ledger l ON l.id=ils.ledger_id "
+            "WHERE sn.material_id=? AND sn.status='IN_STOCK' "
+            "AND sn.warehouse_id=? AND sn.location_id=? AND sn.batch_no=? "
+            "AND l.document_item_id=?")
+            + notReversedBySourceDocumentSql();
+    }
+    QSqlQuery query(m_database);
+    query.prepare(sql);
+    query.addBindValue(materialId);
+    if (direction == QStringLiteral("OUT")) {
+        if (sourceType == QStringLiteral("SCLL")) {
+            query.addBindValue(sourceItemId);
+        } else {
+            query.addBindValue(sourceDocumentId);
+            query.addBindValue(sourceItemId);
+        }
+    } else {
+        query.addBindValue(warehouseId);
+        query.addBindValue(locationId);
+        query.addBindValue(databaseText(batchNo));
+        query.addBindValue(sourceItemId);
+    }
+    // notReversedBySourceDocumentSql 的占位符位于SQL末尾，必须在最后绑定。
+    query.addBindValue(sourceDocumentId);
+    if (!query.exec()) {
+        setError(errorMessage, query.lastError().text());
+        return {};
+    }
+    QSet<QString> seen;
+    QStringList serials;
+    while (query.next()) {
+        const QString serial = query.value(0).toString().trimmed();
+        if (serial.isEmpty()) continue;
+        const QString key = serial.toUpper();
+        if (seen.contains(key)) continue;
+        seen.insert(key);
+        serials.append(serial);
+    }
+    serials.sort(Qt::CaseInsensitive);
+    return serials;
+}
+
 bool InventoryService::reverseItem(const ReversalRequest &request,
                                    PostedDocument *postedDocument,
                                    QString *errorMessage)
@@ -616,6 +757,14 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     const double originalGiftQuantity = source.value(15).toDouble();
     const double reversedGiftQuantity = source.value(16).toDouble();
 
+    // 撤销单不能再撤销：必须在任何库存或单据变更之前拦截，避免出现循环反向业务。
+    if (sourceType == QStringLiteral("CX")) {
+        setError(errorMessage, QStringLiteral(
+            "撤销单（%1）是反向单据，不能再次撤销；如需恢复请在原业务中重新办理。")
+            .arg(sourceNumber));
+        rollback();
+        return false;
+    }
     if (direction != QStringLiteral("IN") && direction != QStringLiteral("OUT")) {
         setError(errorMessage, QStringLiteral("当前版本仅支持入库和出库明细的部分撤销。"));
         rollback();
@@ -722,15 +871,28 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
                 "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
                 "JOIN inventory_ledger l ON l.id=ils.ledger_id "
                 "WHERE sn.serial_no=? AND sn.material_id=? AND sn.status='OUTBOUND' "
-                "AND l.document_item_id=? AND l.business_type='SCLL'"));
+                "AND l.document_item_id=? AND l.business_type='SCLL'")
+                + notReversedBySourceDocumentSql());
         } else if (reversalInbound) {
+            // 普通出库撤销：除最后单据外，还必须匹配原明细的流水关联，
+            // 否则同一物料多行时可能撤销到无关SN。与 reversibleSerialNumbers 保持一致。
             find.prepare(QStringLiteral(
-                "SELECT id FROM serial_numbers WHERE serial_no=? AND material_id=? "
-                "AND status='OUTBOUND' AND last_document_id=?"));
+                "SELECT sn.id FROM serial_numbers sn "
+                "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
+                "JOIN inventory_ledger l ON l.id=ils.ledger_id "
+                "WHERE sn.serial_no=? AND sn.material_id=? AND sn.status='OUTBOUND' "
+                "AND sn.last_document_id=? AND l.document_item_id=?")
+                + notReversedBySourceDocumentSql());
         } else {
+            // 入库撤销必须同时校验SN经流水关联到该原明细，避免撤销同库位同批次的无关SN。
             find.prepare(QStringLiteral(
-                "SELECT id FROM serial_numbers WHERE serial_no=? AND material_id=? "
-                "AND status='IN_STOCK' AND warehouse_id=? AND location_id=? AND batch_no=?"));
+                "SELECT sn.id FROM serial_numbers sn "
+                "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
+                "JOIN inventory_ledger l ON l.id=ils.ledger_id "
+                "WHERE sn.serial_no=? AND sn.material_id=? "
+                "AND sn.status='IN_STOCK' AND sn.warehouse_id=? AND sn.location_id=? "
+                "AND sn.batch_no=? AND l.document_item_id=?")
+                + notReversedBySourceDocumentSql());
         }
         find.addBindValue(serial.trimmed().toUpper());
         find.addBindValue(materialId);
@@ -738,11 +900,15 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
             find.addBindValue(request.sourceItemId);
         } else if (reversalInbound) {
             find.addBindValue(sourceDocumentId);
+            find.addBindValue(request.sourceItemId);
         } else {
             find.addBindValue(warehouseId);
             find.addBindValue(locationId);
             find.addBindValue(databaseText(batchNo));
+            find.addBindValue(request.sourceItemId);
         }
+        // notReversedBySourceDocumentSql 的占位符位于SQL末尾，必须在最后绑定。
+        find.addBindValue(sourceDocumentId);
         if (!find.exec() || !find.next()) {
             setError(errorMessage, QStringLiteral("SN %1 当前状态不允许撤销。").arg(serial));
             rollback();
@@ -1239,21 +1405,70 @@ bool InventoryService::attachSerialsToInbound(const StockMovementRequest &reques
                                               qlonglong ledgerId,
                                               QString *errorMessage)
 {
+    const QString inboundAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     for (const QString &serial : request.serialNumbers) {
+        const QString serialNo = serial.trimmed().toUpper();
+        // 全局SN唯一：先查已有记录。不存在则按原逻辑新增；存在时只允许“同物料且已作废”
+        // 的SN复用（例如入库被撤销后重新入库），保留原SN主键和历史流水关联。
+        QSqlQuery existing(m_database);
+        existing.prepare(QStringLiteral(
+            "SELECT id,material_id,status FROM serial_numbers WHERE serial_no=?"));
+        existing.addBindValue(serialNo);
+        if (!existing.exec()) {
+            setError(errorMessage, existing.lastError().text());
+            return false;
+        }
+        if (existing.next()) {
+            const qlonglong serialId = existing.value(0).toLongLong();
+            if (existing.value(1).toLongLong() != request.materialId) {
+                setError(errorMessage,
+                         QStringLiteral("SN %1 已属于其他物料，不能用于本次入库。").arg(serialNo));
+                return false;
+            }
+            const QString status = existing.value(2).toString();
+            if (status != QStringLiteral("VOIDED")) {
+                setError(errorMessage,
+                         QStringLiteral("SN %1 已存在且状态为“%2”，只有已作废的SN才能重新入库。")
+                             .arg(serialNo, serialStatusText(status)));
+                return false;
+            }
+            QSqlQuery reuse(m_database);
+            reuse.prepare(QStringLiteral(
+                "UPDATE serial_numbers SET status='IN_STOCK', batch_no=?, warehouse_id=?, "
+                "location_id=?, production_batch='', inbound_at=?, outbound_at=NULL, "
+                "last_document_id=? WHERE id=? AND material_id=? AND status='VOIDED'"));
+            reuse.addBindValue(databaseText(request.batchNo));
+            reuse.addBindValue(request.warehouseId);
+            reuse.addBindValue(request.locationId);
+            reuse.addBindValue(inboundAt);
+            reuse.addBindValue(documentId);
+            reuse.addBindValue(serialId);
+            reuse.addBindValue(request.materialId);
+            // 影响行数校验用于防止并发下SN状态被其他操作改变。
+            if (!reuse.exec() || reuse.numRowsAffected() != 1) {
+                setError(errorMessage,
+                         QStringLiteral("SN %1 的状态已被其他操作改变，请刷新后重试。").arg(serialNo));
+                return false;
+            }
+            if (!linkLedgerSerial(ledgerId, serialId, errorMessage)) {
+                return false;
+            }
+            continue;
+        }
         QSqlQuery insert(m_database);
         insert.prepare(QStringLiteral(
             "INSERT INTO serial_numbers(material_id, serial_no, batch_no, status, warehouse_id, location_id, "
             "inbound_at, last_document_id) VALUES(?, ?, ?, 'IN_STOCK', ?, ?, ?, ?)"));
         insert.addBindValue(request.materialId);
-        insert.addBindValue(serial.trimmed().toUpper());
+        insert.addBindValue(serialNo);
         insert.addBindValue(databaseText(request.batchNo));
         insert.addBindValue(request.warehouseId);
         insert.addBindValue(request.locationId);
-        insert.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+        insert.addBindValue(inboundAt);
         insert.addBindValue(documentId);
         if (!insert.exec()) {
-            setError(errorMessage, QStringLiteral("SN %1 入库失败，可能已经存在：%2")
-                                       .arg(serial, insert.lastError().text()));
+            setError(errorMessage, QStringLiteral("SN %1 入库失败：%2")
+                                       .arg(serialNo, insert.lastError().text()));
             return false;
         }
         if (!linkLedgerSerial(ledgerId, insert.lastInsertId().toLongLong(), errorMessage)) {

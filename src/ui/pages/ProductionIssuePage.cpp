@@ -5,6 +5,7 @@
 #include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/widgets/ComboBoxSearch.h"
 #include "ui/widgets/StockLineTable.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QComboBox>
 #include <QDateEdit>
@@ -95,16 +96,27 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     auto *recentPanel = new QFrame(this);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
-    recentLayout->addWidget(new QLabel(QStringLiteral("近期生产领料单"), recentPanel));
+    auto *recentToolbar = new QHBoxLayout;
+    recentToolbar->addWidget(new QLabel(QStringLiteral("近期生产领料单"), recentPanel));
+    recentToolbar->addStretch();
+    auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(fullScreenRecentButton);
+    recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 5, recentPanel);
+    m_recentTable->setProperty("businessDocumentTable", true);
     m_recentTable->setHorizontalHeaderLabels({QStringLiteral("单据号"), QStringLiteral("日期"),
                                               QStringLiteral("生产批次"), QStringLiteral("成品"),
                                               QStringLiteral("明细数")});
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     recentLayout->addWidget(m_recentTable);
     root->addWidget(recentPanel, 1);
 
+    connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::fullScreenTable(
+            m_recentTable, QStringLiteral("近期生产领料单"), this);
+    });
     connect(m_submitButton, &QPushButton::clicked, this, &ProductionIssuePage::submit);
     connect(m_plannedQuantity, qOverload<double>(&QDoubleSpinBox::valueChanged),
             m_lines, &StockLineTable::setProductionQuantity);
@@ -230,7 +242,7 @@ void ProductionIssuePage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.document_no,d.document_date,p.batch_no,p.product_name,COUNT(i.id) "
+        "SELECT d.id,d.document_no,d.document_date,p.batch_no,p.product_name,COUNT(i.id) "
         "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
         "JOIN business_document_items i ON i.document_id=d.id "
         "WHERE d.document_type='SCLL' GROUP BY d.id ORDER BY d.id DESC LIMIT 20"));
@@ -238,8 +250,9 @@ void ProductionIssuePage::refreshRecentDocuments()
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);
         for (int column = 0; column < 5; ++column) {
-            m_recentTable->setItem(row, column,
-                                   new QTableWidgetItem(query.value(column).toString()));
+            auto *item = new QTableWidgetItem(query.value(column + 1).toString());
+            item->setData(Qt::UserRole, query.value(0));
+            m_recentTable->setItem(row, column, item);
         }
     }
 }

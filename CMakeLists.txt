@@ -22,6 +22,8 @@ set(WMS_SOURCES
     src/services/InventoryService.cpp
     src/services/InventoryServiceDocuments.cpp
     src/services/InventoryServiceProduction.cpp
+    src/services/InventoryServiceRevision.cpp
+    src/services/InspectionService.cpp
     src/services/MaterialCodeService.cpp
     src/services/OfficeTemplateService.cpp
     src/services/InventoryReportService.cpp
@@ -31,6 +33,7 @@ set(WMS_SOURCES
     src/ui/dialogs/MaterialDialog.cpp
     src/ui/dialogs/InspectionDialog.cpp
     src/ui/dialogs/DocumentTemplateDialog.cpp
+    src/ui/dialogs/BusinessDocumentEditDialog.cpp
     src/ui/pages/DashboardPage.cpp
     src/ui/pages/AttachmentPage.cpp
     src/ui/pages/AuditLogPage.cpp
@@ -40,6 +43,7 @@ set(WMS_SOURCES
     src/ui/pages/InventoryPage.cpp
     src/ui/pages/InventoryReportPage.cpp
     src/ui/pages/InventoryCountPage.cpp
+    src/ui/pages/InspectionPage.cpp
     src/ui/pages/LedgerPage.cpp
     src/ui/pages/MaterialPage.cpp
     src/ui/pages/PlaceholderPage.cpp
@@ -65,6 +69,7 @@ set(WMS_SOURCES
     src/database/SchemaMigrator.h
     src/services/AttachmentService.h
     src/services/InventoryService.h
+    src/services/InspectionService.h
     src/services/MaterialCodeService.h
     src/services/OfficeTemplateService.h
     src/services/InventoryReportService.h
@@ -74,6 +79,7 @@ set(WMS_SOURCES
     src/ui/dialogs/MaterialDialog.h
     src/ui/dialogs/InspectionDialog.h
     src/ui/dialogs/DocumentTemplateDialog.h
+    src/ui/dialogs/BusinessDocumentEditDialog.h
     src/ui/pages/DashboardPage.h
     src/ui/pages/AttachmentPage.h
     src/ui/pages/AuditLogPage.h
@@ -83,6 +89,7 @@ set(WMS_SOURCES
     src/ui/pages/InventoryPage.h
     src/ui/pages/InventoryReportPage.h
     src/ui/pages/InventoryCountPage.h
+    src/ui/pages/InspectionPage.h
     src/ui/pages/LedgerPage.h
     src/ui/pages/MaterialPage.h
     src/ui/pages/PlaceholderPage.h
@@ -115,6 +122,9 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/008_sales_outbound_details.sql
         database/migrations/009_inbound_inspections.sql
         database/migrations/010_material_bom.sql
+        database/migrations/011_document_forms.sql
+        database/migrations/012_sales_delivery_date.sql
+        database/migrations/013_inspection_notices.sql
         resources/PdfPreview.qml
         resources/fill_office_template.ps1
         resources/styles.qss

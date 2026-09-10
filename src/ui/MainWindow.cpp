@@ -9,6 +9,7 @@
 #include "ui/pages/InventoryPage.h"
 #include "ui/pages/InventoryReportPage.h"
 #include "ui/pages/InventoryCountPage.h"
+#include "ui/pages/InspectionPage.h"
 #include "ui/pages/LedgerPage.h"
 #include "ui/pages/MaterialPage.h"
 #include "ui/pages/PlaceholderPage.h"
@@ -23,12 +24,14 @@
 #include "ui/pages/UserManagementPage.h"
 #include "ui/pages/WarehousePage.h"
 #include "ui/widgets/TableExcelExport.h"
+#include "ui/dialogs/BusinessDocumentEditDialog.h"
 
 #include <QButtonGroup>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QStackedWidget>
@@ -135,6 +138,7 @@ void MainWindow::buildUi()
     m_warehousePage = new WarehousePage(m_database, m_session, m_stack);
     m_excelImportPage = new ExcelImportPage(m_database, m_session, m_stack);
     m_stockInPage = new StockInPage(m_database, m_session, m_stack);
+    m_inspectionPage = new InspectionPage(m_database, m_session, m_stack);
     m_stockOutPage = new StockOutPage(m_database, m_session, m_stack);
     m_shipmentQueryPage = new ShipmentQueryPage(m_database, m_stack);
     m_productionIssuePage = new ProductionIssuePage(m_database, m_session, m_stack);
@@ -158,6 +162,7 @@ void MainWindow::buildUi()
     add(QStringLiteral("仓库/库位管理"), m_warehousePage);
     add(QStringLiteral("库存Excel导入"), m_excelImportPage, m_session.canManageWarehouse());
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
+    add(QStringLiteral("材料送检"), m_inspectionPage, m_session.canManageWarehouse());
     add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
     add(QStringLiteral("发货查询"), m_shipmentQueryPage, m_session.canViewInventory());
     add(QStringLiteral("生产领料"), m_productionIssuePage, m_session.canPostProduction());
@@ -194,6 +199,8 @@ void MainWindow::buildUi()
     connect(m_warehousePage, &WarehousePage::dataChanged, m_countPage, &InventoryCountPage::refreshReferenceData);
     connect(m_excelImportPage, &ExcelImportPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_stockInPage, &StockInPage::stockChanged, this, &MainWindow::refreshInventoryViews);
+    connect(m_inspectionPage, &InspectionPage::inspectionChanged,
+            m_stockInPage, &StockInPage::refreshInspectionNotices);
     connect(m_stockOutPage, &StockOutPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_transferPage, &TransferPage::stockChanged, this, &MainWindow::refreshInventoryViews);
     connect(m_countPage, &InventoryCountPage::stockChanged, this, &MainWindow::refreshInventoryViews);
@@ -223,6 +230,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_warehousePage) m_warehousePage->refresh();
     else if (page == m_excelImportPage) m_excelImportPage->refreshReferenceData();
     else if (page == m_stockInPage) m_stockInPage->refreshReferenceData();
+    else if (page == m_inspectionPage) m_inspectionPage->refreshReferenceData();
     else if (page == m_stockOutPage) m_stockOutPage->refreshReferenceData();
     else if (page == m_shipmentQueryPage) m_shipmentQueryPage->refresh();
     else if (page == m_productionIssuePage) m_productionIssuePage->refreshReferenceData();
@@ -248,6 +256,7 @@ void MainWindow::refreshInventoryViews()
     m_inventoryReportPage->refresh();
     m_ledgerPage->refresh();
     m_stockInPage->refreshReferenceData();
+    m_inspectionPage->refreshReferenceData();
     m_stockOutPage->refreshReferenceData();
     m_shipmentQueryPage->refresh();
     m_excelImportPage->refreshReferenceData();
@@ -259,4 +268,16 @@ void MainWindow::refreshInventoryViews()
     m_productionIssuePage->refreshReferenceData();
     m_productionReturnPage->refreshReferenceData();
     m_finishedGoodsInPage->refreshReferenceData();
+}
+
+void MainWindow::editDocumentById(qlonglong documentId)
+{
+    if (documentId <= 0) {
+        QMessageBox::information(this, QStringLiteral("无法修改"),
+                                 QStringLiteral("没有取得当前单据的编号。"));
+        return;
+    }
+    BusinessDocumentEditDialog dialog(m_database, m_session, documentId, this);
+    dialog.exec();
+    if (dialog.saved()) refreshInventoryViews();
 }

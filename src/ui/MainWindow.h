@@ -14,6 +14,7 @@ class FinishedGoodsInPage;
 class InventoryPage;
 class InventoryReportPage;
 class InventoryCountPage;
+class InspectionPage;
 class LedgerPage;
 class MaterialPage;
 class ProductionIssuePage;
@@ -43,6 +44,7 @@ private slots:
     void showPage(int index);
     void refreshCurrentPage();
     void refreshInventoryViews();
+    void editDocumentById(qlonglong documentId);
 
 private:
     void buildUi();
@@ -57,6 +59,7 @@ private:
     WarehousePage *m_warehousePage = nullptr;
     ExcelImportPage *m_excelImportPage = nullptr;
     StockInPage *m_stockInPage = nullptr;
+    InspectionPage *m_inspectionPage = nullptr;
     StockOutPage *m_stockOutPage = nullptr;
     ProductionIssuePage *m_productionIssuePage = nullptr;
     ProductionReturnPage *m_productionReturnPage = nullptr;

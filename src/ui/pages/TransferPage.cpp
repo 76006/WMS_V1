@@ -2,6 +2,7 @@
 
 #include "services/InventoryService.h"
 #include "ui/widgets/StockLineTable.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -91,11 +92,14 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     auto *recentToolbar = new QHBoxLayout;
     recentToolbar->addWidget(new QLabel(QStringLiteral("近期调拨单"), recentPanel));
     recentToolbar->addStretch();
+    auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(fullScreenRecentButton);
     m_reverseButton = new QPushButton(QStringLiteral("部分/全部撤销"), recentPanel);
     m_reverseButton->setProperty("danger", true);
     recentToolbar->addWidget(m_reverseButton);
     recentLayout->addLayout(recentToolbar);
     m_transferTable = new QTableWidget(0, 10, recentPanel);
+    m_transferTable->setProperty("businessDocumentTable", true);
     m_transferTable->setHorizontalHeaderLabels({QStringLiteral("调拨单号"), QStringLiteral("日期"),
         QStringLiteral("物料"), QStringLiteral("批次"), QStringLiteral("原仓库/库位"),
         QStringLiteral("目标仓库/库位"), QStringLiteral("数量"), QStringLiteral("已撤销"),
@@ -108,6 +112,10 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     m_transferTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     recentLayout->addWidget(m_transferTable);
     root->addWidget(recentPanel, 1);
+    connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::fullScreenTable(
+            m_transferTable, QStringLiteral("近期调拨单"), this);
+    });
     connect(m_targetWarehouse, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &TransferPage::loadTargetLocations);
     connect(m_submitButton, &QPushButton::clicked, this, &TransferPage::submit);
@@ -162,7 +170,7 @@ void TransferPage::refreshTransfers()
     query.exec(QStringLiteral(
         "SELECT i.id,d.document_no,d.document_date,m.code||' - '||m.name,i.batch_no,"
         "sw.code||' / '||sl.code,tw.code||' / '||tl.code,i.quantity,i.reversed_quantity,"
-        "i.quantity-i.reversed_quantity,d.status,m.require_serial,d.created_by "
+        "i.quantity-i.reversed_quantity,d.status,m.require_serial,d.created_by,d.id "
         "FROM business_documents d JOIN business_document_items i ON i.document_id=d.id "
         "JOIN materials m ON m.id=i.material_id JOIN warehouses sw ON sw.id=i.warehouse_id "
         "JOIN locations sl ON sl.id=i.location_id JOIN warehouses tw ON tw.id=i.target_warehouse_id "
@@ -173,6 +181,7 @@ void TransferPage::refreshTransfers()
         const int row = m_transferTable->rowCount();
         m_transferTable->insertRow(row);
         auto *number = new QTableWidgetItem(query.value(1).toString());
+        number->setData(Qt::UserRole, query.value(13));
         number->setData(ItemIdRole, query.value(0));
         number->setData(RequireSerialRole, query.value(11));
         number->setData(CreatorIdRole, query.value(12));

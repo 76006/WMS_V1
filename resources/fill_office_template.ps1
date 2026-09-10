@@ -8,27 +8,38 @@ $excel = $null
 $workbook = $null
 $officeEngine = ''
 
-function Start-SpreadsheetApplication {
-    $candidates = @(
-        @{ ProgId = 'Excel.Application'; Name = 'Microsoft Excel' },
-        @{ ProgId = 'Ket.Application'; Name = 'WPS 表格' },
-        @{ ProgId = 'ET.Application'; Name = 'WPS 表格（兼容模式）' }
-    )
-    $errors = @()
-    foreach ($candidate in $candidates) {
-        try {
-            $application = New-Object -ComObject $candidate.ProgId
-            return @{
-                Application = $application
-                Name = $candidate.Name
-            }
-        }
-        catch {
-            $errors += ($candidate.Name + '：' + $_.Exception.Message)
-        }
+function Copy-TemplateToOutput([string]$templatePath, [string]$outputPath) {
+    if ([string]::IsNullOrWhiteSpace($templatePath)) {
+        throw '没有收到模板文件路径，无法生成表单。'
     }
-    throw ('未检测到可用的 Microsoft Excel 或 WPS 表格自动化组件。' +
-           [Environment]::NewLine + ($errors -join [Environment]::NewLine))
+    if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
+        throw ('找不到模板文件：' + $templatePath)
+    }
+    if ([string]::IsNullOrWhiteSpace($outputPath)) {
+        throw '没有收到表单输出路径，无法生成表单。'
+    }
+    $directory = [IO.Path]::GetDirectoryName($outputPath)
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+    }
+    Copy-Item -LiteralPath $templatePath -Destination $outputPath -Force
+}
+
+function Close-Spreadsheet([bool]$save, $book, $application) {
+    if ($null -ne $book) {
+        try { $book.Close($save) } catch {}
+    }
+    if ($null -ne $application) {
+        try { $application.Quit() } catch {}
+    }
+    if ($null -ne $book) {
+        try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($book) } catch {}
+    }
+    if ($null -ne $application) {
+        try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($application) } catch {}
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
 }
 
 function TextValue($value) {
@@ -98,8 +109,13 @@ function Fill-Inspection($sheet, $data) {
     Set-Cell $sheet 4 2 (Get-Field $data 'notificationDepartment')
     Set-Cell $sheet 5 2 (Get-Field $data 'arrivalDate')
     Set-Cell $sheet 6 2 (TextValue $data.documentDate)
+    $urgency = (Get-Field $data 'urgency').ToUpperInvariant()
+    Set-Cell $sheet 7 2 ($(if ($urgency -eq 'EXPEDITED') { '☑' } else { '□' }) + ' 加急（常规1-3天）')
+    Set-Cell $sheet 7 4 ($(if ($urgency -eq 'URGENT') { '☑' } else { '□' }) + ' 急（常规7天内）')
+    Set-Cell $sheet 7 7 ($(if ($urgency -eq 'NORMAL' -or [string]::IsNullOrWhiteSpace($urgency)) { '☑' } else { '□' }) + ' 正常（常规7-15天）')
     Set-Cell $sheet 8 2 ((@($data.lines) | Measure-Object -Property quantity -Sum).Sum)
-    Set-Cell $sheet 9 2 (Get-Field $data 'inspectionDate')
+    # 检验日期、检验结果、结论和签字属于检验完成后的手写/回填区域，通知单创建时必须留空。
+    Set-Cell $sheet 9 2 ''
     for ($index = 0; $index -lt $required; $index++) {
         $line = @($data.lines)[$index]
         $row = 12 + $index
@@ -110,14 +126,6 @@ function Fill-Inspection($sheet, $data) {
         Set-Cell $sheet $row 5 (TextValue $line.batchNo)
         Set-Cell $sheet $row 7 (TextValue $line.supplier)
     }
-    $resultRow = 28 + $extra
-    $inspectorRow = 32 + $extra
-    $managerRow = 34 + $extra
-    Set-Cell $sheet $resultRow 1 ("检验结果：" + (Get-Field $data 'inspectionResult') +
-                                  "；" + (Get-Field $data 'conclusion'))
-    Set-Cell $sheet $inspectorRow 4 "检验者："
-    Set-Cell $sheet $inspectorRow 7 "委托人员："
-    Set-Cell $sheet $managerRow 4 "部门负责人："
     $sheet.PageSetup.PrintArea = '$A$1:$H$' + (35 + $extra)
 }
 
@@ -189,13 +197,13 @@ function Fill-Outbound($sheet, $data) {
     $required = @($data.lines).Count
     $extra = Expand-Table $sheet 5 10 $required 8 $false $false
     Clear-TableRows $sheet 5 ($required + [Math]::Max(0, 10 - $required)) 8
-    $destination = Get-Field $data 'destination'
-    if ([string]::IsNullOrWhiteSpace($destination)) { $destination = Get-Field $data 'purpose' }
-    Set-Cell $sheet 3 1 ("发往单位：" + (Get-Field $data 'customerCompany') +
-                         "　收货人：" + (Get-Field $data 'customerContact') +
-                         "　单号：" + (TextValue $data.documentNumber) +
-                         "　出库日期：" + (TextValue $data.documentDate) +
-                         "　目的地：" + $destination)
+    $company = Get-Field $data 'customerCompany'
+    if ([string]::IsNullOrWhiteSpace($company)) { $company = Get-Field $data 'destination' }
+    if ([string]::IsNullOrWhiteSpace($company)) { $company = Get-Field $data 'purpose' }
+    Set-Cell $sheet 2 6 ("　单号：" + (TextValue $data.documentNumber))
+    Set-Cell $sheet 3 1 ("发往单位：" + $company)
+    Set-Cell $sheet 3 3 ("　收货人：" + (Get-Field $data 'customerContact'))
+    Set-Cell $sheet 3 6 ("出库日期：" + (TextValue $data.documentDate))
     for ($index = 0; $index -lt $required; $index++) {
         $line = @($data.lines)[$index]
         $row = 5 + $index
@@ -208,14 +216,6 @@ function Fill-Outbound($sheet, $data) {
         Set-Cell $sheet $row 7 (TextValue $line.serialNumbers)
         Set-Cell $sheet $row 8 (TextValue $line.notes)
     }
-    Set-Cell $sheet (15 + $extra) 1 "出库人："
-    Set-Cell $sheet (15 + $extra) 5 "日期："
-    Set-Cell $sheet (16 + $extra) 1 "复核/检查人："
-    Set-Cell $sheet (16 + $extra) 5 "日期："
-    Set-Cell $sheet (17 + $extra) 1 "质量负责人："
-    Set-Cell $sheet (17 + $extra) 5 "日期："
-    Set-Cell $sheet (18 + $extra) 1 "总经理/管理者代表："
-    Set-Cell $sheet (18 + $extra) 5 "日期："
     $sheet.PageSetup.PrintArea = '$A$1:$H$' + (20 + $extra)
 }
 
@@ -253,57 +253,86 @@ function Fill-Delivery($sheet, $data) {
 
 try {
     $data = Get-Content -LiteralPath $DataFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    $spreadsheet = Start-SpreadsheetApplication
-    $excel = $spreadsheet.Application
-    $officeEngine = $spreadsheet.Name
-    $excel.Visible = $false
-    $excel.DisplayAlerts = $false
-    $workbook = $excel.Workbooks.Open((TextValue $data.outputPath), 0, $false)
-
-    $sheet = $null
-    try { $sheet = $workbook.Worksheets.Item((TextValue $data.sheetName)) } catch {}
-    if ($null -eq $sheet) {
-        throw "模板中找不到工作表：$($data.sheetName)"
-    }
-
-    for ($index = $workbook.Worksheets.Count; $index -ge 1; $index--) {
-        $candidate = $workbook.Worksheets.Item($index)
-        if ($candidate.Name -ne $sheet.Name) { $candidate.Delete() }
-    }
-    if ((TextValue $data.kind) -eq 'deliveryConfirmation') { $sheet.Name = '送货确认单' }
-
-    switch (TextValue $data.kind) {
-        'inspection' { Fill-Inspection $sheet $data }
-        'rawInbound' { Fill-Inbound $sheet $data }
-        'finishedInbound' { Fill-Inbound $sheet $data }
-        'productionIssue' { Fill-ProductionIssue $sheet $data }
-        'stockOutbound' { Fill-Outbound $sheet $data }
-        'deliveryConfirmation' { Fill-Delivery $sheet $data }
-        default { throw "不支持的表单类型：$($data.kind)" }
-    }
-
-    $workbook.Save()
-    $workbook.Close($true)
-    $workbook = $null
-    $excel.Quit()
-    $excel = $null
-    [GC]::Collect()
-    [GC]::WaitForPendingFinalizers()
-    exit 0
 }
 catch {
-    $message = $_.Exception.Message
-    if (-not [string]::IsNullOrWhiteSpace($officeEngine)) {
-        $message = $officeEngine + '：' + $message
-    }
-    [Console]::Error.WriteLine($message)
-    if ($null -ne $workbook) {
-        try { $workbook.Close($false) } catch {}
-    }
-    if ($null -ne $excel) {
-        try { $excel.Quit() } catch {}
-    }
-    [GC]::Collect()
-    [GC]::WaitForPendingFinalizers()
+    [Console]::Error.WriteLine('无法读取表单填写数据：' + $_.Exception.Message)
     exit 1
 }
+
+$templatePath = TextValue $data.templatePath
+$outputPath = TextValue $data.outputPath
+$expectedSheet = TextValue $data.sheetName
+if ([string]::IsNullOrWhiteSpace($templatePath) -or [string]::IsNullOrWhiteSpace($outputPath)) {
+    [Console]::Error.WriteLine('表单模板路径或输出路径为空，无法生成表单。')
+    exit 1
+}
+
+# 依次完整尝试每个自动化引擎：任一环节失败都换下一个引擎重新开始，而不是只判断组件能否创建。
+$candidates = @(
+    @{ ProgId = 'Excel.Application'; Name = 'Microsoft Excel' },
+    @{ ProgId = 'Ket.Application'; Name = 'WPS 表格' },
+    @{ ProgId = 'ET.Application'; Name = 'WPS 表格（兼容模式）' }
+)
+$errors = @()
+
+foreach ($candidate in $candidates) {
+    $excel = $null
+    $workbook = $null
+    $sheet = $null
+    $officeEngine = $candidate.Name
+    $completed = $false
+    try {
+        $excel = New-Object -ComObject $candidate.ProgId
+        $excel.Visible = $false
+        $excel.DisplayAlerts = $false
+        # 每次尝试都从原始模板重新复制，上一次失败的表单不会影响本次填写。
+        Copy-TemplateToOutput $templatePath $outputPath
+        $workbook = $excel.Workbooks.Open($outputPath, 0, $false)
+
+        try { $sheet = $workbook.Worksheets.Item($expectedSheet) } catch { $sheet = $null }
+        if ($null -eq $sheet) {
+            throw ('模板中找不到工作表：' + $expectedSheet)
+        }
+
+        for ($index = $workbook.Worksheets.Count; $index -ge 1; $index--) {
+            $other = $workbook.Worksheets.Item($index)
+            if ($other.Name -ne $sheet.Name) { $other.Delete() }
+        }
+        if ((TextValue $data.kind) -eq 'deliveryConfirmation') { $sheet.Name = '送货确认单' }
+
+        switch (TextValue $data.kind) {
+            'inspection' { Fill-Inspection $sheet $data }
+            'rawInbound' { Fill-Inbound $sheet $data }
+            'finishedInbound' { Fill-Inbound $sheet $data }
+            'productionIssue' { Fill-ProductionIssue $sheet $data }
+            'stockOutbound' { Fill-Outbound $sheet $data }
+            'deliveryConfirmation' { Fill-Delivery $sheet $data }
+            default { throw ('不支持的表单类型：' + (TextValue $data.kind)) }
+        }
+
+        $workbook.Save()
+        Close-Spreadsheet $true $workbook $excel
+        $workbook = $null
+        $excel = $null
+        $completed = $true
+    }
+    catch {
+        $message = $_.Exception.Message
+        if (-not [string]::IsNullOrWhiteSpace($officeEngine)) {
+            $message = $officeEngine + '：' + $message
+        }
+        $errors += $message
+        # 不保存地关闭本次工作簿并退出该组件，再还原输出文件，避免泄漏和污染下一次尝试。
+        Close-Spreadsheet $false $workbook $excel
+        $workbook = $null
+        $excel = $null
+        $sheet = $null
+        try { Copy-TemplateToOutput $templatePath $outputPath } catch {}
+    }
+    if ($completed) { exit 0 }
+}
+
+[Console]::Error.WriteLine(
+    'Microsoft Excel 与 WPS 表格均无法完成表单填写，已依次完整尝试以下组件：' +
+    [Environment]::NewLine + ($errors -join [Environment]::NewLine))
+exit 1

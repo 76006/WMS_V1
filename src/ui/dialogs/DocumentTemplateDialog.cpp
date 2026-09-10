@@ -31,14 +31,41 @@ QList<FieldDefinition> fieldDefinitions(const OfficeTemplateDocument &document)
     case OfficeFormKind::ProductionIssue:
         return {
             {QStringLiteral("receivingDepartment"), QStringLiteral("领用部门"),
-             QStringLiteral("生产部"), true}
+             QStringLiteral("生产部"), true},
+            {QStringLiteral("productName"), QStringLiteral("产品名称"), QString(), true},
+            {QStringLiteral("productModel"), QStringLiteral("产品型号"), QString(), false},
+            {QStringLiteral("productionBatch"), QStringLiteral("生产批次"), QString(), true},
+            {QStringLiteral("plannedQuantity"), QStringLiteral("计划数量"), QString(), true}
         };
     case OfficeFormKind::StockOutbound:
-        return {};
+        return {
+            {QStringLiteral("customerCompany"), QStringLiteral("发往单位"), QString(), false},
+            {QStringLiteral("customerContact"), QStringLiteral("收货人"), QString(), false}
+        };
     case OfficeFormKind::DeliveryConfirmation:
-        return {};
+        return {
+            {QStringLiteral("customerCompany"), QStringLiteral("客户单位"), QString(), true},
+            {QStringLiteral("salesOrderNumber"), QStringLiteral("订单号"), QString(), false},
+            {QStringLiteral("destination"), QStringLiteral("收货地址"), QString(), true},
+            {QStringLiteral("customerContact"), QStringLiteral("收货人"), QString(), true},
+            {QStringLiteral("customerPhone"), QStringLiteral("联系电话"), QString(), false},
+            {QStringLiteral("logisticsCompany"), QStringLiteral("物流公司"), QString(), false},
+            {QStringLiteral("trackingNumber"), QStringLiteral("运单号"), QString(), false}
+        };
     case OfficeFormKind::Inspection:
-        return {};
+        return {
+            {QStringLiteral("entrustedBy"), QStringLiteral("委托人员"), QString(), true},
+            {QStringLiteral("notificationDepartment"), QStringLiteral("通知单位"),
+             QStringLiteral("检验部"), true},
+            {QStringLiteral("arrivalDate"), QStringLiteral("到货日期（yyyy-MM-dd）"),
+             document.documentDate.toString(QStringLiteral("yyyy-MM-dd")), true},
+            {QStringLiteral("urgency"), QStringLiteral("待检状态（EXPEDITED/URGENT/NORMAL）"),
+             QStringLiteral("NORMAL"), true},
+            {QStringLiteral("purchaseOrderNumber"), QStringLiteral("采购单号（明细默认值）"),
+             QString(), false},
+            {QStringLiteral("supplier"), QStringLiteral("供应商（明细默认值）"),
+             QString(), false}
+        };
     }
     return {};
 }
@@ -90,11 +117,38 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     auto *lineTitle = new QLabel(QStringLiteral("模板明细（来源于当前业务页面）"), this);
     lineTitle->setStyleSheet(QStringLiteral("font-weight:600;"));
     root->addWidget(lineTitle);
-    m_lineTable = new QTableWidget(0, 8, this);
-    m_lineTable->setHorizontalHeaderLabels({
-        QStringLiteral("序号"), QStringLiteral("物料编码"), QStringLiteral("名称"),
-        QStringLiteral("规格型号"), QStringLiteral("单位"), QStringLiteral("数量"),
-        QStringLiteral("批次/SN"), QStringLiteral("备注")});
+    QStringList headers;
+    switch (m_document.kind) {
+    case OfficeFormKind::Inspection:
+        headers = {QStringLiteral("序号"), QStringLiteral("物料号"), QStringLiteral("材料名称"),
+                   QStringLiteral("数量"), QStringLiteral("采购单号"), QStringLiteral("批号"),
+                   QStringLiteral("供应商")};
+        break;
+    case OfficeFormKind::StockOutbound:
+        headers = {QStringLiteral("序号"), QStringLiteral("产品名称"), QStringLiteral("规格型号"),
+                   QStringLiteral("单位"), QStringLiteral("数量"), QStringLiteral("生产批号"),
+                   QStringLiteral("序列号"), QStringLiteral("备注")};
+        break;
+    case OfficeFormKind::DeliveryConfirmation:
+        headers = {QStringLiteral("序号"), QStringLiteral("订单号"), QStringLiteral("产品名称"),
+                   QStringLiteral("规格型号"), QStringLiteral("单位"), QStringLiteral("数量"),
+                   QStringLiteral("批号"), QStringLiteral("序列号"), QStringLiteral("备注")};
+        break;
+    case OfficeFormKind::ProductionIssue:
+        headers = {QStringLiteral("序号"), QStringLiteral("物料编码"), QStringLiteral("物料名称"),
+                   QStringLiteral("单台用量"), QStringLiteral("批号"), QStringLiteral("领用数量"),
+                   QStringLiteral("外协数量"), QStringLiteral("返工数量"), QStringLiteral("损耗数量"),
+                   QStringLiteral("退料数量"), QStringLiteral("备注")};
+        break;
+    case OfficeFormKind::RawMaterialInbound:
+    case OfficeFormKind::FinishedGoodsInbound:
+        headers = {QStringLiteral("序号"), QStringLiteral("日期"), QStringLiteral("物料编码"),
+                   QStringLiteral("批号"), QStringLiteral("物料名称"), QStringLiteral("规格型号"),
+                   QStringLiteral("单位"), QStringLiteral("数量"), QStringLiteral("备注")};
+        break;
+    }
+    m_lineTable = new QTableWidget(0, headers.size(), this);
+    m_lineTable->setHorizontalHeaderLabels(headers);
     m_lineTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_lineTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_lineTable->verticalHeader()->hide();
@@ -103,12 +157,16 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     populateLines();
 
     auto *buttons = new QDialogButtonBox(this);
+    auto *fullScreen = buttons->addButton(QStringLiteral("全屏显示"), QDialogButtonBox::ActionRole);
     auto *preview = buttons->addButton(QStringLiteral("打开模板预览"), QDialogButtonBox::ActionRole);
     auto *cancel = buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
     auto *save = buttons->addButton(QStringLiteral("保存表单并继续"), QDialogButtonBox::AcceptRole);
     save->setProperty("primary", true);
     root->addWidget(buttons);
     connect(preview, &QPushButton::clicked, this, &DocumentTemplateDialog::previewTemplate);
+    connect(fullScreen, &QPushButton::clicked, this, [this] {
+        if (isMaximized()) showNormal(); else showMaximized();
+    });
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     connect(save, &QPushButton::clicked, this, &DocumentTemplateDialog::acceptForm);
 }
@@ -134,14 +192,35 @@ void DocumentTemplateDialog::populateLines()
     for (const OfficeTemplateLine &line : std::as_const(m_document.lines)) {
         const int row = m_lineTable->rowCount();
         m_lineTable->insertRow(row);
-        QString batchAndSerial = line.batchNo;
-        if (!line.serialNumbers.isEmpty()) {
-            if (!batchAndSerial.isEmpty()) batchAndSerial += QStringLiteral(" / ");
-            batchAndSerial += line.serialNumbers;
+        QStringList values;
+        switch (m_document.kind) {
+        case OfficeFormKind::Inspection:
+            values = {QString::number(row + 1), line.materialCode, line.materialName,
+                      quantityText(line.quantity), line.orderNumber, line.batchNo, line.supplier};
+            break;
+        case OfficeFormKind::StockOutbound:
+            values = {QString::number(row + 1), line.materialName, line.specification, line.unit,
+                      quantityText(line.quantity), line.batchNo, line.serialNumbers, line.notes};
+            break;
+        case OfficeFormKind::DeliveryConfirmation:
+            values = {QString::number(row + 1), line.orderNumber, line.materialName,
+                      line.specification, line.unit, quantityText(line.quantity), line.batchNo,
+                      line.serialNumbers, line.notes};
+            break;
+        case OfficeFormKind::ProductionIssue:
+            values = {QString::number(row + 1), line.materialCode, line.materialName,
+                      quantityText(line.unitUsage), line.batchNo, quantityText(line.quantity),
+                      quantityText(line.externalQuantity), quantityText(line.reworkQuantity),
+                      quantityText(line.lossQuantity), quantityText(line.returnQuantity), line.notes};
+            break;
+        case OfficeFormKind::RawMaterialInbound:
+        case OfficeFormKind::FinishedGoodsInbound:
+            values = {QString::number(row + 1),
+                      m_document.documentDate.toString(QStringLiteral("yyyy-MM-dd")),
+                      line.materialCode, line.batchNo, line.materialName, line.specification,
+                      line.unit, quantityText(line.quantity), line.notes};
+            break;
         }
-        const QStringList values = {
-            QString::number(row + 1), line.materialCode, line.materialName, line.specification,
-            line.unit, quantityText(line.quantity), batchAndSerial, line.notes};
         for (int column = 0; column < values.size(); ++column)
             m_lineTable->setItem(row, column, new QTableWidgetItem(values.at(column)));
     }
@@ -155,6 +234,14 @@ OfficeTemplateDocument DocumentTemplateDialog::document() const
     OfficeTemplateDocument result = m_document;
     for (auto it = m_fieldEdits.cbegin(); it != m_fieldEdits.cend(); ++it)
         result.fields.insert(it.key(), it.value()->text().trimmed());
+    if (result.kind == OfficeFormKind::Inspection) {
+        const QString orderNumber = result.fields.value(QStringLiteral("purchaseOrderNumber"));
+        const QString supplier = result.fields.value(QStringLiteral("supplier"));
+        for (OfficeTemplateLine &line : result.lines) {
+            if (line.orderNumber.trimmed().isEmpty()) line.orderNumber = orderNumber;
+            if (line.supplier.trimmed().isEmpty()) line.supplier = supplier;
+        }
+    }
     return result;
 }
 

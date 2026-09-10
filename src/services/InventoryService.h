@@ -44,6 +44,8 @@ struct StockDocumentRequest
 {
     QString documentType;
     QDate documentDate;
+    // 销售出库的送货日期：与出库日期分开保存，并用于送货确认单模板。
+    QDate deliveryDate;
     QString handlerName;
     QString purpose;
     QString supplier;
@@ -57,6 +59,8 @@ struct StockDocumentRequest
     QString notes;
     QString submissionToken;
     qlonglong productionRunId = 0;
+    // 独立送检通知主键。大于0时以数据库中的合格通知为唯一送检依据。
+    qlonglong inspectionNoticeId = 0;
     InboundInspectionRequest inspection;
     QList<StockMovementRequest> lines;
 };
@@ -109,6 +113,53 @@ struct PostedDocument
 {
     qlonglong documentId = 0;
     QString documentNumber;
+};
+
+// 已入账业务单据的完整可编辑快照。界面保存时必须整份提交，服务层会在同一事务中
+// 替换单头、明细、库存流水和SN关联，并重算库存，避免只修改显示资料而库存未同步。
+struct PostedDocumentEditLine
+{
+    qlonglong itemId = 0;
+    qlonglong materialId = 0;
+    double quantity = 0.0;
+    double orderedQuantity = 0.0;
+    double giftQuantity = 0.0;
+    QString batchNo;
+    qlonglong warehouseId = 0;
+    qlonglong locationId = 0;
+    qlonglong targetWarehouseId = 0;
+    qlonglong targetLocationId = 0;
+    qlonglong sourceItemId = 0;
+    // 普通单据由单头库存方向决定；盘点等 ADJUST 单据按行保存 IN 或 OUT。
+    QString movementDirection;
+    QStringList serialNumbers;
+    QString notes;
+};
+
+struct PostedDocumentEdit
+{
+    qlonglong documentId = 0;
+    QString documentNumber;
+    QString documentType;
+    QString stockDirection;
+    QString status;
+    QDate documentDate;
+    QDate deliveryDate;
+    qlonglong sourceDocumentId = 0;
+    qlonglong productionRunId = 0;
+    qlonglong inspectionNoticeId = 0;
+    QString handlerName;
+    QString purpose;
+    QString supplier;
+    QString notes;
+    QString customerCompany;
+    QString destination;
+    QString customerContact;
+    QString customerPhone;
+    QString salesOrderNumber;
+    QString logisticsCompany;
+    QString trackingNumber;
+    QList<PostedDocumentEditLine> lines;
 };
 
 struct InitialInventoryLine
@@ -171,9 +222,19 @@ public:
                            bool inbound,
                            PostedDocument *postedDocument,
                            QString *errorMessage = nullptr);
+    bool loadPostedDocument(qlonglong documentId,
+                            PostedDocumentEdit *document,
+                            QString *errorMessage = nullptr) const;
+    bool revisePostedDocument(const PostedDocumentEdit &document,
+                              QString *errorMessage = nullptr);
     bool importInitialInventory(const InitialInventoryRequest &request,
                                 PostedDocument *postedDocument,
                                 QString *errorMessage = nullptr);
+    // 在调用方已开启的事务内导入期初库存：本函数绝不开始、提交或回滚事务，
+    // 任何校验、数据库或收尾错误都只返回 false，由调用方决定是否回滚。
+    bool importInitialInventoryInCurrentTransaction(const InitialInventoryRequest &request,
+                                                    PostedDocument *postedDocument,
+                                                    QString *errorMessage = nullptr);
     bool postInventoryCount(const InventoryCountRequest &request,
                             PostedDocument *postedDocument,
                             QString *errorMessage = nullptr);
@@ -183,6 +244,10 @@ public:
     bool reverseTransfer(const ReversalRequest &request,
                          PostedDocument *postedDocument,
                          QString *errorMessage = nullptr);
+    // 返回原业务明细当前可撤销的SN（去重、稳定排序），规则与 reverseItem 完全一致；
+    // 明细不存在、非SN管理物料、方向无效或原单为撤销单时返回空并写入 errorMessage。
+    QStringList reversibleSerialNumbers(qlonglong sourceItemId,
+                                        QString *errorMessage = nullptr) const;
     bool reverseItem(const ReversalRequest &request,
                      PostedDocument *postedDocument,
                      QString *errorMessage = nullptr);
@@ -293,6 +358,12 @@ private:
                     qlonglong entityId,
                     const QString &detail,
                     QString *errorMessage);
+    // 期初库存导入的共享实现：manageTransaction 为 true 时自行开始/提交/回滚事务，
+    // 为 false 时事务完全归调用方所有，本实现绝不开始、提交或回滚。
+    bool importInitialInventoryInternal(const InitialInventoryRequest &request,
+                                        PostedDocument *postedDocument,
+                                        bool manageTransaction,
+                                        QString *errorMessage);
 
     QSqlDatabase m_database;
     qlonglong m_operatorId = 0;

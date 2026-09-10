@@ -4,6 +4,7 @@
 #include "services/OfficeTemplateService.h"
 #include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/widgets/StockLineTable.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -20,6 +21,7 @@
 #include <QPushButton>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QStringList>
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QUuid>
@@ -76,20 +78,25 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     m_salesOrderEdit = new QLineEdit(m_salesDetailsGroup);
     m_logisticsCompanyEdit = new QLineEdit(m_salesDetailsGroup);
     m_trackingNumberEdit = new QLineEdit(m_salesDetailsGroup);
+    m_deliveryDateEdit = new QDateEdit(QDate::currentDate(), m_salesDetailsGroup);
+    m_deliveryDateEdit->setCalendarPopup(true);
+    m_deliveryDateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     salesLayout->addWidget(new QLabel(QStringLiteral("客户公司名称 *"), m_salesDetailsGroup), 0, 0);
     salesLayout->addWidget(m_customerCompanyEdit, 0, 1);
     salesLayout->addWidget(new QLabel(QStringLiteral("销售目的地/收货地址 *"), m_salesDetailsGroup), 0, 2);
     salesLayout->addWidget(m_destinationEdit, 0, 3);
-    salesLayout->addWidget(new QLabel(QStringLiteral("客户联系人"), m_salesDetailsGroup), 1, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("客户联系人 *"), m_salesDetailsGroup), 1, 0);
     salesLayout->addWidget(m_customerContactEdit, 1, 1);
-    salesLayout->addWidget(new QLabel(QStringLiteral("联系电话"), m_salesDetailsGroup), 1, 2);
+    salesLayout->addWidget(new QLabel(QStringLiteral("联系电话 *"), m_salesDetailsGroup), 1, 2);
     salesLayout->addWidget(m_customerPhoneEdit, 1, 3);
-    salesLayout->addWidget(new QLabel(QStringLiteral("客户合同号/订单号"), m_salesDetailsGroup), 2, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("客户合同号/订单号 *"), m_salesDetailsGroup), 2, 0);
     salesLayout->addWidget(m_salesOrderEdit, 2, 1);
-    salesLayout->addWidget(new QLabel(QStringLiteral("物流/快递公司"), m_salesDetailsGroup), 2, 2);
+    salesLayout->addWidget(new QLabel(QStringLiteral("物流/快递公司 *"), m_salesDetailsGroup), 2, 2);
     salesLayout->addWidget(m_logisticsCompanyEdit, 2, 3);
-    salesLayout->addWidget(new QLabel(QStringLiteral("运单号"), m_salesDetailsGroup), 3, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("运单号 *"), m_salesDetailsGroup), 3, 0);
     salesLayout->addWidget(m_trackingNumberEdit, 3, 1);
+    salesLayout->addWidget(new QLabel(QStringLiteral("送货日期 *"), m_salesDetailsGroup), 3, 2);
+    salesLayout->addWidget(m_deliveryDateEdit, 3, 3);
     salesLayout->setColumnStretch(1, 1);
     salesLayout->setColumnStretch(3, 1);
     layout->addWidget(m_salesDetailsGroup);
@@ -107,17 +114,28 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     auto *recentPanel = new QFrame(this);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
-    recentLayout->addWidget(new QLabel(
+    auto *recentToolbar = new QHBoxLayout;
+    recentToolbar->addWidget(new QLabel(
         QStringLiteral("近期普通出库单（双击销售出库可查看完整销售资料）"), recentPanel));
+    recentToolbar->addStretch();
+    auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(fullScreenRecentButton);
+    recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 6, recentPanel);
+    m_recentTable->setProperty("businessDocumentTable", true);
     m_recentTable->setHorizontalHeaderLabels({QStringLiteral("单据号"), QStringLiteral("类型"),
-                                              QStringLiteral("日期"), QStringLiteral("客户公司"),
+                                              QStringLiteral("送货/单据日期"), QStringLiteral("客户公司"),
                                               QStringLiteral("销售目的地"), QStringLiteral("明细数")});
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     recentLayout->addWidget(m_recentTable);
     root->addWidget(recentPanel, 1);
 
+    connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::fullScreenTable(
+            m_recentTable, QStringLiteral("近期普通出库单"), this);
+    });
     connect(m_submitButton, &QPushButton::clicked, this, &StockOutPage::submit);
     connect(m_typeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &StockOutPage::updateSalesFieldsVisibility);
@@ -159,7 +177,8 @@ void StockOutPage::refreshRecentDocuments()
     query.exec(QStringLiteral(
         "SELECT d.id,d.document_no,CASE d.document_type "
         "WHEN 'XSCK' THEN '销售出库' WHEN 'WXLY' THEN '维修领用' "
-        "WHEN 'YPLY' THEN '研发领用' ELSE '其他出库' END,d.document_date,"
+        "WHEN 'YPLY' THEN '研发领用' ELSE '其他出库' END,"
+        "COALESCE(NULLIF(s.delivery_date,''),d.document_date),"
         "COALESCE(s.customer_company,''),COALESCE(s.destination,''),COUNT(i.id) "
         "FROM business_documents d LEFT JOIN business_document_items i ON i.document_id=d.id "
         "LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
@@ -183,7 +202,8 @@ void StockOutPage::showSalesDetails(int row, int)
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT d.document_no,s.customer_company,s.destination,s.contact_name,s.contact_phone,"
-        "s.sales_order_no,s.logistics_company,s.tracking_no "
+        "s.sales_order_no,s.logistics_company,s.tracking_no,"
+        "COALESCE(NULLIF(s.delivery_date,''),d.document_date) "
         "FROM business_documents d JOIN sales_outbound_details s ON s.document_id=d.id "
         "WHERE d.id=? AND d.document_type='XSCK'"));
     query.addBindValue(item->data(Qt::UserRole));
@@ -201,22 +221,43 @@ void StockOutPage::showSalesDetails(int row, int)
         return value.isEmpty() ? QStringLiteral("未填写") : value;
     };
     QMessageBox::information(this, QStringLiteral("销售出库资料"),
-        QStringLiteral("出库单号：%1\n客户公司：%2\n销售目的地/收货地址：%3\n"
-                       "客户联系人：%4\n联系电话：%5\n销售订单号：%6\n"
-                       "物流/快递公司：%7\n运单号：%8")
-            .arg(valueOrEmpty(0), valueOrEmpty(1), valueOrEmpty(2), valueOrEmpty(3),
-                 valueOrEmpty(4), valueOrEmpty(5), valueOrEmpty(6), valueOrEmpty(7)));
+        QStringLiteral("出库单号：%1\n送货日期：%2\n客户公司：%3\n销售目的地/收货地址：%4\n"
+                       "客户联系人：%5\n联系电话：%6\n销售订单号：%7\n"
+                       "物流/快递公司：%8\n运单号：%9")
+            .arg(valueOrEmpty(0), valueOrEmpty(8), valueOrEmpty(1), valueOrEmpty(2),
+                 valueOrEmpty(3), valueOrEmpty(4), valueOrEmpty(5), valueOrEmpty(6),
+                 valueOrEmpty(7)));
 }
 
 void StockOutPage::submit()
 {
     const bool salesOutbound = m_typeCombo->currentData().toString() == QStringLiteral("XSCK");
-    if (salesOutbound
-        && (m_customerCompanyEdit->text().trimmed().isEmpty()
-            || m_destinationEdit->text().trimmed().isEmpty())) {
-        QMessageBox::warning(this, QStringLiteral("销售资料不完整"),
-                             QStringLiteral("销售出库必须填写客户公司名称和销售目的地/收货地址。"));
-        return;
+    if (salesOutbound) {
+        QStringList missing;
+        if (m_customerCompanyEdit->text().trimmed().isEmpty())
+            missing.append(QStringLiteral("客户公司名称"));
+        if (m_destinationEdit->text().trimmed().isEmpty())
+            missing.append(QStringLiteral("销售目的地/收货地址"));
+        if (m_customerContactEdit->text().trimmed().isEmpty())
+            missing.append(QStringLiteral("客户联系人"));
+        if (m_customerPhoneEdit->text().trimmed().isEmpty())
+            missing.append(QStringLiteral("联系电话"));
+        if (m_salesOrderEdit->text().trimmed().isEmpty())
+            missing.append(QStringLiteral("客户合同号/订单号"));
+        if (m_logisticsCompanyEdit->text().trimmed().isEmpty())
+            missing.append(QStringLiteral("物流/快递公司"));
+        if (m_trackingNumberEdit->text().trimmed().isEmpty())
+            missing.append(QStringLiteral("运单号"));
+        if (!m_deliveryDateEdit->date().isValid())
+            missing.append(QStringLiteral("送货日期"));
+        if (!missing.isEmpty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("销售资料不完整"),
+                QStringLiteral("销售出库必须完整填写以下带 * 的发货资料：\n\n%1\n\n"
+                               "请补充后再提交，其他出库类型不受影响。")
+                    .arg(missing.join(QStringLiteral("、"))));
+            return;
+        }
     }
     QString error;
     const QList<StockMovementRequest> lines = m_lines->lines(&error);
@@ -260,11 +301,18 @@ void StockOutPage::submit()
     if (salesOutbound) {
         deliveryForm = outboundForm;
         deliveryForm.kind = OfficeFormKind::DeliveryConfirmation;
+        // 送货确认单上的“送货日期”取所选送货日期；出库单/单据日期仍是出库日期。
+        deliveryForm.documentDate = m_deliveryDateEdit->date();
         for (OfficeTemplateLine &line : deliveryForm.lines)
             line.orderNumber = m_salesOrderEdit->text().trimmed();
         DocumentTemplateDialog deliveryDialog(deliveryForm, this);
         if (deliveryDialog.exec() != QDialog::Accepted) return;
         deliveryForm = deliveryDialog.document();
+        if (!deliveryForm.documentDate.isValid()) {
+            QMessageBox::warning(this, QStringLiteral("送货日期无效"),
+                                 QStringLiteral("送货确认单的送货日期无效，请重新选择送货日期。"));
+            return;
+        }
     }
 
     if (QMessageBox::question(this, QStringLiteral("确认出库"),
@@ -276,6 +324,8 @@ void StockOutPage::submit()
     request.handlerName = m_handlerEdit->text().trimmed();
     request.purpose = m_purposeEdit->text().trimmed();
     if (salesOutbound) {
+        // 与送货确认单模板保持同一天，避免保存数据与生成表单不一致。
+        request.deliveryDate = deliveryForm.documentDate;
         request.customerCompany = m_customerCompanyEdit->text().trimmed();
         request.destination = m_destinationEdit->text().trimmed();
         request.customerContact = m_customerContactEdit->text().trimmed();
@@ -333,6 +383,7 @@ void StockOutPage::submit()
         m_salesOrderEdit->clear();
         m_logisticsCompanyEdit->clear();
         m_trackingNumberEdit->clear();
+        m_deliveryDateEdit->setDate(QDate::currentDate());
     }
     m_lines->clearLines();
     emit stockChanged();

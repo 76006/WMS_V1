@@ -17,15 +17,19 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSqlQuery>
 #include <QSqlQueryModel>
 #include <QTableView>
 #include <QTextEdit>
 #include <QVBoxLayout>
 
+#include <cmath>
 #include <utility>
 
 namespace {
+constexpr double LedgerQuantityTolerance = 0.0000001;
+
 QStringList parseSerialNumbers(const QString &text)
 {
     QStringList values = text.split(QRegularExpression(QStringLiteral("[,;\\r\\n]+")), Qt::SkipEmptyParts);
@@ -33,6 +37,11 @@ QStringList parseSerialNumbers(const QString &text)
         value = value.trimmed().toUpper();
     }
     return values;
+}
+
+bool isWholeNumber(double value)
+{
+    return std::abs(value - std::round(value)) < LedgerQuantityTolerance;
 }
 }
 
@@ -93,6 +102,8 @@ LedgerPage::LedgerPage(QSqlDatabase database, Session session, QWidget *parent)
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(12, 12, 12, 12);
     m_table = new QTableView(panel);
+    m_table->setProperty("businessDocumentTable", true);
+    m_table->setProperty("businessDocumentIdColumn", 2);
     m_model = new QSqlQueryModel(this);
     m_table->setModel(m_model);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -196,11 +207,16 @@ void LedgerPage::updateActionState()
         const QString status = m_model->index(row, 18).data().toString();
         const double remaining = m_model->index(row, 19).data().toDouble();
         const qlonglong creatorId = m_model->index(row, 21).data().toLongLong();
+        const QString sourceType = m_model->index(row, 23).data().toString();
         const bool allowedOwner = m_session.isAdministrator() || creatorId == m_session.userId;
         enabled = m_session.canManageWarehouse() && allowedOwner
                   && (direction == QStringLiteral("IN") || direction == QStringLiteral("OUT"))
                   && status != QStringLiteral("REVERSED") && remaining > 0.0000001;
-        if (!allowedOwner) reason = QStringLiteral("只有管理员或原单创建人可以撤销");
+        // 撤销单（CX）本身就是反向单据，再撤销会产生无法追溯的循环业务，只能在原业务中重新办理。
+        if (sourceType == QStringLiteral("CX")) {
+            enabled = false;
+            reason = QStringLiteral("撤销单（CX）为反向单据，不能再次撤销；如需恢复请在原业务中重新办理");
+        } else if (!allowedOwner) reason = QStringLiteral("只有管理员或原单创建人可以撤销");
         else if (direction != QStringLiteral("IN") && direction != QStringLiteral("OUT"))
             reason = QStringLiteral("调拨流水需在调拨页面撤销");
         else if (remaining <= 0.0000001 || status == QStringLiteral("REVERSED"))
@@ -225,7 +241,45 @@ void LedgerPage::reverseSelectedItem()
     const bool requireSerial = m_model->index(row, 20).data().toBool();
     const double remainingGift = m_model->index(row, 22).data().toDouble();
     const QString sourceType = m_model->index(row, 23).data().toString();
-    const QString originalSerials = m_model->index(row, 9).data().toString();
+
+    InventoryService service(m_database, m_session.userId);
+    // SN管理明细必须以服务端当前可撤销的SN为准，不能沿用流水行按时间聚合的历史SN。
+    QStringList eligibleSerials;
+    // 非SN明细沿用数量口径；SN明细以仍处于可撤销状态的SN个数为实际上限。
+    double reversalMaximum = maximum;
+    if (requireSerial) {
+        QString lookupError;
+        eligibleSerials = service.reversibleSerialNumbers(itemId, &lookupError);
+        if (!lookupError.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("无法读取可撤销SN"), lookupError);
+            return;
+        }
+        if (!isWholeNumber(maximum) || maximum <= 0.0) {
+            QMessageBox::warning(
+                this, QStringLiteral("SN数据不一致"),
+                QStringLiteral("该明细剩余可撤销数量（%1）不是正整数，无法按SN撤销，请刷新后重试。")
+                    .arg(QString::number(maximum, 'g', 12)));
+            return;
+        }
+        if (eligibleSerials.isEmpty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("无可撤销SN"),
+                QStringLiteral("当前没有仍处于原业务可撤销状态的SN，"
+                               "可能已被后续业务流转或已经撤销，请刷新后重试。"));
+            return;
+        }
+        if (eligibleSerials.size() > static_cast<qsizetype>(std::lround(maximum))) {
+            QMessageBox::warning(
+                this, QStringLiteral("SN数据不一致"),
+                QStringLiteral("该明细当前可撤销SN数量（%1）超过剩余可撤销数量（%2），"
+                               "请刷新后重试。")
+                    .arg(eligibleSerials.size())
+                    .arg(QString::number(maximum, 'g', 12)));
+            return;
+        }
+        // 部分SN已流出原业务范围时，允许按仍可撤销的SN数量撤销，不能要求与数量口径相等。
+        reversalMaximum = static_cast<double>(eligibleSerials.size());
+    }
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("撤销库存业务"));
@@ -241,15 +295,16 @@ void LedgerPage::reverseSelectedItem()
     dateEdit->setCalendarPopup(true);
     dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     auto *quantitySpin = new QDoubleSpinBox(&dialog);
-    quantitySpin->setDecimals(6);
-    quantitySpin->setRange(0.000001, maximum);
-    quantitySpin->setValue(maximum);
+    // SN管理物料的撤销数量必须是整数个SN。
+    quantitySpin->setDecimals(requireSerial ? 0 : 6);
+    quantitySpin->setRange(requireSerial ? 1.0 : 0.000001, reversalMaximum);
+    quantitySpin->setValue(reversalMaximum);
     QDoubleSpinBox *giftSpin = nullptr;
     if (sourceType == QStringLiteral("CGRK") && remainingGift > 0.0000001) {
         giftSpin = new QDoubleSpinBox(&dialog);
         giftSpin->setDecimals(6);
-        giftSpin->setRange(0.0, qMin(maximum, remainingGift));
-        giftSpin->setValue(qMin(maximum, remainingGift));
+        giftSpin->setRange(0.0, qMin(reversalMaximum, remainingGift));
+        giftSpin->setValue(qMin(reversalMaximum, remainingGift));
         giftSpin->setToolTip(QStringLiteral("只填写本次撤销数量中属于供应商赠送的部分"));
         connect(quantitySpin, qOverload<double>(&QDoubleSpinBox::valueChanged), giftSpin,
                 [giftSpin, remainingGift](double value) {
@@ -267,9 +322,29 @@ void LedgerPage::reverseSelectedItem()
     if (requireSerial) {
         serialEdit = new QTextEdit(&dialog);
         serialEdit->setPlaceholderText(QStringLiteral("每行一个需要撤销的SN"));
-        serialEdit->setPlainText(originalSerials.split(QStringLiteral(", ")).join(QLatin1Char('\n')));
+        serialEdit->setPlainText(eligibleSerials.join(QLatin1Char('\n')));
         serialEdit->setMaximumHeight(110);
         form->addRow(QStringLiteral("SN列表 *"), serialEdit);
+        QString serialHintText =
+            QStringLiteral("SN数量必须等于撤销数量，可编辑列表选择具体SN（当前可撤销SN共 %1 个）。")
+                .arg(eligibleSerials.size());
+        if (eligibleSerials.size() < static_cast<qsizetype>(std::lround(maximum))) {
+            serialHintText +=
+                QStringLiteral("该明细按数量核算的剩余可撤销数量为 %1，本次最多可撤销 %2 个SN。")
+                    .arg(QString::number(maximum, 'g', 12))
+                    .arg(eligibleSerials.size());
+        }
+        auto *serialHint = new QLabel(serialHintText, &dialog);
+        serialHint->setObjectName(QStringLiteral("mutedText"));
+        serialHint->setWordWrap(true);
+        form->addRow(QString(), serialHint);
+        // 减少数量时按稳定顺序自动保留对应数量的可撤销SN。
+        connect(quantitySpin, qOverload<double>(&QDoubleSpinBox::valueChanged), serialEdit,
+                [serialEdit, eligibleSerials](double value) {
+                    const int count = qBound(0, static_cast<int>(std::lround(value)),
+                                             static_cast<int>(eligibleSerials.size()));
+                    serialEdit->setPlainText(eligibleSerials.mid(0, count).join(QLatin1Char('\n')));
+                });
     }
     form->addRow(QStringLiteral("撤销原因 *"), notesEdit);
     root->addLayout(form);
@@ -278,7 +353,42 @@ void LedgerPage::reverseSelectedItem()
     buttons->button(QDialogButtonBox::Ok)->setProperty("danger", true);
     buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
     root->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
+        if (serialEdit) {
+            const QStringList entered = parseSerialNumbers(serialEdit->toPlainText());
+            QSet<QString> eligibleKeys;
+            for (const QString &serial : std::as_const(eligibleSerials)) {
+                eligibleKeys.insert(serial.toUpper());
+            }
+            QString problem;
+            QSet<QString> seen;
+            for (const QString &serial : entered) {
+                if (seen.contains(serial)) {
+                    problem = QStringLiteral("SN %1 重复，请检查后重试。").arg(serial);
+                    break;
+                }
+                seen.insert(serial);
+                if (!eligibleKeys.contains(serial)) {
+                    problem = QStringLiteral("SN %1 不在当前可撤销范围内，请刷新后重试。").arg(serial);
+                    break;
+                }
+            }
+            if (problem.isEmpty() && entered.isEmpty()) {
+                problem = QStringLiteral("请填写需要撤销的SN，数量必须与撤销数量一致。");
+            }
+            if (problem.isEmpty()
+                && entered.size() != static_cast<qsizetype>(std::lround(quantitySpin->value()))) {
+                problem = QStringLiteral("SN数量（%1）必须等于撤销数量（%2）。")
+                              .arg(entered.size())
+                              .arg(QString::number(quantitySpin->value(), 'f', 0));
+            }
+            if (!problem.isEmpty()) {
+                QMessageBox::warning(&dialog, QStringLiteral("SN列表无效"), problem);
+                return;
+            }
+        }
+        dialog.accept();
+    });
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (dialog.exec() != QDialog::Accepted) return;
     if (notesEdit->toPlainText().trimmed().isEmpty()) {
@@ -305,7 +415,6 @@ void LedgerPage::reverseSelectedItem()
     request.notes = notesEdit->toPlainText().trimmed();
     if (serialEdit) request.serialNumbers = parseSerialNumbers(serialEdit->toPlainText());
 
-    InventoryService service(m_database, m_session.userId);
     PostedDocument posted;
     QString error;
     if (!service.reverseItem(request, &posted, &error)) {

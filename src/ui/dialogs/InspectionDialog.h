@@ -26,6 +26,8 @@ public:
                      QWidget *parent = nullptr);
 
     InboundInspectionRequest inspection() const;
+    // “保存并返回入库单”时立即归档的送检单正本路径；未保存成功时为空。
+    QString archivedPath() const { return m_archivedPath; }
 
 private slots:
     void chooseAttachment();
@@ -34,7 +36,9 @@ private slots:
 
 private:
     void populateLines();
+    void populateSupplierCombo();
     QString resultText() const;
+    QString supplierText() const;
     OfficeTemplateDocument templateDocument() const;
 
     QSqlDatabase m_database;
@@ -47,9 +51,10 @@ private:
     QLineEdit *m_entrustedEdit = nullptr;
     QLineEdit *m_notificationDepartmentEdit = nullptr;
     QLineEdit *m_purchaseOrderEdit = nullptr;
-    QLineEdit *m_supplierEdit = nullptr;
+    QComboBox *m_supplierCombo = nullptr;
     QComboBox *m_resultCombo = nullptr;
     QTextEdit *m_conclusionEdit = nullptr;
     QLabel *m_attachmentLabel = nullptr;
     QTableWidget *m_lineTable = nullptr;
+    QString m_archivedPath;
 };

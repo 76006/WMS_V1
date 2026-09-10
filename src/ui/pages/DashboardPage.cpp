@@ -1,9 +1,12 @@
 #include "ui/pages/DashboardPage.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QFrame>
 #include <QGridLayout>
 #include <QHeaderView>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -38,10 +41,16 @@ DashboardPage::DashboardPage(QSqlDatabase database, QWidget *parent)
     panel->setObjectName(QStringLiteral("panel"));
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(16, 14, 16, 16);
+    auto *recentToolbar = new QHBoxLayout;
     auto *title = new QLabel(QStringLiteral("最近出入库记录"), panel);
     title->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 600;"));
-    panelLayout->addWidget(title);
+    auto *fullScreenButton = new QPushButton(QStringLiteral("全屏显示"), panel);
+    recentToolbar->addWidget(title);
+    recentToolbar->addStretch();
+    recentToolbar->addWidget(fullScreenButton);
+    panelLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(panel);
+    m_recentTable->setProperty("businessDocumentTable", true);
     m_recentTable->setColumnCount(8);
     m_recentTable->setHorizontalHeaderLabels({QStringLiteral("时间"), QStringLiteral("业务类型"),
                                                QStringLiteral("单据号"), QStringLiteral("物料编码"),
@@ -53,6 +62,10 @@ DashboardPage::DashboardPage(QSqlDatabase database, QWidget *parent)
     m_recentTable->verticalHeader()->hide();
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     panelLayout->addWidget(m_recentTable);
+    connect(fullScreenButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::fullScreenTable(
+            m_recentTable, QStringLiteral("最近出入库记录"), this);
+    });
     root->addWidget(panel, 1);
     refresh();
 }
@@ -105,7 +118,7 @@ void DashboardPage::refresh()
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
         "SELECT l.occurred_at, l.business_type, d.document_no, m.code, m.name, "
-        "l.quantity_in, l.quantity_out, w.name || ' / ' || loc.code "
+        "l.quantity_in, l.quantity_out, w.name || ' / ' || loc.code, d.id "
         "FROM inventory_ledger l "
         "JOIN business_documents d ON d.id=l.document_id "
         "JOIN materials m ON m.id=l.material_id "
@@ -124,7 +137,9 @@ void DashboardPage::refresh()
             } else {
                 text = query.value(column).toString();
             }
-            m_recentTable->setItem(row, column, new QTableWidgetItem(text));
+            auto *item = new QTableWidgetItem(text);
+            item->setData(Qt::UserRole, query.value(8));
+            m_recentTable->setItem(row, column, item);
         }
     }
     m_recentTable->resizeColumnsToContents();
