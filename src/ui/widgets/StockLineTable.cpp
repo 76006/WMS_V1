@@ -12,6 +12,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -73,7 +74,7 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(8);
-    auto *toolbar = new QHBoxLayout;
+    m_toolbarLayout = new QHBoxLayout;
     auto *hint = new QLabel(m_mode == Mode::Inbound
                                 ? QStringLiteral("逐行选择入库物料、目标库位、批次和数量")
                                 : QStringLiteral("逐行选择出库物料、库存批次和数量"), this);
@@ -86,12 +87,12 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
         QStringLiteral("递归导入当前成品BOM中的全部末级领用物料"));
     m_fullScreenButton = new QPushButton(QStringLiteral("全屏显示"), this);
     m_fullScreenButton->setToolTip(QStringLiteral("全屏显示物料明细表，按 Esc 可退出"));
-    toolbar->addWidget(hint);
-    toolbar->addStretch();
-    toolbar->addWidget(m_fullScreenButton);
-    toolbar->addWidget(addButton);
-    toolbar->addWidget(m_importProductionBomButton);
-    root->addLayout(toolbar);
+    m_toolbarLayout->addWidget(hint);
+    m_toolbarLayout->addStretch();
+    m_toolbarLayout->addWidget(m_fullScreenButton);
+    m_toolbarLayout->addWidget(addButton);
+    m_toolbarLayout->addWidget(m_importProductionBomButton);
+    root->addLayout(m_toolbarLayout);
 
     m_table = new QTableWidget(0, 11, this);
     m_table->setHorizontalHeaderLabels({QStringLiteral("物料"), QStringLiteral("仓库"),
@@ -112,10 +113,15 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setAlternatingRowColors(true);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(MaterialColumn, QHeaderView::Stretch);
+    // “物料”列不能使用 Stretch：其余内容较宽时 Stretch 会被压缩到几乎不可见。
+    // 使用可调列宽并提供足够的初始宽度，超出页面宽度时通过横向滚动查看全部列。
+    m_table->horizontalHeader()->setSectionResizeMode(MaterialColumn, QHeaderView::Interactive);
+    m_table->setColumnWidth(MaterialColumn, 320);
     // 批次编码固定为 SM+日期+3位流水，预留足够宽度并允许用户继续拖动调整。
     m_table->horizontalHeader()->setSectionResizeMode(BatchColumn, QHeaderView::Interactive);
     m_table->setColumnWidth(BatchColumn, BatchColumnWidth);
+    m_table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_table->setMinimumHeight(240);
     m_table->setColumnHidden(UnitUsageColumn, true);
     if (m_mode == Mode::Outbound) {
@@ -130,6 +136,13 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     connect(m_importProductionBomButton, &QPushButton::clicked,
             this, &StockLineTable::productionBomRequested);
     addLine();
+}
+
+void StockLineTable::addToolbarAction(QWidget *action)
+{
+    if (!action || !m_toolbarLayout) return;
+    action->setParent(this);
+    m_toolbarLayout->addWidget(action);
 }
 
 int StockLineTable::rowForWidget(const QWidget *widget, int column) const
@@ -191,6 +204,10 @@ void StockLineTable::loadMaterials(QComboBox *combo, const QVariant &selected)
     }
     const int selectedIndex = selected.isValid() ? combo->findData(selected) : -1;
     combo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    if (combo->lineEdit()) {
+        combo->lineEdit()->deselect();
+        combo->lineEdit()->setCursorPosition(0);
+    }
     combo->blockSignals(false);
 }
 
@@ -243,6 +260,10 @@ void StockLineTable::addLine()
 
     connect(material, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this, material] {
+                if (material->lineEdit()) {
+                    material->lineEdit()->deselect();
+                    material->lineEdit()->setCursorPosition(0);
+                }
                 const int currentRow = rowForWidget(material, MaterialColumn);
                 if (currentRow >= 0) {
                     loadUnitUsage(currentRow);

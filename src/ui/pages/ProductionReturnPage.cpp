@@ -101,9 +101,11 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     m_linesTable->setMinimumHeight(230);
     panelLayout->addWidget(m_linesTable);
     auto *actions = new QHBoxLayout;
+    actions->setContentsMargins(0, 10, 0, 0);
     actions->addStretch();
     m_submitButton = new QPushButton(QStringLiteral("确认并退料"), panel);
     m_submitButton->setProperty("primary", true);
+    m_submitButton->setFixedSize(110, 34);
     m_submitButton->setEnabled(m_session.canPostProduction());
     actions->addWidget(m_submitButton);
     panelLayout->addLayout(actions);
@@ -130,7 +132,7 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
 
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
-            m_recentTable, QStringLiteral("近期生产退料单"), this);
+            m_recentTable, QStringLiteral("全部生产退料单"), this, [this] { refreshRecentDocuments(); });
     });
     connect(m_runCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &ProductionReturnPage::loadDocuments);
@@ -349,7 +351,8 @@ void ProductionReturnPage::refreshRecentDocuments()
         "SELECT d.id,d.document_no,d.document_date,p.batch_no,s.document_no "
         "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
         "JOIN business_documents s ON s.id=d.source_document_id "
-        "WHERE d.document_type='SCTL' ORDER BY d.id DESC LIMIT 20"));
+        "WHERE d.document_type='SCTL' ORDER BY d.id DESC")
+        + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);

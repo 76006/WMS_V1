@@ -73,6 +73,10 @@ public:
                                        QString *errorMessage = nullptr);
     static bool openPreview(const OfficeTemplateDocument &document,
                             QWidget *parent = nullptr);
+    // Excel 类文件打开前由用户选择 WPS 表格或 Microsoft Excel；
+    // 其他文件仍交给 Windows 默认程序。用户取消选择不视为错误。
+    static bool openFileWithApplicationChoice(const QString &filePath,
+                                              QWidget *parent = nullptr);
     static bool attachToDocument(const OfficeTemplateDocument &document,
                                  QSqlDatabase database,
                                  qlonglong operatorId,

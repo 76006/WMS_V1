@@ -64,7 +64,7 @@ DashboardPage::DashboardPage(QSqlDatabase database, QWidget *parent)
     panelLayout->addWidget(m_recentTable);
     connect(fullScreenButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
-            m_recentTable, QStringLiteral("最近出入库记录"), this);
+            m_recentTable, QStringLiteral("全部出入库记录"), this, [this] { refresh(); });
     });
     root->addWidget(panel, 1);
     refresh();
@@ -124,7 +124,8 @@ void DashboardPage::refresh()
         "JOIN materials m ON m.id=l.material_id "
         "JOIN warehouses w ON w.id=l.warehouse_id "
         "JOIN locations loc ON loc.id=l.location_id "
-        "ORDER BY l.id DESC LIMIT 12"));
+        "ORDER BY l.id DESC")
+        + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 12")));
     m_recentTable->setRowCount(0);
     while (query.next()) {
         const int row = m_recentTable->rowCount();

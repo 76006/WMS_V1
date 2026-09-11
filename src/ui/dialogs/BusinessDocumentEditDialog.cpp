@@ -330,7 +330,10 @@ void BusinessDocumentEditDialog::addLine(const PostedDocumentEditLine &line)
 {
     const int row = m_lines->rowCount();
     m_lines->insertRow(row);
-    m_lines->setItem(row, RowNumberColumn, new QTableWidgetItem(QString::number(row + 1)));
+    auto *numberItem = new QTableWidgetItem(QString::number(row + 1));
+    numberItem->setData(Qt::UserRole, line.itemId);
+    numberItem->setFlags(numberItem->flags() & ~Qt::ItemIsEditable);
+    m_lines->setItem(row, RowNumberColumn, numberItem);
     m_lines->setCellWidget(row, MaterialColumn, materialCombo(line.materialId));
     auto *effect = new QComboBox(m_lines);
     effect->addItem(QStringLiteral("入库"), QStringLiteral("IN"));
@@ -413,6 +416,7 @@ PostedDocumentEdit BusinessDocumentEditDialog::editedDocument(QString *errorMess
     result.trackingNumber = m_trackingEdit->text().trimmed();
     for (int row = 0; row < m_lines->rowCount(); ++row) {
         PostedDocumentEditLine line;
+        line.itemId = m_lines->item(row, RowNumberColumn)->data(Qt::UserRole).toLongLong();
         auto *material = qobject_cast<QComboBox *>(m_lines->cellWidget(row, MaterialColumn));
         auto *effect = qobject_cast<QComboBox *>(m_lines->cellWidget(row, EffectColumn));
         auto *quantity = qobject_cast<QDoubleSpinBox *>(m_lines->cellWidget(row, QuantityColumn));

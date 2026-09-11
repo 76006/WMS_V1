@@ -30,9 +30,11 @@ private slots:
     void editPendingNotice();
     void viewHistoryNotice();
     void recordInspectionResult();
+    void editHistoryResult();
     void refreshNotices();
 
 private:
+    QWidget *activeDialogParent();
     qlonglong selectedNoticeId(QTableWidget *table) const;
     bool editNotice(qlonglong noticeId = 0);
     void populateTable(QTableWidget *table, const QStringList &statuses);

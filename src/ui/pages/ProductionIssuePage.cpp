@@ -18,6 +18,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -35,10 +36,20 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
 {
     setObjectName(QStringLiteral("pageRoot"));
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(12);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    auto *pageScroll = new QScrollArea(this);
+    pageScroll->setWidgetResizable(true);
+    pageScroll->setFrameShape(QFrame::NoFrame);
+    pageScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *pageBody = new QWidget(pageScroll);
+    pageBody->setObjectName(QStringLiteral("pageRoot"));
+    auto *pageLayout = new QVBoxLayout(pageBody);
+    pageLayout->setContentsMargins(20, 20, 20, 20);
+    pageLayout->setSpacing(12);
+    pageLayout->setSizeConstraint(QLayout::SetMinimumSize);
 
-    auto *panel = new QFrame(this);
+    auto *panel = new QFrame(pageBody);
     panel->setObjectName(QStringLiteral("panel"));
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(20, 18, 20, 20);
@@ -77,6 +88,11 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Outbound, panel);
     m_lines->setProductionUsageMode(true);
     m_lines->setProductionQuantity(m_plannedQuantity->value());
+    m_submitButton = new QPushButton(QStringLiteral("确认并领料"), m_lines);
+    m_submitButton->setProperty("primary", true);
+    m_submitButton->setFixedSize(110, 34);
+    m_submitButton->setEnabled(m_session.canPostProduction());
+    m_lines->addToolbarAction(m_submitButton);
     m_usageHint = new QLabel(
         QStringLiteral("领料明细默认保持为空。可点击“添加物料”逐项选择，也可点击“一键导入BOM用料”主动带出当前成品的全部末级用料；库存批次由用户指定。"),
         panel);
@@ -84,16 +100,9 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_usageHint->setWordWrap(true);
     panelLayout->addWidget(m_usageHint);
     panelLayout->addWidget(m_lines);
-    auto *actions = new QHBoxLayout;
-    actions->addStretch();
-    m_submitButton = new QPushButton(QStringLiteral("确认并领料"), panel);
-    m_submitButton->setProperty("primary", true);
-    m_submitButton->setEnabled(m_session.canPostProduction());
-    actions->addWidget(m_submitButton);
-    panelLayout->addLayout(actions);
-    root->addWidget(panel);
+    pageLayout->addWidget(panel);
 
-    auto *recentPanel = new QFrame(this);
+    auto *recentPanel = new QFrame(pageBody);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
@@ -111,11 +120,13 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     recentLayout->addWidget(m_recentTable);
-    root->addWidget(recentPanel, 1);
+    pageLayout->addWidget(recentPanel, 1);
+    pageScroll->setWidget(pageBody);
+    root->addWidget(pageScroll);
 
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
-            m_recentTable, QStringLiteral("近期生产领料单"), this);
+            m_recentTable, QStringLiteral("全部生产领料单"), this, [this] { refreshRecentDocuments(); });
     });
     connect(m_submitButton, &QPushButton::clicked, this, &ProductionIssuePage::submit);
     connect(m_plannedQuantity, qOverload<double>(&QDoubleSpinBox::valueChanged),
@@ -245,7 +256,8 @@ void ProductionIssuePage::refreshRecentDocuments()
         "SELECT d.id,d.document_no,d.document_date,p.batch_no,p.product_name,COUNT(i.id) "
         "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
         "JOIN business_document_items i ON i.document_id=d.id "
-        "WHERE d.document_type='SCLL' GROUP BY d.id ORDER BY d.id DESC LIMIT 20"));
+        "WHERE d.document_type='SCLL' GROUP BY d.id ORDER BY d.id DESC")
+        + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);

@@ -129,7 +129,7 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
 
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
-            m_recentTable, QStringLiteral("近期成品入库单"), this);
+            m_recentTable, QStringLiteral("全部成品入库单"), this, [this] { refreshRecentDocuments(); });
     });
     connect(m_runCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &FinishedGoodsInPage::loadRunDetails);
@@ -300,7 +300,8 @@ void FinishedGoodsInPage::refreshRecentDocuments()
         "SELECT d.id,d.document_no,d.document_date,p.batch_no,p.product_name,i.quantity "
         "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
         "JOIN business_document_items i ON i.document_id=d.id "
-        "WHERE d.document_type='CPRK' ORDER BY d.id DESC LIMIT 20"));
+        "WHERE d.document_type='CPRK' ORDER BY d.id DESC")
+        + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);

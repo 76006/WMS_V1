@@ -33,6 +33,7 @@
 #include <QTableView>
 #include <QTextEdit>
 #include <QTimeEdit>
+#include <QTimer>
 #include <QVariant>
 #include <QWidget>
 
@@ -117,6 +118,8 @@ qlonglong selectedBusinessDocumentId(QTableView *table)
 {
     if (!table || !table->model() || !table->currentIndex().isValid()) return 0;
     const int row = table->currentIndex().row();
+    if (table->isRowHidden(row) || !selectedRows(table).contains(row))
+        return 0;
     const QVariant idColumnProperty = table->property("businessDocumentIdColumn");
     const int idColumn = idColumnProperty.toInt();
     if (idColumnProperty.isValid() && idColumn >= 0
@@ -166,7 +169,9 @@ void TableExcelExport::install(QWidget *page, const QString &pageTitle)
 }
 
 void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
-                                       QWidget *dialogParent)
+                                       QWidget *dialogParent,
+                                       const std::function<void()> &reload,
+                                       const QList<FullScreenAction> &actions)
 {
     if (!table || table->property("tableFullScreenActive").toBool()) return;
     QPointer<QWidget> originalWindow = table->window();
@@ -178,6 +183,9 @@ void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
                                  QStringLiteral("当前表格不在可恢复的页面布局中。"));
         return;
     }
+    const auto *originalBox = qobject_cast<QBoxLayout *>(originalLayout.data());
+    const int originalStretch = originalBox ? originalBox->stretch(originalIndex) : 0;
+    const Qt::Alignment originalAlignment = originalLayout->itemAt(originalIndex)->alignment();
 
     QDialog fullScreen(dialogParent ? dialogParent->window() : table->window());
     fullScreen.setWindowTitle(QStringLiteral("%1（全屏）").arg(title));
@@ -197,37 +205,115 @@ void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
     toolbar->addWidget(heading);
     toolbar->addStretch();
     if (editButton) toolbar->addWidget(editButton);
+    QList<QPushButton *> actionButtons;
+    for (const auto &action : actions) {
+        auto *button = new QPushButton(action.text, &fullScreen);
+        toolbar->addWidget(button);
+        actionButtons.append(button);
+    }
     toolbar->addWidget(exitButton);
     root->addLayout(toolbar);
+    auto *searchBar = new QHBoxLayout;
+    auto *search = new QLineEdit(&fullScreen);
+    search->setPlaceholderText(QStringLiteral("输入单号等列表中显示的信息，检索当前清单全部历史记录"));
+    search->setClearButtonEnabled(true);
+    auto *count = new QLabel(&fullScreen);
+    auto *refreshButton = new QPushButton(QStringLiteral("刷新"), &fullScreen);
+    searchBar->addWidget(search, 1);
+    searchBar->addWidget(count);
+    searchBar->addWidget(refreshButton);
+    root->addLayout(searchBar);
 
     originalLayout->removeWidget(table);
     table->setProperty("tableFullScreenActive", true);
     table->setParent(&fullScreen);
     root->addWidget(table, 1);
     table->show();
-    qlonglong documentIdToEdit = 0;
+    const auto applyFilter = [table, search, count] {
+        if (!table->model()) return;
+        const QString keyword = search->text().trimmed();
+        int visible = 0;
+        for (int row = 0; row < table->model()->rowCount(); ++row) {
+            bool match = keyword.isEmpty();
+            for (int column = 0; !match && column < table->model()->columnCount(); ++column) {
+                if (!table->isColumnHidden(column))
+                    match = onlineCellValue(table, table->model()->index(row, column))
+                                .toString().contains(keyword, Qt::CaseInsensitive);
+            }
+            table->setRowHidden(row, !match);
+            if (match) ++visible;
+        }
+        if (table->currentIndex().isValid() && table->isRowHidden(table->currentIndex().row())) {
+            table->clearSelection();
+            table->setCurrentIndex(QModelIndex());
+        }
+        count->setText(QStringLiteral("显示 %1 / 共 %2 条").arg(visible).arg(table->model()->rowCount()));
+    };
+    const auto reloadAndFilter = [reload, applyFilter, table] {
+        if (reload) reload();
+        if (table->model()) {
+            while (table->model()->canFetchMore(QModelIndex()))
+                table->model()->fetchMore(QModelIndex());
+        }
+        applyFilter();
+    };
+    // Refreshes triggered by editing or double-click actions must retain the fullscreen search.
+    QTimer filterTimer(&fullScreen);
+    filterTimer.setSingleShot(true);
+    QObject::connect(&filterTimer, &QTimer::timeout, &fullScreen, applyFilter);
+    if (table->model()) {
+        const auto scheduleFilter = [&filterTimer] { filterTimer.start(0); };
+        QObject::connect(table->model(), &QAbstractItemModel::modelReset, &fullScreen, scheduleFilter);
+        QObject::connect(table->model(), &QAbstractItemModel::rowsInserted, &fullScreen, scheduleFilter);
+        QObject::connect(table->model(), &QAbstractItemModel::rowsRemoved, &fullScreen, scheduleFilter);
+        QObject::connect(table->model(), &QAbstractItemModel::dataChanged, &fullScreen, scheduleFilter);
+        QObject::connect(table->model(), &QAbstractItemModel::layoutChanged, &fullScreen, scheduleFilter);
+    }
+    QObject::connect(search, &QLineEdit::textChanged, &fullScreen, applyFilter);
+    QObject::connect(refreshButton, &QPushButton::clicked, &fullScreen, reloadAndFilter);
     if (editButton) {
         QObject::connect(editButton, &QPushButton::clicked, &fullScreen,
-                         [&fullScreen, table, &documentIdToEdit] {
-            documentIdToEdit = selectedBusinessDocumentId(table);
-            if (documentIdToEdit <= 0) {
+                         [&fullScreen, table, originalWindow, reloadAndFilter] {
+            const qlonglong documentId = selectedBusinessDocumentId(table);
+            if (documentId <= 0) {
                 QMessageBox::information(&fullScreen, QStringLiteral("请选择单据"),
                                          QStringLiteral("请先在表格中选中一行单据。"));
                 return;
             }
-            fullScreen.accept();
+            if (!originalWindow || !QMetaObject::invokeMethod(originalWindow.data(), "editDocumentById",
+                    Qt::DirectConnection, Q_ARG(qlonglong, documentId),
+                    Q_ARG(QWidget *, &fullScreen))) {
+                QMessageBox::warning(&fullScreen, QStringLiteral("无法修改"),
+                                     QStringLiteral("当前窗口没有可用的单据修改入口。"));
+                return;
+            }
+            reloadAndFilter();
+        });
+    }
+    for (int index = 0; index < actions.size(); ++index) {
+        const auto trigger = actions.at(index).trigger;
+        QObject::connect(actionButtons.at(index), &QPushButton::clicked, &fullScreen,
+                         [trigger, reloadAndFilter] {
+            if (trigger) trigger();
+            reloadAndFilter();
         });
     }
     QObject::connect(exitButton, &QPushButton::clicked, &fullScreen, &QDialog::accept);
+    reloadAndFilter();
     fullScreen.showFullScreen();
     fullScreen.exec();
 
+    if (table->model()) {
+        QObject::disconnect(table->model(), nullptr, &fullScreen, nullptr);
+        for (int row = 0; row < table->model()->rowCount(); ++row) table->setRowHidden(row, false);
+    }
+    filterTimer.stop();
     root->removeWidget(table);
     table->setProperty("tableFullScreenActive", false);
     if (originalParent && originalLayout) {
         table->setParent(originalParent);
         if (auto *box = qobject_cast<QBoxLayout *>(originalLayout.data()))
-            box->insertWidget(originalIndex, table);
+            box->insertWidget(originalIndex, table, originalStretch, originalAlignment);
         else
             originalLayout->addWidget(table);
         table->show();
@@ -235,11 +321,7 @@ void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
         table->setParent(dialogParent);
     }
 
-    if (documentIdToEdit > 0 && originalWindow) {
-        QMetaObject::invokeMethod(originalWindow.data(), "editDocumentById",
-                                  Qt::QueuedConnection,
-                                  Q_ARG(qlonglong, documentIdToEdit));
-    }
+    if (reload) reload();
 }
 
 void TableExcelExport::exportPage(QWidget *page, const QString &pageTitle, QWidget *dialogParent)

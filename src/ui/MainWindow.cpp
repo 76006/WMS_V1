@@ -161,8 +161,8 @@ void MainWindow::buildUi()
     add(QStringLiteral("物料维护"), m_materialPage);
     add(QStringLiteral("仓库/库位管理"), m_warehousePage);
     add(QStringLiteral("库存Excel导入"), m_excelImportPage, m_session.canManageWarehouse());
-    add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
     add(QStringLiteral("材料送检"), m_inspectionPage, m_session.canManageWarehouse());
+    add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
     add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
     add(QStringLiteral("发货查询"), m_shipmentQueryPage, m_session.canViewInventory());
     add(QStringLiteral("生产领料"), m_productionIssuePage, m_session.canPostProduction());
@@ -270,14 +270,14 @@ void MainWindow::refreshInventoryViews()
     m_finishedGoodsInPage->refreshReferenceData();
 }
 
-void MainWindow::editDocumentById(qlonglong documentId)
+void MainWindow::editDocumentById(qlonglong documentId, QWidget *dialogParent)
 {
     if (documentId <= 0) {
-        QMessageBox::information(this, QStringLiteral("无法修改"),
+        QMessageBox::information(dialogParent ? dialogParent : this, QStringLiteral("无法修改"),
                                  QStringLiteral("没有取得当前单据的编号。"));
         return;
     }
-    BusinessDocumentEditDialog dialog(m_database, m_session, documentId, this);
+    BusinessDocumentEditDialog dialog(m_database, m_session, documentId, dialogParent ? dialogParent : this);
     dialog.exec();
     if (dialog.saved()) refreshInventoryViews();
 }

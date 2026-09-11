@@ -362,8 +362,7 @@ void AttachmentPage::openAttachment()
             return;
         }
     }
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
-        QMessageBox::warning(this, QStringLiteral("打开失败"), QStringLiteral("系统没有可打开此文件类型的默认程序。"));
+    OfficeTemplateService::openFileWithApplicationChoice(path, this);
 }
 
 void AttachmentPage::upload()

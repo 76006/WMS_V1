@@ -114,7 +114,7 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     root->addWidget(recentPanel, 1);
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
-            m_transferTable, QStringLiteral("近期调拨单"), this);
+            m_transferTable, QStringLiteral("全部调拨单"), this, [this] { refreshTransfers(); });
     });
     connect(m_targetWarehouse, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &TransferPage::loadTargetLocations);
@@ -176,7 +176,8 @@ void TransferPage::refreshTransfers()
         "JOIN locations sl ON sl.id=i.location_id JOIN warehouses tw ON tw.id=i.target_warehouse_id "
         "JOIN locations tl ON tl.id=i.target_location_id "
         "WHERE d.document_type='DB' AND d.stock_direction='TRANSFER' "
-        "ORDER BY d.id DESC LIMIT 30"));
+        "ORDER BY d.id DESC")
+        + (m_transferTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 30")));
     while (query.next()) {
         const int row = m_transferTable->rowCount();
         m_transferTable->insertRow(row);

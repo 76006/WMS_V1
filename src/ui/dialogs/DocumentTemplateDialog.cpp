@@ -45,12 +45,12 @@ QList<FieldDefinition> fieldDefinitions(const OfficeTemplateDocument &document)
     case OfficeFormKind::DeliveryConfirmation:
         return {
             {QStringLiteral("customerCompany"), QStringLiteral("客户单位"), QString(), true},
-            {QStringLiteral("salesOrderNumber"), QStringLiteral("订单号"), QString(), false},
+            {QStringLiteral("salesOrderNumber"), QStringLiteral("订单号"), QString(), true},
             {QStringLiteral("destination"), QStringLiteral("收货地址"), QString(), true},
             {QStringLiteral("customerContact"), QStringLiteral("收货人"), QString(), true},
-            {QStringLiteral("customerPhone"), QStringLiteral("联系电话"), QString(), false},
-            {QStringLiteral("logisticsCompany"), QStringLiteral("物流公司"), QString(), false},
-            {QStringLiteral("trackingNumber"), QStringLiteral("运单号"), QString(), false}
+            {QStringLiteral("customerPhone"), QStringLiteral("联系电话"), QString(), true},
+            {QStringLiteral("logisticsCompany"), QStringLiteral("物流公司"), QString(), true},
+            {QStringLiteral("trackingNumber"), QStringLiteral("运单号"), QString(), true}
         };
     case OfficeFormKind::Inspection:
         return {
@@ -155,6 +155,14 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     m_lineTable->horizontalHeader()->setStretchLastSection(true);
     root->addWidget(m_lineTable, 1);
     populateLines();
+    if (m_document.kind == OfficeFormKind::DeliveryConfirmation) {
+        if (auto *orderEdit = m_fieldEdits.value(QStringLiteral("salesOrderNumber"), nullptr)) {
+            connect(orderEdit, &QLineEdit::textChanged, this, [this](const QString &orderNumber) {
+                for (int row = 0; row < m_lineTable->rowCount(); ++row)
+                    m_lineTable->item(row, 1)->setText(orderNumber.trimmed());
+            });
+        }
+    }
 
     auto *buttons = new QDialogButtonBox(this);
     auto *fullScreen = buttons->addButton(QStringLiteral("全屏显示"), QDialogButtonBox::ActionRole);
@@ -234,6 +242,10 @@ OfficeTemplateDocument DocumentTemplateDialog::document() const
     OfficeTemplateDocument result = m_document;
     for (auto it = m_fieldEdits.cbegin(); it != m_fieldEdits.cend(); ++it)
         result.fields.insert(it.key(), it.value()->text().trimmed());
+    if (result.kind == OfficeFormKind::DeliveryConfirmation) {
+        for (OfficeTemplateLine &line : result.lines)
+            line.orderNumber = result.fields.value(QStringLiteral("salesOrderNumber"));
+    }
     if (result.kind == OfficeFormKind::Inspection) {
         const QString orderNumber = result.fields.value(QStringLiteral("purchaseOrderNumber"));
         const QString supplier = result.fields.value(QStringLiteral("supplier"));

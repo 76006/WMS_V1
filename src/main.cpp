@@ -4,18 +4,129 @@
 #include "ui/LoginDialog.h"
 #include "ui/MainWindow.h"
 
+#include <QAbstractItemView>
+#include <QAbstractScrollArea>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
+#include <QComboBox>
+#include <QEvent>
 #include <QFile>
 #include <QMessageBox>
+#include <QScrollBar>
 #include <QSqlQuery>
+#include <QWheelEvent>
 #include <QtWebView/QtWebView>
+
+namespace {
+class TableWheelFilter final : public QObject
+{
+public:
+    explicit TableWheelFilter(QObject *parent = nullptr) : QObject(parent) {}
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() != QEvent::Wheel) return false;
+
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (!widget) return false;
+
+        bool insideValueEditor = false;
+        QAbstractItemView *table = nullptr;
+        for (QWidget *current = widget; current; current = current->parentWidget()) {
+            if (qobject_cast<QComboBox *>(current)
+                || qobject_cast<QAbstractSpinBox *>(current)) {
+                insideValueEditor = true;
+            }
+            if (auto *view = qobject_cast<QAbstractItemView *>(current)) {
+                table = view;
+                break;
+            }
+        }
+        if (!table) return false;
+
+        if (!table->property("wheelScrollConfigured").toBool()) {
+            table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+            table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+            table->setProperty("wheelScrollConfigured", true);
+        }
+
+        auto *wheel = static_cast<QWheelEvent *>(event);
+        const QPoint pixelDelta = wheel->pixelDelta();
+        const QPoint angleDelta = wheel->angleDelta();
+        const bool horizontal = wheel->modifiers().testFlag(Qt::ShiftModifier)
+            || qAbs(pixelDelta.x()) > qAbs(pixelDelta.y())
+            || (pixelDelta.isNull() && qAbs(angleDelta.x()) > qAbs(angleDelta.y()));
+
+        QScrollBar *scrollBar = horizontal ? table->horizontalScrollBar()
+                                           : table->verticalScrollBar();
+        int delta = 0;
+        bool pixelBased = false;
+        if (horizontal) {
+            if (pixelDelta.x() != 0) {
+                delta = pixelDelta.x();
+                pixelBased = true;
+            } else if (wheel->modifiers().testFlag(Qt::ShiftModifier)
+                       && pixelDelta.y() != 0) {
+                delta = pixelDelta.y();
+                pixelBased = true;
+            } else {
+                delta = angleDelta.x() != 0 ? angleDelta.x() : angleDelta.y();
+            }
+        } else if (pixelDelta.y() != 0) {
+            delta = pixelDelta.y();
+            pixelBased = true;
+        } else {
+            delta = angleDelta.y();
+        }
+
+        // 内层明细表到达上下边界后，把滚轮继续交给外层页面滚动区，
+        // 避免低分辨率或高缩放下表格底部被页面裁切而无法看到最后一行。
+        const bool towardMaximum = delta < 0;
+        const bool atInnerBoundary = delta != 0
+            && ((towardMaximum && scrollBar->value() >= scrollBar->maximum())
+                || (!towardMaximum && scrollBar->value() <= scrollBar->minimum()));
+        if (!horizontal && atInnerBoundary) {
+            for (QWidget *current = table->parentWidget(); current;
+                 current = current->parentWidget()) {
+                auto *outerArea = qobject_cast<QAbstractScrollArea *>(current);
+                if (!outerArea) continue;
+                QScrollBar *outerBar = outerArea->verticalScrollBar();
+                const bool outerCanScroll = towardMaximum
+                    ? outerBar->value() < outerBar->maximum()
+                    : outerBar->value() > outerBar->minimum();
+                if (!outerCanScroll) continue;
+                const int step = qMax(24, outerBar->singleStep() * 3);
+                outerBar->setValue(outerBar->value() + (towardMaximum ? step : -step));
+                wheel->accept();
+                return true;
+            }
+        }
+
+        // 非编辑区域保留 Qt 原生的纵向滚动，只补充横向滚动支持。
+        if (!insideValueEditor && !horizontal) return false;
+
+        if (delta != 0) {
+            int distance = pixelBased
+                ? delta
+                : (delta * qMax(1, scrollBar->singleStep()) * 3) / 120;
+            if (distance == 0) distance = delta > 0 ? 1 : -1;
+            scrollBar->setValue(scrollBar->value() - distance);
+        }
+        wheel->accept();
+        return true;
+    }
+};
+}
 
 int main(int argc, char *argv[])
 {
     QtWebView::initialize();
     QApplication application(argc, argv);
+    TableWheelFilter tableWheelFilter(&application);
+    application.installEventFilter(&tableWheelFilter);
     QCoreApplication::setOrganizationName(QStringLiteral("IceBeauty"));
     QCoreApplication::setApplicationName(QStringLiteral("IceBeautyWms"));
     QCoreApplication::setApplicationVersion(QStringLiteral("1.1.0"));

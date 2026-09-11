@@ -3,6 +3,7 @@
 #include "services/InspectionService.h"
 #include "services/OfficeTemplateService.h"
 #include "ui/widgets/ComboBoxSearch.h"
+#include "ui/widgets/TableExcelExport.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -576,9 +577,11 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     m_editPendingButton = new QPushButton(QStringLiteral("修改通知单"), panel);
     m_recordResultButton = new QPushButton(QStringLiteral("录入/修改检验结果"), panel);
     auto *openPendingNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
+    auto *fullScreenPending = new QPushButton(QStringLiteral("全屏显示"), panel);
     pendingToolbar->addWidget(m_editPendingButton);
     pendingToolbar->addWidget(m_recordResultButton);
     pendingToolbar->addWidget(openPendingNotice);
+    pendingToolbar->addWidget(fullScreenPending);
     layout->addLayout(pendingToolbar);
     m_pendingTable = new QTableWidget(0, 9, panel);
     m_pendingTable->setProperty("excelExportTitle", QStringLiteral("在检列表"));
@@ -598,10 +601,12 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     auto *historyResult = new QPushButton(QStringLiteral("修改检验结果"), panel);
     auto *openHistoryNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
     auto *openInspectionAttachment = new QPushButton(QStringLiteral("打开检验附件"), panel);
+    auto *fullScreenHistory = new QPushButton(QStringLiteral("全屏显示"), panel);
     historyToolbar->addWidget(m_viewHistoryButton);
     historyToolbar->addWidget(historyResult);
     historyToolbar->addWidget(openHistoryNotice);
     historyToolbar->addWidget(openInspectionAttachment);
+    historyToolbar->addWidget(fullScreenHistory);
     layout->addLayout(historyToolbar);
     m_historyTable = new QTableWidget(0, 10, panel);
     m_historyTable->setProperty("excelExportTitle", QStringLiteral("已检及历史通知单"));
@@ -622,20 +627,11 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     connect(m_editPendingButton, &QPushButton::clicked, this, &InspectionPage::editPendingNotice);
     connect(m_recordResultButton, &QPushButton::clicked, this, &InspectionPage::recordInspectionResult);
     connect(m_viewHistoryButton, &QPushButton::clicked, this, &InspectionPage::viewHistoryNotice);
-    connect(historyResult, &QPushButton::clicked, this, [this] {
-        const qlonglong id = selectedNoticeId(m_historyTable);
-        if (id <= 0) {
-            QMessageBox::information(this, QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条历史通知单。"));
-            return;
-        }
-        ResultDialog dialog(m_database, m_session, id, this);
-        dialog.exec();
-        if (dialog.saved()) { refreshNotices(); emit inspectionChanged(); }
-    });
+    connect(historyResult, &QPushButton::clicked, this, &InspectionPage::editHistoryResult);
     const auto openNoticeFile = [this](QTableWidget *table, bool templateFile) {
         const qlonglong id = selectedNoticeId(table);
         if (id <= 0) {
-            QMessageBox::information(this, QStringLiteral("请选择通知单"),
+            QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"),
                                      QStringLiteral("请先选择一条送检通知单。"));
             return;
         }
@@ -651,7 +647,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
                 "WHERE n.id=? AND a.is_deleted=0"));
         query.addBindValue(id);
         if (!query.exec() || !query.next()) {
-            QMessageBox::information(this, QStringLiteral("没有可打开的文件"),
+            QMessageBox::information(activeDialogParent(), QStringLiteral("没有可打开的文件"),
                                      templateFile ? QStringLiteral("该通知单Excel尚未成功保存。")
                                                   : QStringLiteral("该通知单尚未上传检验附件。"));
             return;
@@ -665,12 +661,11 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
             QStringLiteral("%1_%2").arg(QUuid::createUuid().toString(QUuid::WithoutBraces), name));
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size()) {
-            QMessageBox::warning(this, QStringLiteral("打开失败"), file.errorString());
+            QMessageBox::warning(activeDialogParent(), QStringLiteral("打开失败"), file.errorString());
             return;
         }
         file.close();
-        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
-            QMessageBox::warning(this, QStringLiteral("打开失败"), QStringLiteral("Windows 无法打开该文件。"));
+        OfficeTemplateService::openFileWithApplicationChoice(path, activeDialogParent());
     };
     connect(openPendingNotice, &QPushButton::clicked, this,
             [openNoticeFile, this] { openNoticeFile(m_pendingTable, true); });
@@ -678,6 +673,23 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
             [openNoticeFile, this] { openNoticeFile(m_historyTable, true); });
     connect(openInspectionAttachment, &QPushButton::clicked, this,
             [openNoticeFile, this] { openNoticeFile(m_historyTable, false); });
+    connect(fullScreenPending, &QPushButton::clicked, this, [this, openNoticeFile] {
+        TableExcelExport::fullScreenTable(m_pendingTable, QStringLiteral("全部在检通知单"), this,
+            [this] { refreshNotices(); }, {
+                {QStringLiteral("修改通知单"), [this] { editPendingNotice(); }},
+                {QStringLiteral("录入/修改检验结果"), [this] { recordInspectionResult(); }},
+                {QStringLiteral("打开通知单Excel"), [this, openNoticeFile] { openNoticeFile(m_pendingTable, true); }}
+            });
+    });
+    connect(fullScreenHistory, &QPushButton::clicked, this, [this, openNoticeFile] {
+        TableExcelExport::fullScreenTable(m_historyTable, QStringLiteral("全部已检及历史通知单"), this,
+            [this] { refreshNotices(); }, {
+                {QStringLiteral("查看/修改通知单"), [this] { viewHistoryNotice(); }},
+                {QStringLiteral("修改检验结果"), [this] { editHistoryResult(); }},
+                {QStringLiteral("打开通知单Excel"), [this, openNoticeFile] { openNoticeFile(m_historyTable, true); }},
+                {QStringLiteral("打开检验附件"), [this, openNoticeFile] { openNoticeFile(m_historyTable, false); }}
+            });
+    });
     connect(m_pendingTable, &QTableWidget::cellDoubleClicked, this,
             [this](int, int) { editPendingNotice(); });
     connect(m_historyTable, &QTableWidget::cellDoubleClicked, this,
@@ -693,12 +705,21 @@ void InspectionPage::refreshReferenceData()
 qlonglong InspectionPage::selectedNoticeId(QTableWidget *table) const
 {
     if (!table || table->currentRow() < 0 || !table->item(table->currentRow(), 0)) return 0;
+    if (table->isRowHidden(table->currentRow()) || table->selectedItems().isEmpty()) return 0;
     return table->item(table->currentRow(), 0)->data(Qt::UserRole).toLongLong();
+}
+
+QWidget *InspectionPage::activeDialogParent()
+{
+    for (QTableWidget *table : {m_pendingTable, m_historyTable}) {
+        if (table && table->property("tableFullScreenActive").toBool()) return table->window();
+    }
+    return this;
 }
 
 bool InspectionPage::editNotice(qlonglong noticeId)
 {
-    NoticeEditDialog dialog(m_database, m_session, noticeId, this);
+    NoticeEditDialog dialog(m_database, m_session, noticeId, activeDialogParent());
     dialog.exec();
     if (!dialog.saved()) return false;
     refreshNotices();
@@ -715,7 +736,7 @@ void InspectionPage::editPendingNotice()
 {
     const qlonglong id = selectedNoticeId(m_pendingTable);
     if (id <= 0) {
-        QMessageBox::information(this, QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条在检通知单。"));
+        QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条在检通知单。"));
         return;
     }
     editNotice(id);
@@ -725,7 +746,7 @@ void InspectionPage::viewHistoryNotice()
 {
     const qlonglong id = selectedNoticeId(m_historyTable);
     if (id <= 0) {
-        QMessageBox::information(this, QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条历史通知单。"));
+        QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条历史通知单。"));
         return;
     }
     editNotice(id);
@@ -735,10 +756,26 @@ void InspectionPage::recordInspectionResult()
 {
     const qlonglong id = selectedNoticeId(m_pendingTable);
     if (id <= 0) {
-        QMessageBox::information(this, QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条在检通知单。"));
+        QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条在检通知单。"));
         return;
     }
-    ResultDialog dialog(m_database, m_session, id, this);
+    ResultDialog dialog(m_database, m_session, id, activeDialogParent());
+    dialog.exec();
+    if (dialog.saved()) {
+        refreshNotices();
+        emit inspectionChanged();
+    }
+}
+
+void InspectionPage::editHistoryResult()
+{
+    const qlonglong id = selectedNoticeId(m_historyTable);
+    if (id <= 0) {
+        QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"),
+                                 QStringLiteral("请先选择一条历史通知单。"));
+        return;
+    }
+    ResultDialog dialog(m_database, m_session, id, activeDialogParent());
     dialog.exec();
     if (dialog.saved()) {
         refreshNotices();
@@ -752,8 +789,9 @@ void InspectionPage::populateTable(QTableWidget *table, const QStringList &statu
     InspectionService service(m_database, m_session.userId);
     QList<InspectionNotice> notices;
     QString error;
-    if (!service.listNotices(statuses, m_searchEdit->text(), &notices, &error)) {
-        QMessageBox::warning(this, QStringLiteral("查询送检通知失败"), error);
+    const QString keyword = table->property("tableFullScreenActive").toBool() ? QString() : m_searchEdit->text();
+    if (!service.listNotices(statuses, keyword, &notices, &error)) {
+        QMessageBox::warning(activeDialogParent(), QStringLiteral("查询送检通知失败"), error);
         return;
     }
     const bool pending = table == m_pendingTable;

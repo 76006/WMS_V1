@@ -323,7 +323,7 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                                     ? normalizedText(inspectionNotice.inspectionNumber)
                                     : (request.inspection.required
                                            ? normalizedText(request.inspection.inspectionNumber)
-                                           : QString()));
+                                           : QStringLiteral("")));
         inspection.addBindValue(request.inspectionNoticeId > 0
                                     ? inspectionNotice.inspectionDate.toString(Qt::ISODate)
                                     : (request.inspection.required
@@ -333,14 +333,14 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                                     ? normalizedText(inspectionNotice.inspectorName)
                                     : (request.inspection.required
                                            ? normalizedText(request.inspection.inspectorName)
-                                           : QString()));
+                                           : QStringLiteral("")));
         inspection.addBindValue(inspected ? QStringLiteral("QUALIFIED")
                                           : QStringLiteral("NOT_REQUIRED"));
         inspection.addBindValue(request.inspectionNoticeId > 0
                                     ? normalizedText(inspectionNotice.conclusion)
                                     : (request.inspection.required
                                            ? normalizedText(request.inspection.conclusion)
-                                           : QString()));
+                                           : QStringLiteral("")));
         inspection.addBindValue(inspectionAttachmentId);
         if (!inspection.exec()) {
             const QString detail = inspection.lastError().text();

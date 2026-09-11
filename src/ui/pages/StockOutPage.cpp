@@ -19,6 +19,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStringList>
@@ -34,9 +35,19 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
 {
     setObjectName(QStringLiteral("pageRoot"));
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(12);
-    auto *panel = new QFrame(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    auto *pageScroll = new QScrollArea(this);
+    pageScroll->setWidgetResizable(true);
+    pageScroll->setFrameShape(QFrame::NoFrame);
+    pageScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *pageBody = new QWidget(pageScroll);
+    pageBody->setObjectName(QStringLiteral("pageRoot"));
+    auto *pageLayout = new QVBoxLayout(pageBody);
+    pageLayout->setContentsMargins(20, 20, 20, 20);
+    pageLayout->setSpacing(12);
+    pageLayout->setSizeConstraint(QLayout::SetMinimumSize);
+    auto *panel = new QFrame(pageBody);
     panel->setObjectName(QStringLiteral("panel"));
     auto *layout = new QVBoxLayout(panel);
     layout->setContentsMargins(20, 18, 20, 20);
@@ -102,16 +113,14 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     layout->addWidget(m_salesDetailsGroup);
 
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Outbound, panel);
-    layout->addWidget(m_lines);
-    auto *actions = new QHBoxLayout;
-    actions->addStretch();
-    m_submitButton = new QPushButton(QStringLiteral("确认并出库"), panel);
+    m_submitButton = new QPushButton(QStringLiteral("确认并出库"), m_lines);
     m_submitButton->setProperty("primary", true);
-    actions->addWidget(m_submitButton);
-    layout->addLayout(actions);
-    root->addWidget(panel);
+    m_submitButton->setFixedSize(110, 34);
+    m_lines->addToolbarAction(m_submitButton);
+    layout->addWidget(m_lines);
+    pageLayout->addWidget(panel);
 
-    auto *recentPanel = new QFrame(this);
+    auto *recentPanel = new QFrame(pageBody);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
@@ -130,11 +139,13 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     recentLayout->addWidget(m_recentTable);
-    root->addWidget(recentPanel, 1);
+    pageLayout->addWidget(recentPanel, 1);
+    pageScroll->setWidget(pageBody);
+    root->addWidget(pageScroll);
 
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
-            m_recentTable, QStringLiteral("近期普通出库单"), this);
+            m_recentTable, QStringLiteral("全部普通出库单"), this, [this] { refreshRecentDocuments(); });
     });
     connect(m_submitButton, &QPushButton::clicked, this, &StockOutPage::submit);
     connect(m_typeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -183,7 +194,8 @@ void StockOutPage::refreshRecentDocuments()
         "FROM business_documents d LEFT JOIN business_document_items i ON i.document_id=d.id "
         "LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
         "WHERE d.stock_direction='OUT' AND d.document_type IN ('XSCK','WXLY','YPLY','QTCK') "
-        "GROUP BY d.id ORDER BY d.id DESC LIMIT 20"));
+        "GROUP BY d.id ORDER BY d.id DESC")
+        + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);
@@ -313,6 +325,15 @@ void StockOutPage::submit()
                                  QStringLiteral("送货确认单的送货日期无效，请重新选择送货日期。"));
             return;
         }
+        // 最后确认的在线表单是发货资料的最终值，回填页面并统一两张表单。
+        m_customerCompanyEdit->setText(deliveryForm.fields.value(QStringLiteral("customerCompany")));
+        m_destinationEdit->setText(deliveryForm.fields.value(QStringLiteral("destination")));
+        m_customerContactEdit->setText(deliveryForm.fields.value(QStringLiteral("customerContact")));
+        m_customerPhoneEdit->setText(deliveryForm.fields.value(QStringLiteral("customerPhone")));
+        m_salesOrderEdit->setText(deliveryForm.fields.value(QStringLiteral("salesOrderNumber")));
+        m_logisticsCompanyEdit->setText(deliveryForm.fields.value(QStringLiteral("logisticsCompany")));
+        m_trackingNumberEdit->setText(deliveryForm.fields.value(QStringLiteral("trackingNumber")));
+        outboundForm.fields = deliveryForm.fields;
     }
 
     if (QMessageBox::question(this, QStringLiteral("确认出库"),

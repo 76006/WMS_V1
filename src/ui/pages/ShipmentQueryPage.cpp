@@ -1,6 +1,7 @@
 #include "ui/pages/ShipmentQueryPage.h"
 
 #include "ui/widgets/ComboBoxSearch.h"
+#include "services/OfficeTemplateService.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -369,10 +370,7 @@ void ShipmentQueryPage::openSelectedDeliveryForm()
         return;
     }
     file.close();
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
-        QMessageBox::warning(this, QStringLiteral("打开模板失败"),
-                             QStringLiteral("Windows 无法打开已保存的送货确认单。"));
-    }
+    OfficeTemplateService::openFileWithApplicationChoice(path, this);
 }
 
 void ShipmentQueryPage::loadShipmentDetails(qlonglong documentId)

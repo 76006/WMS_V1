@@ -44,7 +44,7 @@ private slots:
     void showPage(int index);
     void refreshCurrentPage();
     void refreshInventoryViews();
-    void editDocumentById(qlonglong documentId);
+    void editDocumentById(qlonglong documentId, QWidget *dialogParent);
 
 private:
     void buildUi();

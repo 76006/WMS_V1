@@ -9,6 +9,7 @@
 
 class QComboBox;
 class QDialog;
+class QHBoxLayout;
 class QPushButton;
 class QTableWidget;
 
@@ -31,6 +32,7 @@ public:
     // 由入库人员最终确认；本接口不会提交库存，也不会绕过 lines() 的完整校验。
     bool setInboundMaterials(const QList<StockMovementRequest> &materials,
                              QString *errorMessage = nullptr);
+    void addToolbarAction(QWidget *action);
 
 public slots:
     void refreshReferenceData();
@@ -72,6 +74,7 @@ private:
     QString m_materialCategoryFilter;
     QDate m_documentDate = QDate::currentDate();
     QTableWidget *m_table = nullptr;
+    QHBoxLayout *m_toolbarLayout = nullptr;
     QPushButton *m_importProductionBomButton = nullptr;
     QPushButton *m_fullScreenButton = nullptr;
     QDialog *m_fullScreenDialog = nullptr;

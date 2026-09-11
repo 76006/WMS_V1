@@ -15,6 +15,7 @@
 #include <QMessageBox>
 #include <QPair>
 #include <QProcess>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
@@ -32,6 +33,73 @@ namespace {
 void setError(QString *target, const QString &message)
 {
     if (target) *target = message;
+}
+
+bool isSpreadsheetFile(const QString &path)
+{
+    static const QSet<QString> suffixes = {
+        QStringLiteral("xls"), QStringLiteral("xlsx"), QStringLiteral("xlsm"),
+        QStringLiteral("xlsb"), QStringLiteral("csv"), QStringLiteral("ods")};
+    return suffixes.contains(QFileInfo(path).suffix().trimmed().toLower());
+}
+
+QString powerShellLiteral(QString value)
+{
+    value.replace(QLatin1Char('\''), QStringLiteral("''"));
+    return QLatin1Char('\'') + value + QLatin1Char('\'');
+}
+
+bool launchSpreadsheetEngine(const QStringList &programmaticIds,
+                             const QString &executableName,
+                             const QString &filePath,
+                             QString *errorMessage)
+{
+    QStringList quotedIds;
+    for (const QString &id : programmaticIds) quotedIds.append(powerShellLiteral(id));
+    const QString script = QStringLiteral(
+        "$ErrorActionPreference='Stop';$exeName=%2;$target=%3;$exe=$null;$messages=@();"
+        "$keys=@('Registry::HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\'+$exeName,"
+        "'Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\'+$exeName,"
+        "'Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\'+$exeName);"
+        "foreach($key in $keys){try{$candidate=(Get-Item -LiteralPath $key).GetValue('');"
+        "if(Test-Path -LiteralPath $candidate){$exe=$candidate;break}}catch{}};"
+        "if($null -eq $exe){$command=Get-Command $exeName -ErrorAction SilentlyContinue;"
+        "if($null -ne $command){$exe=$command.Source}};"
+        "if($null -eq $exe){foreach($id in @(%1)){$app=$null;try{"
+        "$app=New-Object -ComObject $id;$candidate='';"
+        "try{$candidate=[string]$app.FullName}catch{};"
+        "if([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate)){"
+        "try{$candidate=Join-Path ([string]$app.Path) $exeName}catch{}};"
+        "try{$app.Quit()}catch{};if(Test-Path -LiteralPath $candidate){$exe=$candidate;break}}"
+        "catch{$messages+=($id+'：'+$_.Exception.Message);if($null -ne $app){try{$app.Quit()}catch{}}}}};"
+        "if($null -eq $exe){throw (($messages -join [Environment]::NewLine)+' 未找到 '+$exeName)};"
+        "Start-Process -FilePath $exe -ArgumentList ('\"'+$target+'\"')")
+                               .arg(quotedIds.join(QLatin1Char(',')),
+                                    powerShellLiteral(executableName),
+                                    powerShellLiteral(QDir::toNativeSeparators(filePath)));
+    QProcess process;
+    process.setProgram(QStringLiteral("powershell.exe"));
+    process.setArguments({QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"),
+                          QStringLiteral("-STA"), QStringLiteral("-NonInteractive"),
+                          QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
+                          QStringLiteral("-Command"), script});
+    process.start();
+    if (!process.waitForStarted(10000)) {
+        setError(errorMessage, QStringLiteral("无法启动 Windows 表格打开组件：%1")
+                                   .arg(process.errorString()));
+        return false;
+    }
+    if (!process.waitForFinished(30000)) {
+        process.kill();
+        process.waitForFinished();
+        setError(errorMessage, QStringLiteral("打开表格超时，请关闭软件中的弹窗后重试。"));
+        return false;
+    }
+    if (process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) return true;
+    const QString details = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+    setError(errorMessage, details.isEmpty() ? QStringLiteral("所选表格软件没有安装或无法启动。")
+                                             : details);
+    return false;
 }
 
 QString formCode(OfficeFormKind kind)
@@ -510,14 +578,51 @@ bool OfficeTemplateService::openPreview(const OfficeTemplateDocument &document, 
         if (parent) QMessageBox::warning(parent, QStringLiteral("模板预览失败"), error);
         return false;
     }
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
-        if (parent) {
-            QMessageBox::warning(parent, QStringLiteral("无法打开模板"),
-                                 QStringLiteral("模板已生成，但 Windows 无法打开：%1").arg(path));
-        }
+    return openFileWithApplicationChoice(path, parent);
+}
+
+bool OfficeTemplateService::openFileWithApplicationChoice(const QString &filePath, QWidget *parent)
+{
+    const QFileInfo file(filePath);
+    if (!file.isFile()) {
+        if (parent) QMessageBox::warning(parent, QStringLiteral("无法打开文件"),
+                                         QStringLiteral("文件不存在：%1").arg(filePath));
         return false;
     }
-    return true;
+    if (!isSpreadsheetFile(filePath)) {
+        if (QDesktopServices::openUrl(QUrl::fromLocalFile(filePath))) return true;
+        if (parent) QMessageBox::warning(parent, QStringLiteral("无法打开文件"),
+                                         QStringLiteral("Windows 没有可打开此文件类型的程序。"));
+        return false;
+    }
+
+    QMessageBox choice(parent);
+    choice.setWindowTitle(QStringLiteral("选择表格软件"));
+    choice.setIcon(QMessageBox::Question);
+    choice.setText(QStringLiteral("请选择用于打开该表格的软件：\n%1").arg(file.fileName()));
+    auto *wps = choice.addButton(QStringLiteral("WPS 表格"), QMessageBox::AcceptRole);
+    auto *excel = choice.addButton(QStringLiteral("Microsoft Excel"), QMessageBox::AcceptRole);
+    auto *cancel = choice.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    choice.setDefaultButton(wps);
+    choice.setEscapeButton(cancel);
+    choice.exec();
+    if (choice.clickedButton() == cancel || !choice.clickedButton()) return true;
+    if (choice.clickedButton() != wps && choice.clickedButton() != excel) return true;
+
+    const bool useWps = choice.clickedButton() == wps;
+    QString error;
+    const bool opened = launchSpreadsheetEngine(
+        useWps ? QStringList{QStringLiteral("Ket.Application"), QStringLiteral("ET.Application")}
+               : QStringList{QStringLiteral("Excel.Application")},
+        useWps ? QStringLiteral("et.exe") : QStringLiteral("excel.exe"),
+        filePath, &error);
+    if (!opened && parent) {
+        QMessageBox::warning(parent, QStringLiteral("无法使用所选软件打开"),
+                             QStringLiteral("无法使用 %1 打开表格。请确认该软件已正常安装。\n\n%2")
+                                 .arg(useWps ? QStringLiteral("WPS 表格")
+                                             : QStringLiteral("Microsoft Excel"), error));
+    }
+    return opened;
 }
 
 bool OfficeTemplateService::hasIncompleteDocumentForms(QSqlDatabase database, qlonglong documentId)
@@ -1043,8 +1148,8 @@ bool OfficeTemplateService::persistDocumentForm(QSqlDatabase database,
     }
 
     // 自动打开失败只报告，不改变已经完成的表单状态。
-    if (openArchivedFile && !QDesktopServices::openUrl(QUrl::fromLocalFile(archivedPath))) {
-        setError(errorMessage, QStringLiteral("表单已保存，但 Windows 无法自动打开：%1")
+    if (openArchivedFile && !openFileWithApplicationChoice(archivedPath)) {
+        setError(errorMessage, QStringLiteral("表单已保存，但所选表格软件无法打开：%1")
                                    .arg(QDir::toNativeSeparators(archivedPath)));
         return false;
     }
@@ -1084,8 +1189,9 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
     QSqlQuery lines(database);
     lines.prepare(QStringLiteral(
         "SELECT m.code,m.name,m.specification,m.unit,m.unit_usage,i.quantity,i.batch_no,i.notes,"
-        "GROUP_CONCAT(DISTINCT sn.serial_no) "
+        "GROUP_CONCAT(DISTINCT sn.serial_no),source.quantity "
         "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
+        "LEFT JOIN business_document_items source ON source.id=i.source_item_id "
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id "
         "LEFT JOIN inventory_ledger_serials x ON x.ledger_id=l.id "
         "LEFT JOIN serial_numbers sn ON sn.id=x.serial_id WHERE i.document_id=? "
@@ -1107,6 +1213,19 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         line.batchNo = lines.value(6).toString();
         line.notes = lines.value(7).toString();
         line.serialNumbers = lines.value(8).toString().replace(QLatin1Char(','), QStringLiteral("、"));
+        const QString type = header.value(1).toString().trimmed().toUpper();
+        if (type == QStringLiteral("SCTL")) {
+            if (lines.value(9).isNull()) {
+                if (errors) errors->append(QStringLiteral("退料物料 %1 缺少原领料明细关联，已保留原表单，请先修正来源。")
+                                               .arg(line.materialCode));
+                return false;
+            }
+            line.returnQuantity = line.quantity;
+            line.quantity = lines.value(9).toDouble();
+        }
+        if ((type == QStringLiteral("SCLL") || type == QStringLiteral("SCTL"))
+            && header.value(18).toDouble() > 0.0)
+            line.unitUsage = line.quantity / header.value(18).toDouble();
         materialRows.append(line);
     }
     if (materialRows.isEmpty()) {
@@ -1145,6 +1264,18 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
                && documentType != QStringLiteral("CX")) {
         recognizedDocumentType = false;
     }
+    // 旧版入库送检仍使用业务单据附件，不能当成不再适用的表单清除。
+    QSqlQuery legacyInspection(database);
+    legacyInspection.prepare(QStringLiteral(
+        "SELECT inspection_no,inspection_date FROM inbound_inspection_details WHERE document_id=? "
+        "AND requires_inspection=1 AND inspection_notice_id IS NULL"));
+    legacyInspection.addBindValue(documentId);
+    if (!legacyInspection.exec()) {
+        if (errors) errors->append(QStringLiteral("读取历史送检资料失败：%1").arg(legacyInspection.lastError().text()));
+        return false;
+    }
+    const bool hasLegacyInspection = legacyInspection.next();
+    if (hasLegacyInspection) desiredKinds.append(formCode(OfficeFormKind::Inspection));
     if (recognizedDocumentType) {
         for (int index = records.size() - 1; index >= 0; --index) {
             if (desiredKinds.contains(records.at(index).first)) continue;
@@ -1189,6 +1320,9 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         if (!documentFromPayload(record.second, &document, &parseError)) {
             document.kind = kind;
         }
+        const auto originalFields = document.fields;
+        const QString originalFormNumber = document.documentNumber;
+        const QDate originalFormDate = document.documentDate;
         document.kind = kind;
         document.documentNumber = header.value(0).toString();
         document.documentDate = QDate::fromString(header.value(2).toString(), Qt::ISODate);
@@ -1212,6 +1346,23 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         document.fields.insert(QStringLiteral("productModel"), header.value(17).toString());
         document.fields.insert(QStringLiteral("plannedQuantity"),
                                QString::number(header.value(18).toDouble(), 'g', 12));
+        if (kind == OfficeFormKind::Inspection && hasLegacyInspection) {
+            // 送检单保留自己的编号、日期和委托信息，不替换成入库单的表头。
+            document.fields = originalFields;
+            document.documentNumber = legacyInspection.value(0).toString();
+            if (document.documentNumber.trimmed().isEmpty()) document.documentNumber = originalFormNumber;
+            const QDate inspectionDate = QDate::fromString(legacyInspection.value(1).toString(), Qt::ISODate);
+            if (inspectionDate.isValid()) document.documentDate = inspectionDate;
+            else if (originalFormDate.isValid()) document.documentDate = originalFormDate;
+            if (!document.fields.contains(QStringLiteral("entrustedBy")))
+                document.fields.insert(QStringLiteral("entrustedBy"), header.value(3).toString());
+            if (!document.fields.contains(QStringLiteral("supplier")))
+                document.fields.insert(QStringLiteral("supplier"), header.value(5).toString());
+            if (!document.fields.contains(QStringLiteral("notificationDepartment")))
+                document.fields.insert(QStringLiteral("notificationDepartment"), QStringLiteral("检验部"));
+            if (!document.fields.contains(QStringLiteral("arrivalDate")))
+                document.fields.insert(QStringLiteral("arrivalDate"), document.documentDate.toString(Qt::ISODate));
+        }
         document.lines = materialRows;
         for (OfficeTemplateLine &line : document.lines) {
             if (kind == OfficeFormKind::DeliveryConfirmation)

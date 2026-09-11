@@ -29,6 +29,27 @@ QString normalized(const QString &value)
     return result.isNull() ? QString::fromLatin1("", 0) : result;
 }
 
+QString revisedLedgerTime(QString value, const QDate &oldDate, const QDate &newDate)
+{
+    // SQLite 的空格分隔时间和 Qt 的 ISO 时间都按同一种精度解析、保存。
+    if (value.size() > 10 && value.at(10) == QLatin1Char(' ')) value[10] = QLatin1Char('T');
+    QDateTime time = QDateTime::fromString(value, Qt::ISODateWithMs);
+    if (!time.isValid()) time = QDateTime::currentDateTime();
+    time = time.toLocalTime();
+    if (oldDate != newDate) time.setDate(newDate);
+    return time.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+}
+
+QString ledgerTimeOrder(const QString &column)
+{
+    // SQLite 默认时间是不带时区的本地时间；旧版 ISO 流水可能带 Z/偏移量。
+    // 只对显式带时区的记录转换到本地时间，避免同一天的流水被平移八小时。
+    return QStringLiteral(
+        "strftime('%Y-%m-%d %H:%M:%f',%1,CASE WHEN substr(%1,-1)='Z' "
+        "OR instr(substr(%1,20),'+')>0 OR instr(substr(%1,20),'-')>0 "
+        "THEN 'localtime' ELSE '+0 seconds' END)").arg(column);
+}
+
 QString placeholders(int count)
 {
     return QStringList(count, QStringLiteral("?")).join(QLatin1Char(','));
@@ -212,7 +233,8 @@ bool rebuildBalances(QSqlDatabase database, QString *errorMessage)
     QSqlQuery ledger(database);
     if (!ledger.exec(QStringLiteral(
             "SELECT id,material_id,warehouse_id,location_id,batch_no,quantity_in,quantity_out "
-            "FROM inventory_ledger ORDER BY occurred_at,id"))) {
+            "FROM inventory_ledger ORDER BY %1,id")
+                         .arg(ledgerTimeOrder(QStringLiteral("occurred_at"))))) {
         setError(errorMessage, QStringLiteral("读取库存流水失败：%1").arg(ledger.lastError().text()));
         return false;
     }
@@ -313,8 +335,8 @@ bool rebuildSerialStates(QSqlDatabase database,
             "JOIN inventory_ledger l ON l.id=x.ledger_id "
             "JOIN business_documents d ON d.id=l.document_id "
             "LEFT JOIN business_documents sd ON sd.id=d.source_document_id "
-            "WHERE sn.id IN (%1) ORDER BY l.occurred_at,l.id")
-                      .arg(placeholders(affectedSerialIds.size())));
+            "WHERE sn.id IN (%1) ORDER BY %2,l.id")
+                      .arg(placeholders(affectedSerialIds.size()), ledgerTimeOrder(QStringLiteral("l.occurred_at"))));
     for (qlonglong id : affectedSerialIds) event.addBindValue(id);
     if (!event.exec()) {
         setError(errorMessage, QStringLiteral("读取SN流水失败：%1").arg(event.lastError().text()));
@@ -568,23 +590,29 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     QString occurredAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     QSqlQuery firstLedger(m_database);
     firstLedger.prepare(QStringLiteral(
-        "SELECT MIN(occurred_at) FROM inventory_ledger WHERE document_id=?"));
+        "SELECT occurred_at FROM inventory_ledger WHERE document_id=? "
+        "ORDER BY %1,id LIMIT 1").arg(ledgerTimeOrder(QStringLiteral("occurred_at"))));
     firstLedger.addBindValue(document.documentId);
     if (!firstLedger.exec())
         return fail(errorMessage, QStringLiteral("读取原库存流水时间失败：%1")
                                       .arg(firstLedger.lastError().text()));
     if (firstLedger.next() && !firstLedger.value(0).toString().isEmpty())
         occurredAt = firstLedger.value(0).toString();
-    QDateTime revisedOccurrence = QDateTime::fromString(occurredAt, Qt::ISODateWithMs);
-    if (!revisedOccurrence.isValid())
-        revisedOccurrence = QDateTime::fromString(occurredAt, Qt::ISODate);
-    if (!revisedOccurrence.isValid()) revisedOccurrence = QDateTime::currentDateTime();
-    revisedOccurrence.setDate(document.documentDate);
-    occurredAt = revisedOccurrence.toString(Qt::ISODateWithMs);
+    occurredAt = revisedLedgerTime(occurredAt, before.documentDate, document.documentDate);
+
+    QHash<qlonglong, PostedDocumentEditLine> originalItems;
+    QHash<qlonglong, PostedDocumentEditLine> retainedItems;
+    for (const auto &line : before.lines) originalItems.insert(line.itemId, line);
+    for (const auto &line : document.lines) {
+        if (line.itemId <= 0) continue;
+        if (!originalItems.contains(line.itemId) || retainedItems.contains(line.itemId))
+            return fail(errorMessage, QStringLiteral("明细编号已变化或重复，请重新打开单据。"));
+        retainedItems.insert(line.itemId, line);
+    }
 
     struct DependentItemLink {
         qlonglong dependentItemId = 0;
-        int sourceLineNumber = 0;
+        qlonglong sourceItemId = 0;
         QString documentType;
         double quantity = 0.0;
         double giftQuantity = 0.0;
@@ -592,7 +620,10 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     QList<DependentItemLink> dependentLinks;
     QSqlQuery dependents(m_database);
     dependents.prepare(QStringLiteral(
-        "SELECT child.id,source.line_number,d.document_type,child.quantity,child.gift_quantity "
+        "SELECT child.id,source.id,d.document_type,"
+        "CASE WHEN d.status='DRAFT' THEN 0 WHEN d.document_type='SCTL' "
+        "THEN child.quantity-child.reversed_quantity ELSE child.quantity END,"
+        "CASE WHEN d.status='DRAFT' THEN 0 ELSE child.gift_quantity END "
         "FROM business_document_items child "
         "JOIN business_document_items source ON source.id=child.source_item_id "
         "JOIN business_documents d ON d.id=child.document_id "
@@ -602,19 +633,46 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         return fail(errorMessage, QStringLiteral("读取原单据的撤销/退料关联失败：%1")
                                       .arg(dependents.lastError().text()));
     while (dependents.next())
-        dependentLinks.append({dependents.value(0).toLongLong(), dependents.value(1).toInt(),
+        dependentLinks.append({dependents.value(0).toLongLong(), dependents.value(1).toLongLong(),
                                dependents.value(2).toString(), dependents.value(3).toDouble(),
                                dependents.value(4).toDouble()});
 
+    QHash<qlonglong, double> linkedQuantities;
+    QHash<qlonglong, double> linkedGifts;
+    for (const auto &link : std::as_const(dependentLinks)) {
+        if (!retainedItems.contains(link.sourceItemId))
+            return fail(errorMessage, QStringLiteral("物料 %1 的明细已关联退料/撤销单，不能删除后丢失来源；请先调整对应关联单据。")
+                                          .arg(originalItems.value(link.sourceItemId).materialId));
+        const auto &line = retainedItems[link.sourceItemId];
+        const auto &original = originalItems[link.sourceItemId];
+        if (line.materialId != original.materialId || line.batchNo.trimmed() != original.batchNo.trimmed())
+            return fail(errorMessage, QStringLiteral("已有退料/撤销关联的明细不能改成另一物料或批次；请先调整对应关联单据。"));
+        if (link.documentType == QStringLiteral("CX") || link.documentType == QStringLiteral("SCTL"))
+            linkedQuantities[link.sourceItemId] += link.quantity;
+        if (link.documentType == QStringLiteral("CX")) linkedGifts[link.sourceItemId] += link.giftQuantity;
+    }
+    for (auto it = linkedQuantities.cbegin(); it != linkedQuantities.cend(); ++it) {
+        const auto &line = retainedItems[it.key()];
+        if (it.value() > line.quantity + QuantityTolerance
+            || linkedGifts.value(it.key()) > line.giftQuantity + QuantityTolerance)
+            return fail(errorMessage, QStringLiteral("修改数量小于该明细已撤销及实际已退数量，请先调整对应关联单据。"));
+    }
+
     QList<qlonglong> oldLedgerIds;
+    struct OriginalLedger { qlonglong id; QString time; };
+    QHash<qlonglong, QList<OriginalLedger>> originalLedgers;
     QList<qlonglong> affectedSerialIds;
     QSqlQuery ledgerIds(m_database);
-    ledgerIds.prepare(QStringLiteral("SELECT id FROM inventory_ledger WHERE document_id=?"));
+    ledgerIds.prepare(QStringLiteral("SELECT id,document_item_id,occurred_at FROM inventory_ledger WHERE document_id=? ORDER BY id"));
     ledgerIds.addBindValue(document.documentId);
     if (!ledgerIds.exec())
         return fail(errorMessage, QStringLiteral("读取原库存流水失败：%1")
                                       .arg(ledgerIds.lastError().text()));
-    while (ledgerIds.next()) oldLedgerIds.append(ledgerIds.value(0).toLongLong());
+    while (ledgerIds.next()) {
+        const qlonglong id = ledgerIds.value(0).toLongLong();
+        oldLedgerIds.append(id);
+        originalLedgers[ledgerIds.value(1).toLongLong()].append({id, ledgerIds.value(2).toString()});
+    }
     QSqlQuery oldSerials(m_database);
     oldSerials.prepare(QStringLiteral(
         "SELECT DISTINCT x.serial_id FROM inventory_ledger_serials x "
@@ -624,6 +682,13 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         return fail(errorMessage, QStringLiteral("读取原单据SN失败：%1")
                                       .arg(oldSerials.lastError().text()));
     while (oldSerials.next()) affectedSerialIds.append(oldSerials.value(0).toLongLong());
+    QMap<qlonglong, qlonglong> reversalLinks;
+    QSqlQuery readReversalLinks(m_database);
+    if (!readReversalLinks.exec(QStringLiteral(
+            "SELECT id,reversal_of_ledger_id FROM inventory_ledger WHERE reversal_of_ledger_id IS NOT NULL")))
+        return fail(errorMessage, QStringLiteral("读取撤销流水关联失败：%1").arg(readReversalLinks.lastError().text()));
+    while (readReversalLinks.next())
+        reversalLinks.insert(readReversalLinks.value(0).toLongLong(), readReversalLinks.value(1).toLongLong());
     if (!oldLedgerIds.isEmpty()) {
         QSqlQuery detach(m_database);
         detach.prepare(QStringLiteral("UPDATE inventory_ledger SET reversal_of_ledger_id=NULL WHERE reversal_of_ledger_id IN (%1)")
@@ -723,10 +788,13 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         rollback();
         return false;
     }
+    const bool preserveLegacyInspection = direction == QStringLiteral("IN")
+        && before.stockDirection == QStringLiteral("IN")
+        && before.inspectionNoticeId <= 0 && document.inspectionNoticeId <= 0;
     QSqlQuery removeInspection(m_database);
     removeInspection.prepare(QStringLiteral("DELETE FROM inbound_inspection_details WHERE document_id=?"));
     removeInspection.addBindValue(document.documentId);
-    if (!removeInspection.exec())
+    if (!preserveLegacyInspection && !removeInspection.exec())
         return fail(errorMessage, QStringLiteral("清理原入库检验资料失败：%1")
                                       .arg(removeInspection.lastError().text()));
     if (direction == QStringLiteral("IN")) {
@@ -742,10 +810,10 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         } else {
             inspection.prepare(QStringLiteral(
                 "INSERT INTO inbound_inspection_details(document_id,requires_inspection,inspection_result) "
-                "VALUES(?,0,'NOT_REQUIRED')"));
+                "VALUES(?,0,'NOT_REQUIRED') ON CONFLICT(document_id) DO NOTHING"));
             inspection.addBindValue(document.documentId);
         }
-        if (!inspection.exec() || inspection.numRowsAffected() != 1)
+        if (!inspection.exec() || (!preserveLegacyInspection && inspection.numRowsAffected() != 1))
             return fail(errorMessage, QStringLiteral("保存入库检验关联失败：%1")
                                           .arg(inspection.lastError().text()));
     }
@@ -754,12 +822,12 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     insertItem.prepare(QStringLiteral(
         "INSERT INTO business_document_items(document_id,line_number,material_id,quantity,"
         "ordered_quantity,gift_quantity,batch_no,warehouse_id,location_id,target_warehouse_id,"
-        "target_location_id,source_item_id,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+        "target_location_id,source_item_id,notes,id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
     QSqlQuery insertLedger(m_database);
     insertLedger.prepare(QStringLiteral(
         "INSERT INTO inventory_ledger(occurred_at,business_type,document_id,document_item_id,"
         "material_id,batch_no,quantity_in,quantity_out,quantity_before,quantity_after,"
-        "warehouse_id,location_id,operator_id,notes) VALUES(?,?,?,?,?,?,?,?,0,0,?,?,?,?)"));
+        "warehouse_id,location_id,operator_id,notes,id) VALUES(?,?,?,?,?,?,?,?,0,0,?,?,?,?,?)"));
     QSqlQuery findSerial(m_database);
     findSerial.prepare(QStringLiteral("SELECT id,material_id FROM serial_numbers WHERE serial_no=?"));
     QSqlQuery createSerial(m_database);
@@ -769,7 +837,6 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     QSqlQuery linkSerial(m_database);
     linkSerial.prepare(QStringLiteral(
         "INSERT INTO inventory_ledger_serials(ledger_id,serial_id) VALUES(?,?)"));
-    QList<qlonglong> newItemIds;
     for (int index = 0; index < document.lines.size(); ++index) {
         const PostedDocumentEditLine &line = document.lines.at(index);
         insertItem.bindValue(0, document.documentId);
@@ -785,11 +852,11 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         insertItem.bindValue(10, line.targetLocationId > 0 ? QVariant(line.targetLocationId) : QVariant());
         insertItem.bindValue(11, line.sourceItemId > 0 ? QVariant(line.sourceItemId) : QVariant());
         insertItem.bindValue(12, normalized(line.notes));
+        insertItem.bindValue(13, line.itemId > 0 ? QVariant(line.itemId) : QVariant());
         if (!insertItem.exec())
             return fail(errorMessage, QStringLiteral("保存第 %1 行明细失败：%2")
                                           .arg(index + 1).arg(insertItem.lastError().text()));
         const qlonglong itemId = insertItem.lastInsertId().toLongLong();
-        newItemIds.append(itemId);
 
         QList<qlonglong> ledgerIdsForLine;
         const QString lineDirection = direction == QStringLiteral("ADJUST")
@@ -797,7 +864,12 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         const auto addLedger = [&](const QString &businessType, double quantityIn,
                                    double quantityOut, qlonglong warehouseId,
                                    qlonglong locationId) -> bool {
-            insertLedger.bindValue(0, occurredAt);
+            const auto original = originalLedgers.value(line.itemId);
+            const int position = ledgerIdsForLine.size();
+            const bool reuse = position < original.size();
+            insertLedger.bindValue(0, reuse
+                ? revisedLedgerTime(original.at(position).time, before.documentDate, document.documentDate)
+                : occurredAt);
             insertLedger.bindValue(1, businessType);
             insertLedger.bindValue(2, document.documentId);
             insertLedger.bindValue(3, itemId);
@@ -809,6 +881,7 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
             insertLedger.bindValue(9, locationId);
             insertLedger.bindValue(10, m_operatorId);
             insertLedger.bindValue(11, normalized(line.notes));
+            insertLedger.bindValue(12, reuse ? QVariant(original.at(position).id) : QVariant());
             if (!insertLedger.exec()) return false;
             ledgerIdsForLine.append(insertLedger.lastInsertId().toLongLong());
             return true;
@@ -889,34 +962,23 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     QSqlQuery restoreDependent(m_database);
     restoreDependent.prepare(QStringLiteral(
         "UPDATE business_document_items SET source_item_id=? WHERE id=?"));
-    QMap<int, double> reversedByLine;
-    QMap<int, double> returnedByLine;
-    QMap<int, double> reversedGiftByLine;
     for (const DependentItemLink &link : std::as_const(dependentLinks)) {
-        if (link.documentType == QStringLiteral("CX")) {
-            reversedByLine[link.sourceLineNumber] += link.quantity;
-            reversedGiftByLine[link.sourceLineNumber] += link.giftQuantity;
-        } else if (link.documentType == QStringLiteral("SCTL")) {
-            returnedByLine[link.sourceLineNumber] += link.quantity;
-        }
-    }
-    for (const DependentItemLink &link : std::as_const(dependentLinks)) {
-        bool compatible = link.sourceLineNumber > 0
-            && link.sourceLineNumber <= newItemIds.size();
-        if (compatible) {
-            const PostedDocumentEditLine &replacementLine =
-                document.lines.at(link.sourceLineNumber - 1);
-            compatible = reversedByLine.value(link.sourceLineNumber) <= replacementLine.quantity + QuantityTolerance
-                && returnedByLine.value(link.sourceLineNumber) <= replacementLine.quantity + QuantityTolerance
-                && reversedGiftByLine.value(link.sourceLineNumber) <= replacementLine.giftQuantity + QuantityTolerance;
-        }
-        const qlonglong replacement = compatible
-            ? newItemIds.at(link.sourceLineNumber - 1) : 0;
-        restoreDependent.bindValue(0, replacement > 0 ? QVariant(replacement) : QVariant());
+        restoreDependent.bindValue(0, link.sourceItemId);
         restoreDependent.bindValue(1, link.dependentItemId);
         if (!restoreDependent.exec())
             return fail(errorMessage, QStringLiteral("恢复撤销/退料关联失败：%1")
                                           .arg(restoreDependent.lastError().text()));
+    }
+    QSqlQuery restoreLedgerLink(m_database);
+    restoreLedgerLink.prepare(QStringLiteral(
+        "UPDATE inventory_ledger SET reversal_of_ledger_id=? WHERE id=? "
+        "AND EXISTS(SELECT 1 FROM inventory_ledger WHERE id=?)"));
+    for (auto it = reversalLinks.cbegin(); it != reversalLinks.cend(); ++it) {
+        restoreLedgerLink.bindValue(0, it.value());
+        restoreLedgerLink.bindValue(1, it.key());
+        restoreLedgerLink.bindValue(2, it.value());
+        if (!restoreLedgerLink.exec())
+            return fail(errorMessage, QStringLiteral("恢复撤销流水关联失败：%1").arg(restoreLedgerLink.lastError().text()));
     }
     // 调拨撤销有两条反向流水。原调拨流水被整单重建后，需要按业务方向重新关联，
     // 否则后续查询会把已经撤销过的调拨当成未撤销。
@@ -935,30 +997,22 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     if (!restoreTransferReversal.exec())
         return fail(errorMessage, QStringLiteral("恢复调拨撤销流水关联失败：%1")
                                       .arg(restoreTransferReversal.lastError().text()));
-    QList<qlonglong> relatedSourceItemIds = newItemIds;
-    for (const PostedDocumentEditLine &line : before.lines) {
-        if (line.sourceItemId > 0 && !relatedSourceItemIds.contains(line.sourceItemId))
-            relatedSourceItemIds.append(line.sourceItemId);
-    }
-    for (const PostedDocumentEditLine &line : document.lines) {
-        if (line.sourceItemId > 0 && !relatedSourceItemIds.contains(line.sourceItemId))
-            relatedSourceItemIds.append(line.sourceItemId);
-    }
+    // 先算撤销，再按净退料量回算。分两步更新，保证退料单自身的撤销已经生效，
+    // 同时涵盖“修改退料的撤销单”时需要更新的上两级领料来源。
     QSqlQuery refreshRelatedQuantities(m_database);
-    refreshRelatedQuantities.prepare(QStringLiteral(
+    if (!refreshRelatedQuantities.exec(QStringLiteral(
             "UPDATE business_document_items AS source SET "
             "reversed_quantity=COALESCE((SELECT SUM(child.quantity) "
             "FROM business_document_items child JOIN business_documents d ON d.id=child.document_id "
-            "WHERE child.source_item_id=source.id AND d.document_type='CX'),0),"
+            "WHERE child.source_item_id=source.id AND d.document_type='CX' AND d.status<>'DRAFT'),0),"
             "reversed_gift_quantity=COALESCE((SELECT SUM(child.gift_quantity) "
             "FROM business_document_items child JOIN business_documents d ON d.id=child.document_id "
-            "WHERE child.source_item_id=source.id AND d.document_type='CX'),0),"
-            "returned_quantity=COALESCE((SELECT SUM(child.quantity) "
+            "WHERE child.source_item_id=source.id AND d.document_type='CX' AND d.status<>'DRAFT'),0)"))
+        || !refreshRelatedQuantities.exec(QStringLiteral(
+            "UPDATE business_document_items AS source SET "
+            "returned_quantity=COALESCE((SELECT SUM(child.quantity-child.reversed_quantity) "
             "FROM business_document_items child JOIN business_documents d ON d.id=child.document_id "
-            "WHERE child.source_item_id=source.id AND d.document_type='SCTL'),0) "
-            "WHERE source.id IN (%1)").arg(placeholders(relatedSourceItemIds.size())));
-    for (qlonglong id : std::as_const(relatedSourceItemIds)) refreshRelatedQuantities.addBindValue(id);
-    if (!refreshRelatedQuantities.exec()) {
+            "WHERE child.source_item_id=source.id AND d.document_type='SCTL' AND d.status<>'DRAFT'),0)"))) {
         return fail(errorMessage, QStringLiteral("重算撤销/退料数量失败：%1")
                                       .arg(refreshRelatedQuantities.lastError().text()));
     }
@@ -970,9 +1024,10 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     }
     QSqlQuery refreshBatchDates(m_database);
     if (!refreshBatchDates.exec(QStringLiteral(
-            "UPDATE batches SET first_in_at=(SELECT MIN(l.occurred_at) "
+            "UPDATE batches SET first_in_at=(SELECT l.occurred_at "
             "FROM inventory_ledger l WHERE l.material_id=batches.material_id "
-            "AND l.batch_no=batches.batch_no AND l.quantity_in>0)"))) {
+            "AND l.batch_no=batches.batch_no AND l.quantity_in>0 ORDER BY %1,l.id LIMIT 1)")
+                                              .arg(ledgerTimeOrder(QStringLiteral("l.occurred_at"))))) {
         return fail(errorMessage, QStringLiteral("重算批次首次入库日期失败：%1")
                                       .arg(refreshBatchDates.lastError().text()));
     }

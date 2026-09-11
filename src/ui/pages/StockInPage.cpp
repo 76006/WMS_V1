@@ -84,13 +84,11 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Inbound, panel);
     m_lines->setPurchaseMode(true);
     m_lines->setDocumentDate(m_dateEdit->date());
-    layout->addWidget(m_lines);
-    auto *actions = new QHBoxLayout;
-    actions->addStretch();
-    m_submitButton = new QPushButton(QStringLiteral("确认并入库"), panel);
+    m_submitButton = new QPushButton(QStringLiteral("确认并入库"), m_lines);
     m_submitButton->setProperty("primary", true);
-    actions->addWidget(m_submitButton);
-    layout->addLayout(actions);
+    m_submitButton->setFixedSize(110, 34);
+    m_lines->addToolbarAction(m_submitButton);
+    layout->addWidget(m_lines);
     root->addWidget(panel);
 
     auto *recentPanel = new QFrame(this);
@@ -116,7 +114,7 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
 
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
-            m_recentTable, QStringLiteral("近期在线入库单"), this);
+            m_recentTable, QStringLiteral("全部在线入库单"), this, [this] { refreshRecentDocuments(); });
     });
     connect(m_submitButton, &QPushButton::clicked, this, &StockInPage::submit);
     connect(m_dateEdit, &QDateEdit::dateChanged,
@@ -190,7 +188,8 @@ void StockInPage::refreshRecentDocuments()
         "LEFT JOIN inbound_inspection_details q ON q.document_id=d.id "
         "LEFT JOIN attachments a ON a.id=q.inspection_attachment_id AND a.is_deleted=0 "
         "WHERE d.stock_direction='IN' AND d.document_type IN ('CGRK','SCWG','TLRK','QTRK','QC') "
-        "GROUP BY d.id ORDER BY d.id DESC LIMIT 20"));
+        "GROUP BY d.id ORDER BY d.id DESC")
+        + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();
         m_recentTable->insertRow(row);
