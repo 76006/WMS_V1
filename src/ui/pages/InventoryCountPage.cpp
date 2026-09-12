@@ -4,6 +4,7 @@
 #include "ui/widgets/ComboBoxSearch.h"
 
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDialog>
@@ -212,6 +213,7 @@ int InventoryCountPage::appendCountRow(qlonglong materialId,
                                                       ? QStringLiteral("是") : QStringLiteral("否")));
     m_table->setItem(row, 5, new QTableWidgetItem(QString::number(systemQuantity, 'g', 12)));
     auto *actual = new QDoubleSpinBox(m_table);
+    actual->setButtonSymbols(QAbstractSpinBox::NoButtons);
     actual->setDecimals(6);
     actual->setRange(0.0, 999999999999.0);
     actual->setValue(actualQuantity);

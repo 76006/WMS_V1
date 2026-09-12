@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -49,8 +50,20 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
 {
     setObjectName(QStringLiteral("pageRoot"));
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    auto *panel = new QFrame(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    auto *pageScroll = new QScrollArea(this);
+    pageScroll->setWidgetResizable(true);
+    pageScroll->setFrameShape(QFrame::NoFrame);
+    pageScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *pageBody = new QWidget(pageScroll);
+    pageBody->setObjectName(QStringLiteral("pageRoot"));
+    auto *pageLayout = new QVBoxLayout(pageBody);
+    pageLayout->setContentsMargins(20, 20, 20, 20);
+    pageLayout->setSpacing(12);
+    pageLayout->setSizeConstraint(QLayout::SetMinimumSize);
+
+    auto *panel = new QFrame(pageBody);
     panel->setObjectName(QStringLiteral("panel"));
     auto *layout = new QVBoxLayout(panel);
     layout->setContentsMargins(20, 18, 20, 20);
@@ -84,15 +97,18 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     m_submitButton->setProperty("primary", true);
     actions->addWidget(m_submitButton);
     layout->addLayout(actions);
-    root->addWidget(panel);
+    pageLayout->addWidget(panel);
 
-    auto *recentPanel = new QFrame(this);
+    auto *recentPanel = new QFrame(pageBody);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
     recentToolbar->addWidget(new QLabel(QStringLiteral("近期调拨单"), recentPanel));
     recentToolbar->addStretch();
+    auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
+    editRecentButton->setProperty("primary", true);
     auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenRecentButton);
     m_reverseButton = new QPushButton(QStringLiteral("部分/全部撤销"), recentPanel);
     m_reverseButton->setProperty("danger", true);
@@ -110,8 +126,15 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     m_transferTable->verticalHeader()->setVisible(false);
     m_transferTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_transferTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_transferTable->setMinimumHeight(180);
     recentLayout->addWidget(m_transferTable);
-    root->addWidget(recentPanel, 1);
+    pageLayout->addWidget(recentPanel, 1);
+    pageScroll->setWidget(pageBody);
+    root->addWidget(pageScroll);
+    connect(editRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::editSelectedBusinessDocument(
+            m_transferTable, this, [this] { refreshTransfers(); });
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_transferTable, QStringLiteral("全部调拨单"), this, [this] { refreshTransfers(); });

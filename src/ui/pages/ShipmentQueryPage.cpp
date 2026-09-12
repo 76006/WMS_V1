@@ -114,6 +114,7 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, QWidget *parent)
     m_summaryLabel = new QLabel(shipmentPanel);
     m_summaryLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_openTemplateButton = new QPushButton(QStringLiteral("打开送货确认单"), shipmentPanel);
+    m_openTemplateButton->setVisible(false);
     m_openTemplateButton->setEnabled(false);
     shipmentHeader->addWidget(shipmentTitle);
     shipmentHeader->addStretch();

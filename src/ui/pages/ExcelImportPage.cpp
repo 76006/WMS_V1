@@ -147,7 +147,9 @@ void ExcelImportPage::exportMaterialTemplate()
          QStringLiteral("批次管理"), QStringLiteral("SN管理"), QStringLiteral("物料状态"),
          QStringLiteral("品牌"), QStringLiteral("备注")}, example, &error))
         QMessageBox::warning(this, QStringLiteral("导出失败"), error);
-    else QMessageBox::information(this, QStringLiteral("导出完成"), QStringLiteral("物料导入模板已保存。"));
+    else QMessageBox::information(
+        this, QStringLiteral("导出完成"),
+        QStringLiteral("物料导入模板已保存。\n\n文件：%1").arg(QDir::toNativeSeparators(path)));
 }
 
 void ExcelImportPage::exportInitialTemplate()
@@ -164,6 +166,9 @@ void ExcelImportPage::exportInitialTemplate()
          QStringLiteral("分类编码"), QStringLiteral("单位"), QStringLiteral("批次号"),
          QStringLiteral("库存数量")}, example, &error))
         QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+    else QMessageBox::information(
+        this, QStringLiteral("导出完成"),
+        QStringLiteral("期初库存模板已保存。\n\n文件：%1").arg(QDir::toNativeSeparators(path)));
 }
 
 void ExcelImportPage::exportInventory()
@@ -189,7 +194,9 @@ void ExcelImportPage::exportInventory()
          QStringLiteral("库位"), QStringLiteral("批次"), QStringLiteral("数量"),
          QStringLiteral("更新时间")}, rows, &error))
         QMessageBox::warning(this, QStringLiteral("导出失败"), error);
-    else QMessageBox::information(this, QStringLiteral("导出完成"), QStringLiteral("当前库存已导出。"));
+    else QMessageBox::information(
+        this, QStringLiteral("导出完成"),
+        QStringLiteral("当前库存已导出。\n\n文件：%1").arg(QDir::toNativeSeparators(path)));
 }
 
 void ExcelImportPage::refreshReferenceData()

@@ -94,7 +94,7 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     root->addWidget(heading);
 
     auto *description = new QLabel(
-        QStringLiteral("以下内容会写入“仓库系统表单模板”中的原始 Excel 版式。正式提交后同时保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹，并自动打开正式表单。所有签字、批准和签署日期位置保持空白，打印后手写。"),
+        QStringLiteral("以下内容会写入“仓库系统表单模板”中的原始 Excel 版式。正式提交后同时保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹。所有签字、批准和签署日期位置保持空白，打印后手写。"),
         this);
     description->setObjectName(QStringLiteral("mutedText"));
     description->setWordWrap(true);
@@ -167,6 +167,7 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     auto *buttons = new QDialogButtonBox(this);
     auto *fullScreen = buttons->addButton(QStringLiteral("全屏显示"), QDialogButtonBox::ActionRole);
     auto *preview = buttons->addButton(QStringLiteral("打开模板预览"), QDialogButtonBox::ActionRole);
+    preview->setVisible(false);
     auto *cancel = buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
     auto *save = buttons->addButton(QStringLiteral("保存表单并继续"), QDialogButtonBox::AcceptRole);
     save->setProperty("primary", true);

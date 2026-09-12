@@ -9,6 +9,7 @@
 #include <QAbstractItemView>
 #include <QComboBox>
 #include <QDateEdit>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -20,6 +21,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -47,9 +49,20 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
 {
     setObjectName(QStringLiteral("pageRoot"));
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(12);
-    auto *panel = new QFrame(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    auto *pageScroll = new QScrollArea(this);
+    pageScroll->setWidgetResizable(true);
+    pageScroll->setFrameShape(QFrame::NoFrame);
+    pageScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *pageBody = new QWidget(pageScroll);
+    pageBody->setObjectName(QStringLiteral("pageRoot"));
+    auto *pageLayout = new QVBoxLayout(pageBody);
+    pageLayout->setContentsMargins(20, 20, 20, 20);
+    pageLayout->setSpacing(12);
+    pageLayout->setSizeConstraint(QLayout::SetMinimumSize);
+
+    auto *panel = new QFrame(pageBody);
     panel->setObjectName(QStringLiteral("panel"));
     panel->setMaximumWidth(980);
     auto *panelLayout = new QVBoxLayout(panel);
@@ -105,15 +118,18 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     m_submitButton->setProperty("primary", true);
     actions->addWidget(m_submitButton);
     panelLayout->addLayout(actions);
-    root->addWidget(panel, 0, Qt::AlignHCenter | Qt::AlignTop);
+    pageLayout->addWidget(panel, 0, Qt::AlignHCenter | Qt::AlignTop);
 
-    auto *recentPanel = new QFrame(this);
+    auto *recentPanel = new QFrame(pageBody);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
     recentToolbar->addWidget(new QLabel(QStringLiteral("近期成品入库单"), recentPanel));
     recentToolbar->addStretch();
+    auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
+    editRecentButton->setProperty("primary", true);
     auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenRecentButton);
     recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 5, recentPanel);
@@ -124,9 +140,16 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
+    m_recentTable->setMinimumHeight(180);
     recentLayout->addWidget(m_recentTable);
-    root->addWidget(recentPanel, 1);
+    pageLayout->addWidget(recentPanel, 1);
+    pageScroll->setWidget(pageBody);
+    root->addWidget(pageScroll);
 
+    connect(editRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, this, [this] { refreshRecentDocuments(); });
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部成品入库单"), this, [this] { refreshRecentDocuments(); });
@@ -387,12 +410,13 @@ void FinishedGoodsInPage::submit()
                                                 posted.documentId, &formError)) {
         QMessageBox::information(
             this, QStringLiteral("成品入库完成"),
-            QStringLiteral("成品入库单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单\\成品入库单”，并已自动打开。")
-                .arg(posted.documentNumber));
+            QStringLiteral("成品入库单 %1 已生效，模板表单已保存。\n\n文件：%2")
+                .arg(posted.documentNumber,
+                     QDir::toNativeSeparators(OfficeTemplateService::archiveFilePath(inboundForm))));
     } else {
         QMessageBox::warning(
             this, QStringLiteral("成品入库已完成，但模板处理未全部完成"),
-            QStringLiteral("成品入库单 %1 已生效，但以下保存或打开步骤未完成：\n\n%2")
+            QStringLiteral("成品入库单 %1 已生效，但以下保存步骤未完成：\n\n%2")
                 .arg(posted.documentNumber, formError));
     }
     resetSubmissionToken();

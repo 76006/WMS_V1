@@ -7,6 +7,17 @@ $ErrorActionPreference = 'Stop'
 $excel = $null
 $workbook = $null
 $officeEngine = ''
+$automationProcessId = 0
+$processIdPath = ''
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class IceBeautySpreadsheetNativeMethods {
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@
 
 function Copy-TemplateToOutput([string]$templatePath, [string]$outputPath) {
     if ([string]::IsNullOrWhiteSpace($templatePath)) {
@@ -25,21 +36,91 @@ function Copy-TemplateToOutput([string]$templatePath, [string]$outputPath) {
     Copy-Item -LiteralPath $templatePath -Destination $outputPath -Force
 }
 
-function Close-Spreadsheet([bool]$save, $book, $application) {
+function Release-ComReference($value) {
+    if ($null -ne $value -and [Runtime.InteropServices.Marshal]::IsComObject($value)) {
+        try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($value) } catch {}
+    }
+}
+
+function Get-SpreadsheetProcessId($application) {
+    if ($null -eq $application) { return 0 }
+    try {
+        $handle = [IntPtr]$application.Hwnd
+        if ($handle -eq [IntPtr]::Zero) { return 0 }
+        [uint32]$identifier = 0
+        [void][IceBeautySpreadsheetNativeMethods]::GetWindowThreadProcessId($handle, [ref]$identifier)
+        return [int]$identifier
+    }
+    catch { return 0 }
+}
+
+function Write-AutomationProcessId([int]$identifier) {
+    if ($identifier -le 0 -or [string]::IsNullOrWhiteSpace($processIdPath)) { return }
+    try { [IO.File]::WriteAllText($processIdPath, [string]$identifier) } catch {}
+}
+
+function Clear-AutomationProcessId {
+    if ([string]::IsNullOrWhiteSpace($processIdPath)) { return }
+    try { Remove-Item -LiteralPath $processIdPath -Force -ErrorAction SilentlyContinue } catch {}
+}
+
+function Stop-OwnedSpreadsheetProcess([int]$identifier) {
+    if ($identifier -le 0) { return }
+    try {
+        $process = Get-Process -Id $identifier -ErrorAction SilentlyContinue
+        if ($null -ne $process) {
+            try { $process.WaitForExit(1500) } catch {}
+            if (-not $process.HasExited) { Stop-Process -Id $identifier -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    catch {}
+}
+
+function Close-Spreadsheet([bool]$save, $sheet, $book, $application,
+                           [bool]$quitApplication, [int]$processId) {
+    Release-ComReference $sheet
     if ($null -ne $book) {
         try { $book.Close($save) } catch {}
     }
-    if ($null -ne $application) {
+    if ($null -ne $application -and $quitApplication) {
         try { $application.Quit() } catch {}
     }
-    if ($null -ne $book) {
-        try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($book) } catch {}
-    }
-    if ($null -ne $application) {
-        try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($application) } catch {}
-    }
+    Release-ComReference $book
+    Release-ComReference $application
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    Stop-OwnedSpreadsheetProcess $processId
+    Clear-AutomationProcessId
+}
+
+function Find-Worksheet($book, [string]$expectedName) {
+    $availableNames = @()
+    $matchedSheet = $null
+    $count = [int]$book.Worksheets.Count
+    for ($index = 1; $index -le $count; $index++) {
+        $candidateSheet = $book.Worksheets.Item([int]$index)
+        $candidateName = [string]$candidateSheet.Name
+        $availableNames += $candidateName
+        if ([string]::Equals($candidateName.Trim(), $expectedName.Trim(),
+                             [StringComparison]::OrdinalIgnoreCase)) {
+            $matchedSheet = $candidateSheet
+            break
+        }
+        # 不在查找过程中主动释放工作表。Office 可能为同一工作表复用 RCW，
+        # 提前 FinalRelease 会让稍后取得的工作表引用也立即失效。
+        $candidateSheet = $null
+    }
+    # 单工作表模板允许名称被 Excel/WPS 自动修正，直接采用唯一工作表。
+    if ($null -eq $matchedSheet -and $count -eq 1) {
+        $matchedSheet = $book.Worksheets.Item([int]1)
+    }
+    if ($null -eq $matchedSheet) {
+        throw ('模板中找不到工作表：' + $expectedName + '；实际工作表：' +
+               ($availableNames -join '、'))
+    }
+    return $matchedSheet
 }
 
 function TextValue($value) {
@@ -262,6 +343,7 @@ catch {
 $templatePath = TextValue $data.templatePath
 $outputPath = TextValue $data.outputPath
 $expectedSheet = TextValue $data.sheetName
+$processIdPath = TextValue $data.processIdPath
 if ([string]::IsNullOrWhiteSpace($templatePath) -or [string]::IsNullOrWhiteSpace($outputPath)) {
     [Console]::Error.WriteLine('表单模板路径或输出路径为空，无法生成表单。')
     exit 1
@@ -269,9 +351,9 @@ if ([string]::IsNullOrWhiteSpace($templatePath) -or [string]::IsNullOrWhiteSpace
 
 # 依次完整尝试每个自动化引擎：任一环节失败都换下一个引擎重新开始，而不是只判断组件能否创建。
 $candidates = @(
-    @{ ProgId = 'Excel.Application'; Name = 'Microsoft Excel' },
-    @{ ProgId = 'Ket.Application'; Name = 'WPS 表格' },
-    @{ ProgId = 'ET.Application'; Name = 'WPS 表格（兼容模式）' }
+    @{ ProgId = 'Ket.Application'; Name = 'WPS 表格'; ProcessName = 'et' },
+    @{ ProgId = 'Excel.Application'; Name = 'Microsoft Excel'; ProcessName = 'EXCEL' },
+    @{ ProgId = 'ET.Application'; Name = 'WPS 表格（兼容模式）'; ProcessName = 'et' }
 )
 $errors = @()
 
@@ -281,22 +363,37 @@ foreach ($candidate in $candidates) {
     $sheet = $null
     $officeEngine = $candidate.Name
     $completed = $false
+    $automationProcessId = 0
+    $quitApplication = $true
+    $existingProcessIds = @(Get-Process -Name $candidate.ProcessName -ErrorAction SilentlyContinue |
+                            Select-Object -ExpandProperty Id)
     try {
         $excel = New-Object -ComObject $candidate.ProgId
+        $automationProcessId = Get-SpreadsheetProcessId $excel
+        if ($automationProcessId -gt 0 -and $existingProcessIds -contains $automationProcessId) {
+            # 某些 WPS 版本会复用用户已经打开的进程；这种情况下只关闭工作簿，不退出或强杀用户进程。
+            $quitApplication = $false
+            $automationProcessId = 0
+        }
+        Write-AutomationProcessId $automationProcessId
         $excel.Visible = $false
         $excel.DisplayAlerts = $false
         # 每次尝试都从原始模板重新复制，上一次失败的表单不会影响本次填写。
         Copy-TemplateToOutput $templatePath $outputPath
         $workbook = $excel.Workbooks.Open($outputPath, 0, $false)
 
-        try { $sheet = $workbook.Worksheets.Item($expectedSheet) } catch { $sheet = $null }
-        if ($null -eq $sheet) {
-            throw ('模板中找不到工作表：' + $expectedSheet)
-        }
+        $sheet = Find-Worksheet $workbook $expectedSheet
 
         for ($index = $workbook.Worksheets.Count; $index -ge 1; $index--) {
             $other = $workbook.Worksheets.Item($index)
-            if ($other.Name -ne $sheet.Name) { $other.Delete() }
+            if ($other.Name -ne $sheet.Name) {
+                try { $other.Delete() }
+                finally { Release-ComReference $other }
+            }
+            else {
+                # $other 与 $sheet 可能是同一个 RCW，不能在填写前释放。
+                $other = $null
+            }
         }
         if ((TextValue $data.kind) -eq 'deliveryConfirmation') { $sheet.Name = '送货确认单' }
 
@@ -311,7 +408,8 @@ foreach ($candidate in $candidates) {
         }
 
         $workbook.Save()
-        Close-Spreadsheet $true $workbook $excel
+        Close-Spreadsheet $true $sheet $workbook $excel $quitApplication $automationProcessId
+        $sheet = $null
         $workbook = $null
         $excel = $null
         $completed = $true
@@ -323,7 +421,7 @@ foreach ($candidate in $candidates) {
         }
         $errors += $message
         # 不保存地关闭本次工作簿并退出该组件，再还原输出文件，避免泄漏和污染下一次尝试。
-        Close-Spreadsheet $false $workbook $excel
+        Close-Spreadsheet $false $sheet $workbook $excel $quitApplication $automationProcessId
         $workbook = $null
         $excel = $null
         $sheet = $null

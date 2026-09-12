@@ -3,6 +3,7 @@
 #include "import/XlsxExporter.h"
 
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDate>
 #include <QFileDialog>
@@ -83,6 +84,7 @@ InventoryReportPage::InventoryReportPage(QSqlDatabase database, QWidget *parent)
     m_yearSpin->setRange(2000, 2100);
     m_yearSpin->setValue(QDate::currentDate().year());
     m_yearSpin->setSuffix(QStringLiteral(" 年"));
+    m_yearSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_monthCombo = new QComboBox(this);
     for (int month = 1; month <= 12; ++month)
         m_monthCombo->addItem(QStringLiteral("%1 月").arg(month), month);

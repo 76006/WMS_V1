@@ -9,6 +9,7 @@
 #include <QAbstractItemView>
 #include <QComboBox>
 #include <QDateEdit>
+#include <QDir>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHeaderView>
@@ -127,7 +128,10 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     recentToolbar->addWidget(new QLabel(
         QStringLiteral("近期普通出库单（双击销售出库可查看完整销售资料）"), recentPanel));
     recentToolbar->addStretch();
+    auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
+    editRecentButton->setProperty("primary", true);
     auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenRecentButton);
     recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 6, recentPanel);
@@ -138,11 +142,18 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
+    // 保留近期出库单的可见高度。窗口高度不足时，让外层滚动区域产生
+    // 纵向滚动条，而不是把该表格压缩到完全不可见。
+    m_recentTable->setMinimumHeight(180);
     recentLayout->addWidget(m_recentTable);
     pageLayout->addWidget(recentPanel, 1);
     pageScroll->setWidget(pageBody);
     root->addWidget(pageScroll);
 
+    connect(editRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, this, [this] { refreshRecentDocuments(); });
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部普通出库单"), this, [this] { refreshRecentDocuments(); });
@@ -370,10 +381,14 @@ void StockOutPage::submit()
     m_numberLabel->setText(posted.documentNumber);
     outboundForm.documentNumber = posted.documentNumber;
     QStringList formErrors;
+    QStringList savedFiles;
     QString formError;
     if (!OfficeTemplateService::attachToDocument(outboundForm, m_database, m_session.userId,
                                                   posted.documentId, &formError)) {
         formErrors.append(QStringLiteral("出库单：%1").arg(formError));
+    } else {
+        savedFiles.append(QDir::toNativeSeparators(
+            OfficeTemplateService::archiveFilePath(outboundForm)));
     }
     if (salesOutbound) {
         deliveryForm.documentNumber = posted.documentNumber;
@@ -381,17 +396,20 @@ void StockOutPage::submit()
         if (!OfficeTemplateService::attachToDocument(deliveryForm, m_database, m_session.userId,
                                                       posted.documentId, &formError)) {
             formErrors.append(QStringLiteral("送货确认单：%1").arg(formError));
+        } else {
+            savedFiles.append(QDir::toNativeSeparators(
+                OfficeTemplateService::archiveFilePath(deliveryForm)));
         }
     }
     if (formErrors.isEmpty()) {
         QMessageBox::information(
             this, QStringLiteral("出库完成"),
-            QStringLiteral("出库单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹，并已自动打开。")
-                .arg(posted.documentNumber));
+            QStringLiteral("出库单 %1 已生效，模板表单已保存。\n\n文件：\n%2")
+                .arg(posted.documentNumber, savedFiles.join(QStringLiteral("\n"))));
     } else {
         QMessageBox::warning(
             this, QStringLiteral("出库已完成，但模板处理未全部完成"),
-            QStringLiteral("出库单 %1 已生效，但以下保存或打开步骤未完成：\n\n%2")
+            QStringLiteral("出库单 %1 已生效，但以下保存步骤未完成：\n\n%2")
                 .arg(posted.documentNumber, formErrors.join(QStringLiteral("\n"))));
     }
     resetSubmissionToken();

@@ -170,6 +170,23 @@ bool isHandwrittenSignatureField(const QString &key)
     return fields.contains(key);
 }
 
+void terminateTemplateAutomationProcess(const QString &processIdPath)
+{
+    QFile processIdFile(processIdPath);
+    if (!processIdFile.open(QIODevice::ReadOnly)) return;
+    bool ok = false;
+    const qlonglong processId = QString::fromLatin1(processIdFile.readAll()).trimmed().toLongLong(&ok);
+    processIdFile.close();
+    if (!ok || processId <= 0) return;
+    QProcess terminator;
+    terminator.setProgram(QStringLiteral("taskkill.exe"));
+    terminator.setArguments({QStringLiteral("/PID"), QString::number(processId),
+                             QStringLiteral("/T"), QStringLiteral("/F")});
+    terminator.start();
+    terminator.waitForFinished(5000);
+    QFile::remove(processIdPath);
+}
+
 }
 
 QString OfficeTemplateService::formTitle(OfficeFormKind kind)
@@ -218,6 +235,16 @@ QString OfficeTemplateService::archiveRootPath()
     return documentsPath.isEmpty()
         ? QString()
         : QDir(documentsPath).filePath(QStringLiteral("冰美肌仓库系统表单"));
+}
+
+QString OfficeTemplateService::archiveFilePath(const OfficeTemplateDocument &document)
+{
+    const QString rootPath = archiveRootPath();
+    const QString number = document.documentNumber.trimmed();
+    const QString suffix = QFileInfo(templateFileName(document.kind)).suffix();
+    if (rootPath.isEmpty() || number.isEmpty() || suffix.isEmpty()) return {};
+    return QDir(QDir(rootPath).filePath(formTitle(document.kind)))
+        .filePath(QStringLiteral("%1.%2").arg(safeFilePart(number), suffix));
 }
 
 QList<OfficeTemplateLine> OfficeTemplateService::materialLines(
@@ -422,6 +449,8 @@ bool OfficeTemplateService::renderToFile(const OfficeTemplateDocument &document,
     }
     const QString jsonPath = workingDir.filePath(QStringLiteral("form.json"));
     const QString scriptPath = workingDir.filePath(QStringLiteral("fill_office_template.ps1"));
+    const QString processIdPath = workingDir.filePath(QStringLiteral("spreadsheet-process.pid"));
+    root.insert(QStringLiteral("processIdPath"), QDir::toNativeSeparators(processIdPath));
     QFile jsonFile(jsonPath);
     if (!jsonFile.open(QIODevice::WriteOnly)
         || jsonFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented)) < 0) {
@@ -462,11 +491,13 @@ bool OfficeTemplateService::renderToFile(const OfficeTemplateDocument &document,
     if (!process.waitForFinished(120000)) {
         process.kill();
         process.waitForFinished();
+        terminateTemplateAutomationProcess(processIdPath);
         QFile::remove(outputPath);
         setError(errorMessage, QStringLiteral("填写模板超时。请关闭正在阻塞的 Excel 或 WPS 表格对话框后重试。"));
         return false;
     }
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        terminateTemplateAutomationProcess(processIdPath);
         const QString details = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
         QFile::remove(outputPath);
         setError(errorMessage,
@@ -758,7 +789,7 @@ bool OfficeTemplateService::isReusableAttachment(QSqlDatabase database,
 QString OfficeTemplateService::incompleteFormHint(bool formCompleted)
 {
     return formCompleted
-        ? QStringLiteral("业务单据已生效，库存没有变化；表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单”归档文件夹并标记为已完成，仅未能自动打开，请在“附件管理”中手动打开。")
+        ? QStringLiteral("业务单据已生效，库存没有变化；表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单”归档文件夹并标记为已完成。")
         : QStringLiteral("业务单据已生效，库存没有变化；表单记录已保留，可在“附件管理”中选择该单据并点击“重新生成未完成表单”重试。");
 }
 
@@ -972,13 +1003,16 @@ bool OfficeTemplateService::retryIncompleteDocumentForms(QSqlDatabase database,
         QString persistError;
         if (!persistDocumentForm(database, operatorId, documentId, record.first, document,
                                  &formCompleted, &persistError, openArchivedFiles)) {
-            // 表单本身已保存完成、仅自动打开失败时，仍算重新生成成功，只提示该问题。
             if (!formCompleted) allCompleted = false;
             if (errors) errors->append(QStringLiteral("%1：%2").arg(title, persistError));
-            if (formCompleted && completedTitles) completedTitles->append(title);
+            if (formCompleted && completedTitles) {
+                completedTitles->append(QDir::toNativeSeparators(archiveFilePath(document)));
+            }
             continue;
         }
-        if (completedTitles) completedTitles->append(title);
+        if (completedTitles) {
+            completedTitles->append(QDir::toNativeSeparators(archiveFilePath(document)));
+        }
     }
     return allCompleted;
 }
@@ -992,6 +1026,7 @@ bool OfficeTemplateService::persistDocumentForm(QSqlDatabase database,
                                                 QString *errorMessage,
                                                 bool openArchivedFile)
 {
+    Q_UNUSED(openArchivedFile);
     if (formCompleted) *formCompleted = false;
     QTemporaryDir workDirectory;
     if (!workDirectory.isValid()) {
@@ -1147,12 +1182,6 @@ bool OfficeTemplateService::persistDocumentForm(QSqlDatabase database,
         return false;
     }
 
-    // 自动打开失败只报告，不改变已经完成的表单状态。
-    if (openArchivedFile && !openFileWithApplicationChoice(archivedPath)) {
-        setError(errorMessage, QStringLiteral("表单已保存，但所选表格软件无法打开：%1")
-                                   .arg(QDir::toNativeSeparators(archivedPath)));
-        return false;
-    }
     return true;
 }
 
@@ -1160,9 +1189,11 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
                                                      qlonglong operatorId,
                                                      qlonglong documentId,
                                                      QStringList *errors,
-                                                     bool openArchivedFiles)
+                                                     bool openArchivedFiles,
+                                                     QStringList *savedPaths)
 {
     if (errors) errors->clear();
+    if (savedPaths) savedPaths->clear();
     if (!database.isOpen() || operatorId <= 0 || documentId <= 0) {
         if (errors) errors->append(QStringLiteral("数据库、当前用户或业务单据无效。"));
         return false;
@@ -1379,6 +1410,9 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
             if (errors) errors->append(QStringLiteral("%1：%2")
                                            .arg(formTitle(kind), syncError));
             continue;
+        }
+        if (savedPaths) {
+            savedPaths->append(QDir::toNativeSeparators(archiveFilePath(document)));
         }
     }
     return allOk;

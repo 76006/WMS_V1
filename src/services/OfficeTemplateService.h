@@ -57,6 +57,7 @@ public:
     static QString templateFileName(OfficeFormKind kind);
     static QString outputFileName(const OfficeTemplateDocument &document);
     static QString archiveRootPath();
+    static QString archiveFilePath(const OfficeTemplateDocument &document);
 
     static QList<OfficeTemplateLine> materialLines(
         QSqlDatabase database,
@@ -82,7 +83,7 @@ public:
                                  qlonglong operatorId,
                                  qlonglong businessDocumentId,
                                  QString *errorMessage = nullptr,
-                                 bool openArchivedFile = true);
+                                 bool openArchivedFile = false);
     // 独立材料检验通知单尚未形成入库业务单据，附件按 inspection_notice 归档。
     // 同一通知单再次保存时原位替换数据库附件和“我的文档”中的正本。
     static bool attachToInspectionNotice(const OfficeTemplateDocument &document,
@@ -99,13 +100,14 @@ public:
                                              qlonglong documentId,
                                              QStringList *completedTitles = nullptr,
                                              QStringList *errors = nullptr,
-                                             bool openArchivedFiles = true);
+                                             bool openArchivedFiles = false);
     // 业务单据被事务修订后，从正式业务表重新同步表单载荷、数据库附件和本地归档。
     static bool synchronizeDocumentForms(QSqlDatabase database,
                                          qlonglong operatorId,
                                          qlonglong documentId,
                                          QStringList *errors = nullptr,
-                                         bool openArchivedFiles = false);
+                                         bool openArchivedFiles = false,
+                                         QStringList *savedPaths = nullptr);
 
 private:
     static QString findTemplateFile(OfficeFormKind kind);
@@ -148,6 +150,6 @@ private:
                                     const OfficeTemplateDocument &document,
                                     bool *formCompleted,
                                     QString *errorMessage,
-                                    bool openArchivedFile = true);
+                                    bool openArchivedFile = false);
     static QString incompleteFormHint(bool formCompleted);
 };

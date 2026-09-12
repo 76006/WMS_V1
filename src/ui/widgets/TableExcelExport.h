@@ -18,6 +18,9 @@ public:
 
     static void install(QWidget *page, const QString &pageTitle);
     static void exportPage(QWidget *page, const QString &pageTitle, QWidget *dialogParent);
+    static void editSelectedBusinessDocument(
+        QTableView *table, QWidget *dialogParent,
+        const std::function<void()> &reload = {}, QWidget *editorWindow = nullptr);
     static void fullScreenTable(QTableView *table, const QString &title, QWidget *dialogParent,
                                 const std::function<void()> &reload = {},
                                 const QList<FullScreenAction> &actions = {});

@@ -14,6 +14,7 @@
 #include <QColor>
 #include <QCryptographicHash>
 #include <QDateEdit>
+#include <QDir>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -269,11 +270,16 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     bomPanel->setObjectName(QStringLiteral("panel"));
     auto *bomLayout = new QVBoxLayout(bomPanel);
     bomLayout->setContentsMargins(12, 12, 12, 12);
-    auto *bomToolbar = new QHBoxLayout;
-    bomToolbar->addWidget(new QLabel(QStringLiteral("成品BOM"), bomPanel));
+    // 成品名称与操作按钮分成两行，避免按钮较多时把成品名称压缩遮挡。
+    auto *bomSelectorRow = new QHBoxLayout;
+    bomSelectorRow->addWidget(new QLabel(QStringLiteral("成品BOM"), bomPanel));
     m_bomProductCombo = new QComboBox(bomPanel);
     m_bomProductCombo->setMinimumWidth(320);
-    bomToolbar->addWidget(m_bomProductCombo, 1);
+    m_bomProductCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_bomProductCombo->setMinimumContentsLength(36);
+    bomSelectorRow->addWidget(m_bomProductCombo, 1);
+    bomLayout->addLayout(bomSelectorRow);
+
     m_importBomButton = new QPushButton(QStringLiteral("导入BOM"), bomPanel);
     m_importBomButton->setProperty("primary", true);
     m_viewBomMaterialButton = new QPushButton(QStringLiteral("查看物料详情"), bomPanel);
@@ -291,15 +297,18 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
         button->setEnabled(canEdit);
         if (!canEdit) button->setToolTip(QStringLiteral("当前角色没有物料维护权限"));
     }
-    bomToolbar->addWidget(m_importBomButton);
-    bomToolbar->addWidget(m_viewBomMaterialButton);
-    bomToolbar->addWidget(m_addBomChildButton);
-    bomToolbar->addWidget(m_editBomQuantityButton);
-    bomToolbar->addWidget(m_removeBomItemButton);
-    bomToolbar->addWidget(m_clearBomButton);
-    bomToolbar->addWidget(expandButton);
-    bomToolbar->addWidget(collapseButton);
-    bomLayout->addLayout(bomToolbar);
+    auto *bomActionRow = new QHBoxLayout;
+    bomActionRow->setSpacing(8);
+    bomActionRow->addWidget(m_importBomButton);
+    bomActionRow->addWidget(m_viewBomMaterialButton);
+    bomActionRow->addWidget(m_addBomChildButton);
+    bomActionRow->addWidget(m_editBomQuantityButton);
+    bomActionRow->addWidget(m_removeBomItemButton);
+    bomActionRow->addWidget(m_clearBomButton);
+    bomActionRow->addStretch();
+    bomActionRow->addWidget(expandButton);
+    bomActionRow->addWidget(collapseButton);
+    bomLayout->addLayout(bomActionRow);
 
     auto *bomHint = new QLabel(
         QStringLiteral("BOM按成品、半成品、原材料和辅料分层显示。选中任意物料后可查看完整档案和库存批次；有维护权限时还可添加下级、调整节点或删除子树。成品根节点的用量固定为1。"),
@@ -317,7 +326,14 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     m_bomTree->setAlternatingRowColors(true);
     m_bomTree->setUniformRowHeights(true);
     m_bomTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_bomTree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    // BOM名称和规格保持可读宽度，窗口不足时由表格横向滚动，不再压缩遮挡内容。
+    m_bomTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    m_bomTree->header()->setSectionResizeMode(1, QHeaderView::Interactive);
+    m_bomTree->setColumnWidth(0, 380);
+    m_bomTree->setColumnWidth(1, 220);
+    m_bomTree->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_bomTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_bomTree->setMinimumHeight(280);
     bomLayout->addWidget(m_bomTree, 1);
 
     m_viewTabs = new QTabWidget(this);
@@ -2353,5 +2369,7 @@ void MaterialPage::exportMaterials()
         return;
     }
     QMessageBox::information(this, QStringLiteral("导出完成"),
-                             QStringLiteral("已导出 %1 条物料档案。").arg(rows.size()));
+                             QStringLiteral("已导出 %1 条物料档案。\n\n文件：%2")
+                                 .arg(rows.size())
+                                 .arg(QDir::toNativeSeparators(path)));
 }

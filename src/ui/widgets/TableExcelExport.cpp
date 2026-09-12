@@ -168,6 +168,27 @@ void TableExcelExport::install(QWidget *page, const QString &pageTitle)
     }
 }
 
+void TableExcelExport::editSelectedBusinessDocument(
+    QTableView *table, QWidget *dialogParent,
+    const std::function<void()> &reload, QWidget *editorWindow)
+{
+    const qlonglong documentId = selectedBusinessDocumentId(table);
+    if (documentId <= 0) {
+        QMessageBox::information(dialogParent, QStringLiteral("请选择单据"),
+                                 QStringLiteral("请先在表格中选中一行单据。"));
+        return;
+    }
+    QWidget *targetWindow = editorWindow ? editorWindow : table->window();
+    if (!targetWindow || !QMetaObject::invokeMethod(targetWindow, "editDocumentById",
+            Qt::DirectConnection, Q_ARG(qlonglong, documentId),
+            Q_ARG(QWidget *, dialogParent))) {
+        QMessageBox::warning(dialogParent, QStringLiteral("无法修改"),
+                             QStringLiteral("当前窗口没有可用的单据修改入口。"));
+        return;
+    }
+    if (reload) reload();
+}
+
 void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
                                        QWidget *dialogParent,
                                        const std::function<void()> &reload,
@@ -274,20 +295,8 @@ void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
     if (editButton) {
         QObject::connect(editButton, &QPushButton::clicked, &fullScreen,
                          [&fullScreen, table, originalWindow, reloadAndFilter] {
-            const qlonglong documentId = selectedBusinessDocumentId(table);
-            if (documentId <= 0) {
-                QMessageBox::information(&fullScreen, QStringLiteral("请选择单据"),
-                                         QStringLiteral("请先在表格中选中一行单据。"));
-                return;
-            }
-            if (!originalWindow || !QMetaObject::invokeMethod(originalWindow.data(), "editDocumentById",
-                    Qt::DirectConnection, Q_ARG(qlonglong, documentId),
-                    Q_ARG(QWidget *, &fullScreen))) {
-                QMessageBox::warning(&fullScreen, QStringLiteral("无法修改"),
-                                     QStringLiteral("当前窗口没有可用的单据修改入口。"));
-                return;
-            }
-            reloadAndFilter();
+            TableExcelExport::editSelectedBusinessDocument(
+                table, &fullScreen, reloadAndFilter, originalWindow.data());
         });
     }
     for (int index = 0; index < actions.size(); ++index) {

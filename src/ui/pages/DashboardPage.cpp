@@ -44,9 +44,12 @@ DashboardPage::DashboardPage(QSqlDatabase database, QWidget *parent)
     auto *recentToolbar = new QHBoxLayout;
     auto *title = new QLabel(QStringLiteral("最近出入库记录"), panel);
     title->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 600;"));
+    auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), panel);
+    editRecentButton->setProperty("primary", true);
     auto *fullScreenButton = new QPushButton(QStringLiteral("全屏显示"), panel);
     recentToolbar->addWidget(title);
     recentToolbar->addStretch();
+    recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenButton);
     panelLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(panel);
@@ -62,6 +65,10 @@ DashboardPage::DashboardPage(QSqlDatabase database, QWidget *parent)
     m_recentTable->verticalHeader()->hide();
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
     panelLayout->addWidget(m_recentTable);
+    connect(editRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, this, [this] { refresh(); });
+    });
     connect(fullScreenButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部出入库记录"), this, [this] { refresh(); });

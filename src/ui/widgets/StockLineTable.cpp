@@ -121,14 +121,17 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     m_table->horizontalHeader()->setSectionResizeMode(BatchColumn, QHeaderView::Interactive);
     m_table->setColumnWidth(BatchColumn, BatchColumnWidth);
     m_table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
-    m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_table->setMinimumHeight(240);
+    // 入库明细列较多，固定保留完整的横向滚动条；外层入库页负责纵向滚动，
+    // 因此较矮窗口中滚动条也不会被父布局裁掉。其他业务页维持按需显示。
+    m_table->setHorizontalScrollBarPolicy(
+        m_mode == Mode::Inbound ? Qt::ScrollBarAlwaysOn : Qt::ScrollBarAsNeeded);
+    m_table->setMinimumHeight(m_mode == Mode::Inbound ? 260 : 240);
     m_table->setColumnHidden(UnitUsageColumn, true);
     if (m_mode == Mode::Outbound) {
         m_table->setColumnHidden(OrderedColumn, true);
         m_table->setColumnHidden(GiftColumn, true);
     }
-    root->addWidget(m_table);
+    root->addWidget(m_table, 1);
 
     connect(addButton, &QPushButton::clicked, this, &StockLineTable::addLine);
     connect(m_fullScreenButton, &QPushButton::clicked,
@@ -227,19 +230,23 @@ void StockLineTable::addLine()
     batch->setProperty(AutomaticBatchProperty, false);
     if (m_mode == Mode::Inbound) batch->setInsertPolicy(QComboBox::NoInsert);
     auto *quantity = new QDoubleSpinBox(m_table);
+    quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
     quantity->setDecimals(6);
     // 允许0：空行保持0，是否必须大于0由 lines() 在选中物料后校验。
     quantity->setRange(0.0, 999999999999.0);
     quantity->setValue(0.0);
     auto *unitUsage = new QDoubleSpinBox(m_table);
+    unitUsage->setButtonSymbols(QAbstractSpinBox::NoButtons);
     unitUsage->setDecimals(6);
     unitUsage->setRange(0.0, 999999999999.0);
     unitUsage->setValue(0.0);
     auto *ordered = new QDoubleSpinBox(m_table);
+    ordered->setButtonSymbols(QAbstractSpinBox::NoButtons);
     ordered->setDecimals(6);
     ordered->setRange(0.0, 999999999999.0);
     ordered->setValue(0.0);
     auto *gift = new QDoubleSpinBox(m_table);
+    gift->setButtonSymbols(QAbstractSpinBox::NoButtons);
     gift->setDecimals(6);
     gift->setRange(0.0, qMax(0.0, quantity->value() - ordered->value()));
     gift->setValue(0.0);
@@ -331,8 +338,7 @@ void StockLineTable::addLine()
     loadMaterials(material);
     loadUnitUsage(row);
     quantity->setReadOnly(m_productionUsageMode);
-    quantity->setButtonSymbols(m_productionUsageMode ? QAbstractSpinBox::NoButtons
-                                                      : QAbstractSpinBox::UpDownArrows);
+    quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
     loadWarehouses(row);
     refreshRowNumbers();
 }
@@ -456,8 +462,7 @@ void StockLineTable::setProductionUsageMode(bool enabled)
         if (unitUsage) unitUsage->setEnabled(m_productionUsageMode);
         if (quantity) {
             quantity->setReadOnly(m_productionUsageMode);
-            quantity->setButtonSymbols(m_productionUsageMode ? QAbstractSpinBox::NoButtons
-                                                              : QAbstractSpinBox::UpDownArrows);
+            quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
         }
         loadUnitUsage(row);
     }
@@ -774,9 +779,10 @@ QString StockLineTable::nextAutomaticBatchNumber(int excludedRow) const
         "SELECT batch_no FROM batches WHERE UPPER(batch_no) GLOB ? "
         "UNION ALL SELECT batch_no FROM stock_balances WHERE UPPER(batch_no) GLOB ? "
         "UNION ALL SELECT batch_no FROM business_document_items WHERE UPPER(batch_no) GLOB ? "
-        "UNION ALL SELECT batch_no FROM inventory_ledger WHERE UPPER(batch_no) GLOB ?"));
+        "UNION ALL SELECT batch_no FROM inventory_ledger WHERE UPPER(batch_no) GLOB ? "
+        "UNION ALL SELECT batch_no FROM inspection_notice_items WHERE UPPER(batch_no) GLOB ?"));
     const QString glob = prefix + QStringLiteral("[0-9][0-9][0-9]");
-    for (int index = 0; index < 4; ++index) query.addBindValue(glob);
+    for (int index = 0; index < 5; ++index) query.addBindValue(glob);
     if (query.exec()) {
         while (query.next()) includeNumber(query.value(0).toString());
     }

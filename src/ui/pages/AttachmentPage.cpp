@@ -87,6 +87,7 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     m_uploadButton->setProperty("primary", true);
     m_downloadButton = new QPushButton(QStringLiteral("下载"), attachmentPanel);
     m_openButton = new QPushButton(QStringLiteral("预览/打开"), attachmentPanel);
+    m_openButton->setVisible(false);
     m_deleteButton = new QPushButton(QStringLiteral("删除"), attachmentPanel);
     m_deleteButton->setProperty("danger", true);
     toolbar->addWidget(m_showDeleted);
@@ -122,7 +123,6 @@ AttachmentPage::AttachmentPage(QSqlDatabase database, Session session, QWidget *
     connect(m_uploadButton, &QPushButton::clicked, this, &AttachmentPage::upload);
     connect(m_downloadButton, &QPushButton::clicked, this, &AttachmentPage::download);
     connect(m_openButton, &QPushButton::clicked, this, &AttachmentPage::openAttachment);
-    connect(m_attachmentTable, &QTableWidget::doubleClicked, this, &AttachmentPage::openAttachment);
     connect(m_deleteButton, &QPushButton::clicked, this, &AttachmentPage::deleteOrRestore);
     refresh();
 }
@@ -407,7 +407,9 @@ void AttachmentPage::download()
         QMessageBox::warning(this, QStringLiteral("保存失败"), output.errorString());
         return;
     }
-    QMessageBox::information(this, QStringLiteral("下载完成"), QStringLiteral("附件已保存。"));
+    QMessageBox::information(
+        this, QStringLiteral("下载完成"),
+        QStringLiteral("附件已保存。\n\n文件：%1").arg(QDir::toNativeSeparators(path)));
 }
 
 void AttachmentPage::deleteOrRestore()
@@ -450,13 +452,13 @@ void AttachmentPage::retryIncompleteForms()
             this, QStringLiteral("表单重新生成完成"),
             completedTitles.isEmpty()
                 ? QStringLiteral("该单据没有需要重新生成的表单。")
-                : QStringLiteral("以下表单已重新生成并保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹：\n\n%1")
+                : QStringLiteral("以下表单已重新生成并保存：\n\n文件：\n%1")
                       .arg(completedTitles.join(QStringLiteral("\n"))));
         return;
     }
     QString message;
     if (!completedTitles.isEmpty()) {
-        message = QStringLiteral("已重新生成并保存：\n%1\n\n")
+        message = QStringLiteral("已重新生成并保存：\n文件：\n%1\n\n")
                       .arg(completedTitles.join(QStringLiteral("\n")));
     }
     message += QStringLiteral("以下表单或步骤未完成：\n\n%1")

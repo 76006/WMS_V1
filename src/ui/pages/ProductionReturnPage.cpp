@@ -7,10 +7,12 @@
 #include "ui/widgets/TableExcelExport.h"
 
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -21,6 +23,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -56,9 +59,20 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
 {
     setObjectName(QStringLiteral("pageRoot"));
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(12);
-    auto *panel = new QFrame(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    auto *pageScroll = new QScrollArea(this);
+    pageScroll->setWidgetResizable(true);
+    pageScroll->setFrameShape(QFrame::NoFrame);
+    pageScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *pageBody = new QWidget(pageScroll);
+    pageBody->setObjectName(QStringLiteral("pageRoot"));
+    auto *pageLayout = new QVBoxLayout(pageBody);
+    pageLayout->setContentsMargins(20, 20, 20, 20);
+    pageLayout->setSpacing(12);
+    pageLayout->setSizeConstraint(QLayout::SetMinimumSize);
+
+    auto *panel = new QFrame(pageBody);
     panel->setObjectName(QStringLiteral("panel"));
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(20, 18, 20, 20);
@@ -109,15 +123,18 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     m_submitButton->setEnabled(m_session.canPostProduction());
     actions->addWidget(m_submitButton);
     panelLayout->addLayout(actions);
-    root->addWidget(panel);
+    pageLayout->addWidget(panel);
 
-    auto *recentPanel = new QFrame(this);
+    auto *recentPanel = new QFrame(pageBody);
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
     recentToolbar->addWidget(new QLabel(QStringLiteral("近期生产退料单"), recentPanel));
     recentToolbar->addStretch();
+    auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
+    editRecentButton->setProperty("primary", true);
     auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenRecentButton);
     recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 4, recentPanel);
@@ -127,9 +144,16 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
+    m_recentTable->setMinimumHeight(180);
     recentLayout->addWidget(m_recentTable);
-    root->addWidget(recentPanel, 1);
+    pageLayout->addWidget(recentPanel, 1);
+    pageScroll->setWidget(pageBody);
+    root->addWidget(pageScroll);
 
+    connect(editRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, this, [this] { refreshRecentDocuments(); });
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部生产退料单"), this, [this] { refreshRecentDocuments(); });
@@ -239,6 +263,7 @@ void ProductionReturnPage::loadSourceLines()
                                   new QTableWidgetItem(query.value(column + 2).toString()));
         }
         auto *quantity = new QDoubleSpinBox(m_linesTable);
+        quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
         quantity->setDecimals(6);
         quantity->setRange(0.000001, query.value(8).toDouble());
         quantity->setValue(query.value(8).toDouble());
@@ -515,13 +540,14 @@ void ProductionReturnPage::submit()
                                                 posted.documentId, &formError)) {
         QMessageBox::information(
             this, QStringLiteral("生产退料完成"),
-            QStringLiteral("退料单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单\\领料单”，并已自动打开。")
-                .arg(posted.documentNumber));
+            QStringLiteral("退料单 %1 已生效，模板表单已保存。\n\n文件：%2")
+                .arg(posted.documentNumber,
+                     QDir::toNativeSeparators(OfficeTemplateService::archiveFilePath(returnForm))));
     } else {
         QMessageBox::warning(
             this, QStringLiteral("退料已完成，但模板处理未全部完成"),
             QStringLiteral("退料单 %1 及本次库存退料已生效，请勿重复提交退料；"
-                           "以下表单保存或打开步骤未完成：\n\n%2")
+                           "以下表单保存步骤未完成：\n\n%2")
                 .arg(posted.documentNumber, formError));
     }
     resetSubmissionToken();

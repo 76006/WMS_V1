@@ -236,6 +236,7 @@ InspectionDialog::InspectionDialog(QSqlDatabase database,
 
     auto *buttons = new QHBoxLayout;
     auto *printButton = new QPushButton(QStringLiteral("打开模板预览/打印"), this);
+    printButton->setVisible(false);
     auto *saveButton = new QPushButton(QStringLiteral("保存并返回入库单"), this);
     saveButton->setProperty("primary", true);
     auto *cancelButton = new QPushButton(QStringLiteral("取消"), this);

@@ -4,9 +4,11 @@
 #include "ui/widgets/ComboBoxSearch.h"
 
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -50,6 +52,7 @@ enum Column {
 QDoubleSpinBox *quantitySpin(double value, QWidget *parent)
 {
     auto *spin = new QDoubleSpinBox(parent);
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     spin->setDecimals(6);
     spin->setRange(0.000001, 999999999.0);
     spin->setValue(qMax(0.000001, value));
@@ -475,12 +478,18 @@ void BusinessDocumentEditDialog::saveDocument()
         return;
     }
     QStringList formErrors;
+    QStringList savedFormPaths;
     OfficeTemplateService::synchronizeDocumentForms(
-        m_database, m_session.userId, document.documentId, &formErrors, false);
+        m_database, m_session.userId, document.documentId, &formErrors, false, &savedFormPaths);
     m_saved = true;
     if (formErrors.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("修改完成"),
-                                 QStringLiteral("单据、库存、SN、数据库表单附件和本地归档已同步更新。"));
+        const QString fileList = savedFormPaths.isEmpty()
+            ? QStringLiteral("该单据没有需要保存的模板表单。")
+            : QStringLiteral("文件：\n%1").arg(savedFormPaths.join(QStringLiteral("\n")));
+        QMessageBox::information(
+            this, QStringLiteral("修改完成"),
+            QStringLiteral("单据、库存、SN、数据库表单附件和本地归档已同步更新。\n\n%1")
+                .arg(fileList));
     } else {
         QMessageBox::warning(
             this, QStringLiteral("单据已修改，部分表单未同步"),

@@ -6,6 +6,7 @@
 #include "ui/widgets/TableExcelExport.h"
 
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDesktopServices>
@@ -25,6 +26,7 @@
 #include <QMessageBox>
 #include <QMimeDatabase>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSqlQuery>
 #include <QStandardPaths>
@@ -49,6 +51,9 @@ enum NoticeColumn {
     NoticeDeleteColumn,
     NoticeColumnCount
 };
+
+constexpr int RequireBatchRole = Qt::UserRole + 2;
+constexpr auto AutomaticBatchProperty = "automaticBatch";
 
 QString statusText(const QString &status)
 {
@@ -151,11 +156,14 @@ public:
         m_lines->horizontalHeader()->setStretchLastSection(false);
         m_lines->setColumnWidth(NoticeMaterialColumn, 280);
         m_lines->setColumnWidth(NoticeSpecificationColumn, 210);
+        // 数量直接输入，保留足够宽度显示六位小数。
+        m_lines->setColumnWidth(NoticeQuantityColumn, 180);
         m_lines->setColumnWidth(NoticeOrderColumn, 150);
         m_lines->setColumnWidth(NoticeSupplierColumn, 220);
         root->addWidget(m_lines, 1);
         auto *buttons = new QDialogButtonBox(this);
         auto *preview = buttons->addButton(QStringLiteral("预览当前通知单"), QDialogButtonBox::ActionRole);
+        preview->setVisible(false);
         auto *cancel = buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
         auto *saveButton = buttons->addButton(QStringLiteral("保存通知单"), QDialogButtonBox::AcceptRole);
         saveButton->setProperty("primary", true);
@@ -181,6 +189,7 @@ public:
             QString error;
             const QString number = service.previewNextInspectionNumber(date, &error);
             m_numberLabel->setText(number.isEmpty() ? QStringLiteral("保存时生成") : number);
+            regenerateAutomaticBatches();
         });
         connect(m_purchaseOrder, &QLineEdit::textChanged, this, [this](const QString &text) {
             for (int row = 0; row < m_lines->rowCount(); ++row) {
@@ -230,11 +239,13 @@ private:
         combo->addItem(QStringLiteral("请选择物料"), qlonglong(0));
         QSqlQuery query(m_database);
         query.exec(QStringLiteral(
-            "SELECT id,code,name,specification FROM materials ORDER BY code COLLATE NOCASE"));
+            "SELECT id,code,name,specification,COALESCE(require_batch,0) "
+            "FROM materials ORDER BY code COLLATE NOCASE"));
         while (query.next()) {
             combo->addItem(QStringLiteral("%1 - %2").arg(query.value(1).toString(), query.value(2).toString()),
                            query.value(0));
             combo->setItemData(combo->count() - 1, query.value(3), Qt::UserRole + 1);
+            combo->setItemData(combo->count() - 1, query.value(4), RequireBatchRole);
         }
         ComboBoxSearch::enableContainsSearch(combo, QStringLiteral("输入物料号或名称"));
         const int selected = combo->findData(selectedId);
@@ -253,27 +264,37 @@ private:
         specification->setFlags(specification->flags() & ~Qt::ItemIsEditable);
         m_lines->setItem(row, NoticeSpecificationColumn, specification);
         auto *quantity = new QDoubleSpinBox(m_lines);
+        quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
         quantity->setDecimals(6);
         quantity->setRange(0.000001, 999999999.0);
         quantity->setValue(line.quantity > 0 ? line.quantity : 1.0);
+        quantity->setMinimumWidth(170);
+        quantity->setAlignment(Qt::AlignRight);
         m_lines->setCellWidget(row, NoticeQuantityColumn, quantity);
         auto *order = new QLineEdit(line.purchaseOrderNumber, m_lines);
         order->setPlaceholderText(m_purchaseOrder->text());
         m_lines->setCellWidget(row, NoticeOrderColumn, order);
-        m_lines->setCellWidget(row, NoticeBatchColumn, new QLineEdit(line.batchNumber, m_lines));
+        auto *batch = new QLineEdit(line.batchNumber, m_lines);
+        batch->setPlaceholderText(QStringLiteral("选择批次管理物料后自动生成"));
+        batch->setProperty(AutomaticBatchProperty, false);
+        m_lines->setCellWidget(row, NoticeBatchColumn, batch);
         auto *supplier = new QLineEdit(line.supplier, m_lines);
         supplier->setPlaceholderText(m_supplier->currentText());
         m_lines->setCellWidget(row, NoticeSupplierColumn, supplier);
         auto *remove = new QPushButton(QStringLiteral("删除"), m_lines);
         m_lines->setCellWidget(row, NoticeDeleteColumn, remove);
         connect(material, qOverload<int>(&QComboBox::currentIndexChanged), this,
-                [this, material](int index) {
+                [this, material, batch](int index) {
             for (int row = 0; row < m_lines->rowCount(); ++row) {
                 if (m_lines->cellWidget(row, NoticeMaterialColumn) != material) continue;
                 m_lines->item(row, NoticeSpecificationColumn)->setText(
                     material->itemData(index, Qt::UserRole + 1).toString());
+                updateBatchForMaterial(row, material, batch);
                 break;
             }
+        });
+        connect(batch, &QLineEdit::textEdited, this, [batch] {
+            batch->setProperty(AutomaticBatchProperty, false);
         });
         connect(remove, &QPushButton::clicked, this, [this, remove] {
             for (int row = 0; row < m_lines->rowCount(); ++row) {
@@ -284,6 +305,87 @@ private:
                 break;
             }
         });
+        if (line.batchNumber.trimmed().isEmpty()) {
+            updateBatchForMaterial(row, material, batch);
+        }
+    }
+
+    QString nextAutomaticBatchNumber(int excludedRow) const
+    {
+        const QString prefix = QStringLiteral("SM%1").arg(
+            m_notificationDate->date().toString(QStringLiteral("yyyyMMdd")));
+        const QRegularExpression pattern(
+            QStringLiteral("^%1(\\d{3})$").arg(QRegularExpression::escape(prefix)),
+            QRegularExpression::CaseInsensitiveOption);
+        int maximum = 0;
+        const auto includeNumber = [&pattern, &maximum](const QString &candidate) {
+            const QRegularExpressionMatch match = pattern.match(candidate.trimmed());
+            if (match.hasMatch()) maximum = qMax(maximum, match.captured(1).toInt());
+        };
+
+        QSqlQuery query(m_database);
+        query.prepare(QStringLiteral(
+            "SELECT batch_no FROM batches WHERE UPPER(batch_no) GLOB ? "
+            "UNION ALL SELECT batch_no FROM stock_balances WHERE UPPER(batch_no) GLOB ? "
+            "UNION ALL SELECT batch_no FROM business_document_items WHERE UPPER(batch_no) GLOB ? "
+            "UNION ALL SELECT batch_no FROM inventory_ledger WHERE UPPER(batch_no) GLOB ? "
+            "UNION ALL SELECT batch_no FROM inspection_notice_items WHERE UPPER(batch_no) GLOB ?"));
+        const QString glob = prefix + QStringLiteral("[0-9][0-9][0-9]");
+        for (int index = 0; index < 5; ++index) query.addBindValue(glob);
+        if (query.exec()) {
+            while (query.next()) includeNumber(query.value(0).toString());
+        }
+
+        for (int row = 0; row < m_lines->rowCount(); ++row) {
+            if (row == excludedRow) continue;
+            if (auto *batch = qobject_cast<QLineEdit *>(
+                    m_lines->cellWidget(row, NoticeBatchColumn))) {
+                includeNumber(batch->text());
+            }
+        }
+        return maximum >= 999
+            ? QString()
+            : QStringLiteral("%1%2").arg(prefix).arg(
+                  maximum + 1, 3, 10, QLatin1Char('0'));
+    }
+
+    void updateBatchForMaterial(int row, QComboBox *material, QLineEdit *batch)
+    {
+        if (!material || !batch) return;
+        const bool requiresBatch = material->currentData().toLongLong() > 0
+            && material->currentData(RequireBatchRole).toBool();
+        batch->setEnabled(requiresBatch);
+        if (!requiresBatch) {
+            if (batch->property(AutomaticBatchProperty).toBool()) batch->clear();
+            batch->setProperty(AutomaticBatchProperty, false);
+            return;
+        }
+        if (!batch->text().trimmed().isEmpty()) return;
+        const QString generated = nextAutomaticBatchNumber(row);
+        if (generated.isEmpty()) {
+            batch->setPlaceholderText(QStringLiteral("当日批号已用完，请手工填写"));
+            batch->setEnabled(true);
+            return;
+        }
+        batch->setText(generated);
+        batch->setProperty(AutomaticBatchProperty, true);
+        batch->setToolTip(QStringLiteral("系统根据通知日期自动生成，可手工修改"));
+    }
+
+    void regenerateAutomaticBatches()
+    {
+        for (int row = 0; row < m_lines->rowCount(); ++row) {
+            auto *material = qobject_cast<QComboBox *>(
+                m_lines->cellWidget(row, NoticeMaterialColumn));
+            auto *batch = qobject_cast<QLineEdit *>(
+                m_lines->cellWidget(row, NoticeBatchColumn));
+            if (!material || !batch) continue;
+            if (batch->property(AutomaticBatchProperty).toBool()) {
+                batch->clear();
+                batch->setProperty(AutomaticBatchProperty, false);
+            }
+            updateBatchForMaterial(row, material, batch);
+        }
     }
 
     InspectionNoticeDraft draft(QString *errorMessage) const
@@ -411,8 +513,8 @@ private:
         } else {
             QMessageBox::information(
                 this, QStringLiteral("保存完成"),
-                QStringLiteral("通知单 %1 已保存到数据库和“我的文档”归档目录。")
-                    .arg(number));
+                QStringLiteral("通知单 %1 已保存。\n\n文件：%2")
+                    .arg(number, QDir::toNativeSeparators(savedPath)));
         }
         m_saved = true;
         accept();
@@ -578,6 +680,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     m_recordResultButton = new QPushButton(QStringLiteral("录入/修改检验结果"), panel);
     auto *openPendingNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
     auto *fullScreenPending = new QPushButton(QStringLiteral("全屏显示"), panel);
+    openPendingNotice->setVisible(false);
     pendingToolbar->addWidget(m_editPendingButton);
     pendingToolbar->addWidget(m_recordResultButton);
     pendingToolbar->addWidget(openPendingNotice);
@@ -602,6 +705,8 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     auto *openHistoryNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
     auto *openInspectionAttachment = new QPushButton(QStringLiteral("打开检验附件"), panel);
     auto *fullScreenHistory = new QPushButton(QStringLiteral("全屏显示"), panel);
+    openHistoryNotice->setVisible(false);
+    openInspectionAttachment->setVisible(false);
     historyToolbar->addWidget(m_viewHistoryButton);
     historyToolbar->addWidget(historyResult);
     historyToolbar->addWidget(openHistoryNotice);

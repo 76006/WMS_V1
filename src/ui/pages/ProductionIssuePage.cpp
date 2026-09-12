@@ -9,6 +9,7 @@
 
 #include <QComboBox>
 #include <QDateEdit>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -108,7 +109,10 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     auto *recentToolbar = new QHBoxLayout;
     recentToolbar->addWidget(new QLabel(QStringLiteral("近期生产领料单"), recentPanel));
     recentToolbar->addStretch();
+    auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
+    editRecentButton->setProperty("primary", true);
     auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenRecentButton);
     recentLayout->addLayout(recentToolbar);
     m_recentTable = new QTableWidget(0, 5, recentPanel);
@@ -119,11 +123,16 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recentTable->horizontalHeader()->setStretchLastSection(true);
+    m_recentTable->setMinimumHeight(180);
     recentLayout->addWidget(m_recentTable);
     pageLayout->addWidget(recentPanel, 1);
     pageScroll->setWidget(pageBody);
     root->addWidget(pageScroll);
 
+    connect(editRecentButton, &QPushButton::clicked, this, [this] {
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, this, [this] { refreshRecentDocuments(); });
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部生产领料单"), this, [this] { refreshRecentDocuments(); });
@@ -346,12 +355,13 @@ void ProductionIssuePage::submit()
                                                 posted.documentId, &formError)) {
         QMessageBox::information(
             this, QStringLiteral("生产领料完成"),
-            QStringLiteral("领料单 %1 已生效，模板表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单\\领料单”，并已自动打开。")
-                .arg(posted.documentNumber));
+            QStringLiteral("领料单 %1 已生效，模板表单已保存。\n\n文件：%2")
+                .arg(posted.documentNumber,
+                     QDir::toNativeSeparators(OfficeTemplateService::archiveFilePath(issueForm))));
     } else {
         QMessageBox::warning(
             this, QStringLiteral("领料已完成，但模板处理未全部完成"),
-            QStringLiteral("领料单 %1 已生效，但以下保存或打开步骤未完成：\n\n%2")
+            QStringLiteral("领料单 %1 已生效，但以下保存步骤未完成：\n\n%2")
                 .arg(posted.documentNumber, formError));
     }
     resetSubmissionToken();

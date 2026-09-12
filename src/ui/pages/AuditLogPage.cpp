@@ -5,6 +5,7 @@
 #include <QAbstractItemView>
 #include <QDate>
 #include <QDateEdit>
+#include <QDir>
 #include <QFileDialog>
 #include <QFrame>
 #include <QHeaderView>
@@ -110,5 +111,7 @@ void AuditLogPage::exportLogs()
     if (!XlsxExporter::writeSingleSheet(path, QStringLiteral("操作日志"), headers, rows, &error))
         QMessageBox::warning(this, QStringLiteral("导出失败"), error);
     else
-        QMessageBox::information(this, QStringLiteral("导出完成"), QStringLiteral("操作日志已导出。"));
+        QMessageBox::information(
+            this, QStringLiteral("导出完成"),
+            QStringLiteral("操作日志已导出。\n\n文件：%1").arg(QDir::toNativeSeparators(path)));
 }
