@@ -136,7 +136,7 @@ bool InspectionService::validateDraft(const InspectionNoticeDraft &draft,
     }
 
     QSqlQuery material(m_database);
-    material.prepare(QStringLiteral("SELECT COALESCE(require_batch,0) FROM materials WHERE id=?"));
+    material.prepare(QStringLiteral("SELECT 1 FROM materials WHERE id=?"));
     for (int index = 0; index < draft.lines.size(); ++index) {
         const InspectionNoticeLine &line = draft.lines.at(index);
         if (line.materialId <= 0 || !std::isfinite(line.quantity)
@@ -149,9 +149,8 @@ bool InspectionService::validateDraft(const InspectionNoticeDraft &draft,
             setError(errorMessage, QStringLiteral("第 %1 行物料不存在。").arg(index + 1));
             return false;
         }
-        if (material.value(0).toBool() && line.batchNumber.trimmed().isEmpty()) {
-            setError(errorMessage, QStringLiteral("第 %1 行物料启用了批次管理，必须填写批号。")
-                                       .arg(index + 1));
+        if (line.batchNumber.trimmed().isEmpty()) {
+            setError(errorMessage, QStringLiteral("第 %1 行批号不能为空。").arg(index + 1));
             return false;
         }
     }

@@ -36,7 +36,6 @@
 #include <QUrl>
 #include <QUuid>
 
-#include <algorithm>
 #include <utility>
 
 namespace {
@@ -52,8 +51,8 @@ enum NoticeColumn {
     NoticeColumnCount
 };
 
-constexpr int RequireBatchRole = Qt::UserRole + 2;
 constexpr auto AutomaticBatchProperty = "automaticBatch";
+constexpr int MaterialSupplierRole = Qt::UserRole + 2;
 
 QString statusText(const QString &status)
 {
@@ -125,9 +124,6 @@ public:
         m_urgency->addItem(QStringLiteral("正常（7-15天）"), QStringLiteral("NORMAL"));
         m_urgency->setCurrentIndex(2);
         m_purchaseOrder = new QLineEdit(this);
-        m_supplier = new QComboBox(this);
-        populateSuppliers();
-        ComboBoxSearch::enableContainsSearch(m_supplier, QStringLiteral("选择或输入供应商"));
         form->addRow(QStringLiteral("通知单号"), m_numberLabel);
         form->addRow(QStringLiteral("通知日期 *"), m_notificationDate);
         form->addRow(QStringLiteral("到货日期 *"), m_arrivalDate);
@@ -135,7 +131,6 @@ public:
         form->addRow(QStringLiteral("通知单位 *"), m_department);
         form->addRow(QStringLiteral("待检状态 *"), m_urgency);
         form->addRow(QStringLiteral("默认采购单号"), m_purchaseOrder);
-        form->addRow(QStringLiteral("默认供应商"), m_supplier);
         root->addLayout(form);
 
         auto *toolbar = new QHBoxLayout;
@@ -208,44 +203,19 @@ public:
     bool saved() const { return m_saved; }
 
 private:
-    void populateSuppliers()
-    {
-        m_supplier->setEditable(true);
-        m_supplier->addItem(QString());
-        QSet<QString> seen;
-        const QStringList sql = {
-            QStringLiteral("SELECT supplier FROM batches WHERE trim(supplier)<>''"),
-            QStringLiteral("SELECT supplier FROM business_documents WHERE trim(supplier)<>''"),
-            QStringLiteral("SELECT brand FROM materials WHERE trim(brand)<>''")};
-        QStringList values;
-        for (const QString &statement : sql) {
-            QSqlQuery query(m_database);
-            if (!query.exec(statement)) continue;
-            while (query.next()) {
-                const QString value = query.value(0).toString().trimmed();
-                const QString key = value.toCaseFolded();
-                if (value.isEmpty() || seen.contains(key)) continue;
-                seen.insert(key);
-                values.append(value);
-            }
-        }
-        values.sort(Qt::CaseInsensitive);
-        m_supplier->addItems(values);
-    }
-
     QComboBox *materialCombo(qlonglong selectedId)
     {
         auto *combo = new QComboBox(m_lines);
         combo->addItem(QStringLiteral("请选择物料"), qlonglong(0));
         QSqlQuery query(m_database);
         query.exec(QStringLiteral(
-            "SELECT id,code,name,specification,COALESCE(require_batch,0) "
+            "SELECT id,code,name,specification,brand "
             "FROM materials ORDER BY code COLLATE NOCASE"));
         while (query.next()) {
             combo->addItem(QStringLiteral("%1 - %2").arg(query.value(1).toString(), query.value(2).toString()),
                            query.value(0));
             combo->setItemData(combo->count() - 1, query.value(3), Qt::UserRole + 1);
-            combo->setItemData(combo->count() - 1, query.value(4), RequireBatchRole);
+            combo->setItemData(combo->count() - 1, query.value(4), MaterialSupplierRole);
         }
         ComboBoxSearch::enableContainsSearch(combo, QStringLiteral("输入物料号或名称"));
         const int selected = combo->findData(selectedId);
@@ -279,17 +249,19 @@ private:
         batch->setProperty(AutomaticBatchProperty, false);
         m_lines->setCellWidget(row, NoticeBatchColumn, batch);
         auto *supplier = new QLineEdit(line.supplier, m_lines);
-        supplier->setPlaceholderText(m_supplier->currentText());
+        supplier->setPlaceholderText(QStringLiteral("默认取物料品牌，可手工修改"));
+        supplier->setToolTip(QStringLiteral("选择物料后自动带出该物料的品牌；更换物料时会覆盖当前值"));
         m_lines->setCellWidget(row, NoticeSupplierColumn, supplier);
         auto *remove = new QPushButton(QStringLiteral("删除"), m_lines);
         m_lines->setCellWidget(row, NoticeDeleteColumn, remove);
         connect(material, qOverload<int>(&QComboBox::currentIndexChanged), this,
-                [this, material, batch](int index) {
+                [this, material, batch, supplier](int index) {
             for (int row = 0; row < m_lines->rowCount(); ++row) {
                 if (m_lines->cellWidget(row, NoticeMaterialColumn) != material) continue;
                 m_lines->item(row, NoticeSpecificationColumn)->setText(
                     material->itemData(index, Qt::UserRole + 1).toString());
                 updateBatchForMaterial(row, material, batch);
+                if (index >= 0) updateSupplierForMaterial(material, supplier);
                 break;
             }
         });
@@ -307,6 +279,9 @@ private:
         });
         if (line.batchNumber.trimmed().isEmpty()) {
             updateBatchForMaterial(row, material, batch);
+        }
+        if (line.supplier.trimmed().isEmpty() && material->currentData().toLongLong() > 0) {
+            updateSupplierForMaterial(material, supplier);
         }
     }
 
@@ -352,12 +327,12 @@ private:
     void updateBatchForMaterial(int row, QComboBox *material, QLineEdit *batch)
     {
         if (!material || !batch) return;
-        const bool requiresBatch = material->currentData().toLongLong() > 0
-            && material->currentData(RequireBatchRole).toBool();
-        batch->setEnabled(requiresBatch);
-        if (!requiresBatch) {
+        const bool hasMaterial = material->currentData().toLongLong() > 0;
+        batch->setEnabled(hasMaterial);
+        if (!hasMaterial) {
             if (batch->property(AutomaticBatchProperty).toBool()) batch->clear();
             batch->setProperty(AutomaticBatchProperty, false);
+            batch->setPlaceholderText(QStringLiteral("选择物料后自动生成"));
             return;
         }
         if (!batch->text().trimmed().isEmpty()) return;
@@ -370,6 +345,14 @@ private:
         batch->setText(generated);
         batch->setProperty(AutomaticBatchProperty, true);
         batch->setToolTip(QStringLiteral("系统根据通知日期自动生成，可手工修改"));
+    }
+
+    void updateSupplierForMaterial(QComboBox *material, QLineEdit *supplier)
+    {
+        if (!material || !supplier) return;
+        supplier->setText(material->currentData().toLongLong() > 0
+                              ? material->currentData(MaterialSupplierRole).toString().trimmed()
+                              : QString());
     }
 
     void regenerateAutomaticBatches()
@@ -388,8 +371,10 @@ private:
         }
     }
 
-    InspectionNoticeDraft draft(QString *errorMessage) const
+    InspectionNoticeDraft draft(QString *errorMessage)
     {
+        // 保存前再次补齐所有空批号，避免仅依赖下拉框切换事件。
+        regenerateAutomaticBatches();
         InspectionNoticeDraft value;
         value.notificationDate = m_notificationDate->date();
         value.arrivalDate = m_arrivalDate->date();
@@ -397,7 +382,6 @@ private:
         value.notificationDepartment = m_department->text().trimmed();
         value.urgency = m_urgency->currentData().toString();
         value.purchaseOrderNumber = m_purchaseOrder->text().trimmed();
-        value.supplier = m_supplier->currentText().trimmed();
         if (value.entrustedBy.isEmpty() || value.notificationDepartment.isEmpty()) {
             if (errorMessage) *errorMessage = QStringLiteral("委托人员和通知单位不能为空。");
             return {};
@@ -422,16 +406,31 @@ private:
             line.purchaseOrderNumber = order && !order->text().trimmed().isEmpty()
                 ? order->text().trimmed() : value.purchaseOrderNumber;
             line.batchNumber = batch ? batch->text().trimmed() : QString();
-            line.supplier = supplier && !supplier->text().trimmed().isEmpty()
-                ? supplier->text().trimmed() : value.supplier;
+            line.supplier = supplier ? supplier->text().trimmed() : QString();
+            if (line.batchNumber.isEmpty()) {
+                if (errorMessage) *errorMessage = QStringLiteral("第 %1 行批号生成失败，请重新选择物料或手工填写。")
+                                                      .arg(row + 1);
+                return {};
+            }
             value.lines.append(line);
         }
+        QStringList suppliers;
+        QSet<QString> supplierKeys;
+        for (const InspectionNoticeLine &line : std::as_const(value.lines)) {
+            if (line.supplier.isEmpty()) continue;
+            const QString key = line.supplier.toCaseFolded();
+            if (supplierKeys.contains(key)) continue;
+            supplierKeys.insert(key);
+            suppliers.append(line.supplier);
+        }
+        // 单据表中的供应商字段仅保存明细汇总，用于查询和历史列表展示。
+        value.supplier = suppliers.join(QStringLiteral("、"));
         if (value.lines.isEmpty() && errorMessage)
             *errorMessage = QStringLiteral("至少添加一行送检物料。");
         return value;
     }
 
-    bool draftNotice(InspectionNotice *notice, QString *errorMessage) const
+    bool draftNotice(InspectionNotice *notice, QString *errorMessage)
     {
         const InspectionNoticeDraft value = draft(errorMessage);
         if (value.lines.isEmpty()) return false;
@@ -469,10 +468,11 @@ private:
         int index = m_urgency->findData(notice.urgency);
         if (index >= 0) m_urgency->setCurrentIndex(index);
         m_purchaseOrder->setText(notice.purchaseOrderNumber);
-        index = m_supplier->findText(notice.supplier, Qt::MatchFixedString);
-        if (index >= 0) m_supplier->setCurrentIndex(index);
-        else m_supplier->setEditText(notice.supplier);
-        for (const InspectionNoticeLine &line : std::as_const(notice.lines)) addLine(line);
+        for (InspectionNoticeLine line : notice.lines) {
+            // 兼容旧数据：历史明细未保存供应商时，用旧单据供应商补到该明细。
+            if (line.supplier.trimmed().isEmpty()) line.supplier = notice.supplier;
+            addLine(line);
+        }
     }
 
     void save()
@@ -531,7 +531,6 @@ private:
     QLineEdit *m_department = nullptr;
     QComboBox *m_urgency = nullptr;
     QLineEdit *m_purchaseOrder = nullptr;
-    QComboBox *m_supplier = nullptr;
     QTableWidget *m_lines = nullptr;
 };
 
