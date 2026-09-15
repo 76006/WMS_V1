@@ -26,6 +26,7 @@ set(WMS_SOURCES
     src/services/InspectionService.cpp
     src/services/MaterialCodeService.cpp
     src/services/OfficeTemplateService.cpp
+    src/services/ShipmentReceiptService.cpp
     src/services/InventoryReportService.cpp
     src/services/UserService.cpp
     src/ui/LoginDialog.cpp
@@ -72,6 +73,7 @@ set(WMS_SOURCES
     src/services/InspectionService.h
     src/services/MaterialCodeService.h
     src/services/OfficeTemplateService.h
+    src/services/ShipmentReceiptService.h
     src/services/InventoryReportService.h
     src/services/UserService.h
     src/ui/LoginDialog.h
@@ -125,6 +127,8 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/011_document_forms.sql
         database/migrations/012_sales_delivery_date.sql
         database/migrations/013_inspection_notices.sql
+        database/migrations/014_production_return_number.sql
+        database/migrations/015_shipment_receipts.sql
         resources/PdfPreview.qml
         resources/fill_office_template.ps1
         resources/styles.qss

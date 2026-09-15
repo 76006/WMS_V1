@@ -44,6 +44,7 @@ private slots:
     void showPage(int index);
     void refreshCurrentPage();
     void refreshInventoryViews();
+    void refreshCurrentUserDisplayName();
     void editDocumentById(qlonglong documentId, QWidget *dialogParent);
 
 private:
@@ -53,6 +54,7 @@ private:
     Session m_session;
     QString m_databaseFilePath;
     QLabel *m_pageTitle = nullptr;
+    QLabel *m_userLabel = nullptr;
     QStackedWidget *m_stack = nullptr;
     DashboardPage *m_dashboardPage = nullptr;
     MaterialPage *m_materialPage = nullptr;

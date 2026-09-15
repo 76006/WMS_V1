@@ -90,6 +90,8 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     m_handlerEdit = new QLineEdit(m_session.displayName, panel);
+    m_handlerEdit->setProperty("currentUserDefault", true);
+    m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_notesEdit = new QTextEdit(panel);
     m_notesEdit->setMaximumHeight(60);
     form->addRow(QStringLiteral("生产批次 *"), m_runCombo);

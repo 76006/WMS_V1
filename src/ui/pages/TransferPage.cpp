@@ -1,6 +1,7 @@
 #include "ui/pages/TransferPage.h"
 
 #include "services/InventoryService.h"
+#include "services/UserService.h"
 #include "ui/widgets/StockLineTable.h"
 #include "ui/widgets/TableExcelExport.h"
 
@@ -79,6 +80,8 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     m_handlerEdit = new QLineEdit(m_session.displayName, panel);
+    m_handlerEdit->setProperty("currentUserDefault", true);
+    m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_targetWarehouse = new QComboBox(panel);
     m_targetLocation = new QComboBox(panel);
     m_notesEdit = new QTextEdit(panel);
@@ -330,7 +333,9 @@ void TransferPage::reverseSelectedTransfer()
         ? qMin(maximum, static_cast<double>(availableSerials.size())) : maximum;
     quantity->setRange(requireSerial ? 1.0 : 0.000001, availableMaximum);
     quantity->setValue(availableMaximum);
-    auto *handler = new QLineEdit(m_session.displayName, &dialog);
+    auto *handler = new QLineEdit(
+        UserService::displayNameForUser(m_database, m_session.userId, m_session.displayName),
+        &dialog);
     auto *notes = new QTextEdit(&dialog);
     notes->setMaximumHeight(70);
     form->addRow(QStringLiteral("撤销日期 *"), date);

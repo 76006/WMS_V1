@@ -28,15 +28,26 @@ QList<FieldDefinition> fieldDefinitions(const OfficeTemplateDocument &document)
     case OfficeFormKind::RawMaterialInbound:
     case OfficeFormKind::FinishedGoodsInbound:
         return {};
-    case OfficeFormKind::ProductionIssue:
-        return {
+    case OfficeFormKind::ProductionIssue: {
+        const bool production = document.fields.value(QStringLiteral("issueType"),
+                                                       QStringLiteral("SCLL"))
+                                    == QStringLiteral("SCLL");
+        QList<FieldDefinition> fields = {
             {QStringLiteral("receivingDepartment"), QStringLiteral("领用部门"),
-             QStringLiteral("生产部"), true},
-            {QStringLiteral("productName"), QStringLiteral("产品名称"), QString(), true},
-            {QStringLiteral("productModel"), QStringLiteral("产品型号"), QString(), false},
-            {QStringLiteral("productionBatch"), QStringLiteral("生产批次"), QString(), true},
-            {QStringLiteral("plannedQuantity"), QStringLiteral("计划数量"), QString(), true}
+             production ? QStringLiteral("生产部") : QString(), true}
         };
+        if (production) {
+            fields.append(FieldDefinition{QStringLiteral("productName"),
+                                          QStringLiteral("产品名称"), QString(), true});
+            fields.append(FieldDefinition{QStringLiteral("productModel"),
+                                          QStringLiteral("产品型号"), QString(), false});
+            fields.append(FieldDefinition{QStringLiteral("productionBatch"),
+                                          QStringLiteral("生产批次"), QString(), true});
+            fields.append(FieldDefinition{QStringLiteral("plannedQuantity"),
+                                          QStringLiteral("计划数量"), QString(), true});
+        }
+        return fields;
+    }
     case OfficeFormKind::StockOutbound:
         return {
             {QStringLiteral("customerCompany"), QStringLiteral("发往单位"), QString(), false},
@@ -44,13 +55,13 @@ QList<FieldDefinition> fieldDefinitions(const OfficeTemplateDocument &document)
         };
     case OfficeFormKind::DeliveryConfirmation:
         return {
-            {QStringLiteral("customerCompany"), QStringLiteral("客户单位"), QString(), true},
-            {QStringLiteral("salesOrderNumber"), QStringLiteral("订单号"), QString(), true},
-            {QStringLiteral("destination"), QStringLiteral("收货地址"), QString(), true},
-            {QStringLiteral("customerContact"), QStringLiteral("收货人"), QString(), true},
-            {QStringLiteral("customerPhone"), QStringLiteral("联系电话"), QString(), true},
-            {QStringLiteral("logisticsCompany"), QStringLiteral("物流公司"), QString(), true},
-            {QStringLiteral("trackingNumber"), QStringLiteral("运单号"), QString(), true}
+            {QStringLiteral("customerCompany"), QStringLiteral("客户单位"), QString(), false},
+            {QStringLiteral("salesOrderNumber"), QStringLiteral("订单号"), QString(), false},
+            {QStringLiteral("destination"), QStringLiteral("收货地址"), QString(), false},
+            {QStringLiteral("customerContact"), QStringLiteral("收货人"), QString(), false},
+            {QStringLiteral("customerPhone"), QStringLiteral("联系电话"), QString(), false},
+            {QStringLiteral("logisticsCompany"), QStringLiteral("物流公司"), QString(), false},
+            {QStringLiteral("trackingNumber"), QStringLiteral("运单号"), QString(), false}
         };
     case OfficeFormKind::Inspection:
         return {
@@ -79,6 +90,16 @@ QString quantityText(double value)
 DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, QWidget *parent)
     : QDialog(parent), m_document(std::move(document))
 {
+    const QString documentNotes = m_document.fields.value(QStringLiteral("notes")).trimmed();
+    if (!documentNotes.isEmpty()
+        && (m_document.kind == OfficeFormKind::RawMaterialInbound
+            || m_document.kind == OfficeFormKind::FinishedGoodsInbound
+            || m_document.kind == OfficeFormKind::StockOutbound
+            || m_document.kind == OfficeFormKind::ProductionIssue)) {
+        for (OfficeTemplateLine &line : m_document.lines) {
+            if (line.notes.trimmed().isEmpty()) line.notes = documentNotes;
+        }
+    }
     const QString title = OfficeTemplateService::formTitle(m_document.kind);
     setWindowTitle(QStringLiteral("在线填写%1").arg(title));
     setModal(true);
@@ -108,7 +129,12 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
                               this);
     number->setObjectName(QStringLiteral("mutedText"));
     fixedForm->addRow(QStringLiteral("业务单号"), number);
-    fixedForm->addRow(QStringLiteral("业务日期"),
+    QString dateLabel = QStringLiteral("业务日期");
+    if (m_document.kind == OfficeFormKind::StockOutbound)
+        dateLabel = QStringLiteral("出库日期");
+    else if (m_document.kind == OfficeFormKind::DeliveryConfirmation)
+        dateLabel = QStringLiteral("送货日期");
+    fixedForm->addRow(dateLabel,
                       new QLabel(m_document.documentDate.toString(QStringLiteral("yyyy-MM-dd")), this));
     root->addLayout(fixedForm);
 

@@ -32,6 +32,7 @@ private slots:
     void submit();
     void updateSalesFieldsVisibility();
     void showSalesDetails(int row, int column);
+    void editShipmentDetails();
 
 private:
     void resetSubmissionToken();

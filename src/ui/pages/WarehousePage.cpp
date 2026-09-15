@@ -15,6 +15,7 @@
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QVariant>
 #include <QVBoxLayout>
 
 #include <utility>
@@ -35,8 +36,10 @@ WarehousePage::WarehousePage(QSqlDatabase database, Session session, QWidget *pa
     m_addLocationButton = new QPushButton(QStringLiteral("为所选仓库新增库位"), this);
     m_editWarehouseButton = new QPushButton(QStringLiteral("编辑仓库"), this);
     m_toggleWarehouseButton = new QPushButton(QStringLiteral("停用仓库"), this);
+    m_deleteWarehouseButton = new QPushButton(QStringLiteral("删除仓库"), this);
     m_editLocationButton = new QPushButton(QStringLiteral("编辑库位"), this);
     m_toggleLocationButton = new QPushButton(QStringLiteral("停用库位"), this);
+    m_deleteLocationButton = new QPushButton(QStringLiteral("删除库位"), this);
     const bool canEdit = m_session.canManageWarehouseData();
     m_addWarehouseButton->setEnabled(canEdit);
     m_addLocationButton->setEnabled(canEdit);
@@ -45,9 +48,11 @@ WarehousePage::WarehousePage(QSqlDatabase database, Session session, QWidget *pa
     toolbar->addWidget(m_addWarehouseButton);
     toolbar->addWidget(m_editWarehouseButton);
     toolbar->addWidget(m_toggleWarehouseButton);
+    toolbar->addWidget(m_deleteWarehouseButton);
     toolbar->addWidget(m_addLocationButton);
     toolbar->addWidget(m_editLocationButton);
     toolbar->addWidget(m_toggleLocationButton);
+    toolbar->addWidget(m_deleteLocationButton);
     root->addLayout(toolbar);
 
     auto *panel = new QFrame(this);
@@ -86,6 +91,8 @@ WarehousePage::WarehousePage(QSqlDatabase database, Session session, QWidget *pa
     connect(m_editLocationButton, &QPushButton::clicked, this, &WarehousePage::editLocation);
     connect(m_toggleWarehouseButton, &QPushButton::clicked, this, &WarehousePage::toggleWarehouse);
     connect(m_toggleLocationButton, &QPushButton::clicked, this, &WarehousePage::toggleLocation);
+    connect(m_deleteWarehouseButton, &QPushButton::clicked, this, &WarehousePage::deleteWarehouse);
+    connect(m_deleteLocationButton, &QPushButton::clicked, this, &WarehousePage::deleteLocation);
     refresh();
 }
 
@@ -361,6 +368,221 @@ void WarehousePage::toggleLocation()
     emit dataChanged();
 }
 
+void WarehousePage::deleteWarehouse()
+{
+    const int row = m_warehouseTable->currentRow();
+    const qlonglong warehouseId = selectedWarehouseId();
+    if (row < 0 || warehouseId <= 0) return;
+    const QString code = m_warehouseTable->item(row, 1)->text();
+    const QString name = m_warehouseTable->item(row, 2)->text();
+    if (QMessageBox::warning(
+            this, QStringLiteral("确认删除仓库"),
+            QStringLiteral("确定永久删除仓库“%1 - %2”及其全部库位吗？\n\n"
+                           "该仓库现有库存将被清除，在库 SN 将作废；历史单据会保留，"
+                           "但其中的仓库、库位引用以及相关库存流水和盘点明细将被移除。\n\n"
+                           "此操作不可撤销。")
+                .arg(code, name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+
+    if (!m_database.transaction()) {
+        QMessageBox::warning(this, QStringLiteral("删除失败"), m_database.lastError().text());
+        return;
+    }
+    QSqlQuery query(m_database);
+    const QString now = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+    auto execute = [&query](const QString &sql, const QVariantList &values = {}) {
+        query.prepare(sql);
+        for (const QVariant &value : values) query.addBindValue(value);
+        return query.exec();
+    };
+
+    bool ok = execute(QStringLiteral(
+        "UPDATE inventory_ledger SET reversal_of_ledger_id=NULL "
+        "WHERE reversal_of_ledger_id IN ("
+        "SELECT id FROM inventory_ledger WHERE warehouse_id=? "
+        "OR location_id IN (SELECT id FROM locations WHERE warehouse_id=?))"),
+        {warehouseId, warehouseId});
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "DELETE FROM inventory_ledger_serials WHERE ledger_id IN ("
+            "SELECT id FROM inventory_ledger WHERE warehouse_id=? "
+            "OR location_id IN (SELECT id FROM locations WHERE warehouse_id=?))"),
+            {warehouseId, warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "DELETE FROM inventory_ledger WHERE warehouse_id=? "
+            "OR location_id IN (SELECT id FROM locations WHERE warehouse_id=?)"),
+            {warehouseId, warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "DELETE FROM inventory_count_items WHERE warehouse_id=? "
+            "OR location_id IN (SELECT id FROM locations WHERE warehouse_id=?)"),
+            {warehouseId, warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE serial_numbers SET "
+            "status=CASE WHEN status='IN_STOCK' THEN 'VOIDED' ELSE status END,"
+            "warehouse_id=NULL,location_id=NULL "
+            "WHERE warehouse_id=? OR location_id IN ("
+            "SELECT id FROM locations WHERE warehouse_id=?)"),
+            {warehouseId, warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE business_document_items SET location_id=NULL "
+            "WHERE location_id IN (SELECT id FROM locations WHERE warehouse_id=?)"),
+            {warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE business_document_items SET target_location_id=NULL "
+            "WHERE target_location_id IN (SELECT id FROM locations WHERE warehouse_id=?)"),
+            {warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE business_document_items SET warehouse_id=NULL WHERE warehouse_id=?"),
+            {warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE business_document_items SET target_warehouse_id=NULL WHERE target_warehouse_id=?"),
+            {warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "DELETE FROM stock_balances WHERE warehouse_id=? "
+            "OR location_id IN (SELECT id FROM locations WHERE warehouse_id=?)"),
+            {warehouseId, warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE materials SET default_location_id=NULL,updated_at=? "
+            "WHERE default_location_id IN (SELECT id FROM locations WHERE warehouse_id=?)"),
+            {now, warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE materials SET default_warehouse_id=NULL,updated_at=? WHERE default_warehouse_id=?"),
+            {now, warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral("DELETE FROM locations WHERE warehouse_id=?"), {warehouseId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral("DELETE FROM warehouses WHERE id=?"), {warehouseId})
+            && query.numRowsAffected() == 1;
+    }
+    const QString databaseError = query.lastError().text();
+    if (ok) {
+        ok = writeAudit(QStringLiteral("WAREHOUSE_DELETE"), QStringLiteral("warehouse"),
+                        warehouseId, code + QStringLiteral(" - ") + name);
+    }
+    if (!ok || !m_database.commit()) {
+        m_database.rollback();
+        QMessageBox::warning(
+            this, QStringLiteral("无法删除仓库"),
+            QStringLiteral("删除仓库时处理关联库存或历史资料失败，所有修改已回滚。\n\n%1")
+                .arg(databaseError));
+        return;
+    }
+    refresh();
+    emit dataChanged();
+}
+
+void WarehousePage::deleteLocation()
+{
+    const int row = m_locationTable->currentRow();
+    const qlonglong locationId = selectedLocationId();
+    if (row < 0 || locationId <= 0) return;
+    const QString code = m_locationTable->item(row, 1)->text();
+    const QString name = m_locationTable->item(row, 2)->text();
+    if (QMessageBox::warning(
+            this, QStringLiteral("确认删除库位"),
+            QStringLiteral("确定永久删除库位“%1 - %2”吗？\n\n"
+                           "该库位现有库存将被清除，在库 SN 将作废；历史单据会保留，"
+                           "但其中的库位引用以及相关库存流水和盘点明细将被移除。\n\n"
+                           "此操作不可撤销。")
+                .arg(code, name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+
+    if (!m_database.transaction()) {
+        QMessageBox::warning(this, QStringLiteral("删除失败"), m_database.lastError().text());
+        return;
+    }
+    QSqlQuery query(m_database);
+    auto execute = [&query](const QString &sql, const QVariantList &values = {}) {
+        query.prepare(sql);
+        for (const QVariant &value : values) query.addBindValue(value);
+        return query.exec();
+    };
+
+    bool ok = execute(QStringLiteral(
+        "UPDATE inventory_ledger SET reversal_of_ledger_id=NULL "
+        "WHERE reversal_of_ledger_id IN (SELECT id FROM inventory_ledger WHERE location_id=?)"),
+        {locationId});
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "DELETE FROM inventory_ledger_serials WHERE ledger_id IN ("
+            "SELECT id FROM inventory_ledger WHERE location_id=?)"), {locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral("DELETE FROM inventory_ledger WHERE location_id=?"), {locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral("DELETE FROM inventory_count_items WHERE location_id=?"), {locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE serial_numbers SET "
+            "status=CASE WHEN status='IN_STOCK' THEN 'VOIDED' ELSE status END,"
+            "warehouse_id=NULL,location_id=NULL WHERE location_id=?"), {locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE business_document_items SET location_id=NULL WHERE location_id=?"), {locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE business_document_items SET target_location_id=NULL WHERE target_location_id=?"),
+            {locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral("DELETE FROM stock_balances WHERE location_id=?"), {locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral(
+            "UPDATE materials SET default_location_id=NULL,updated_at=? WHERE default_location_id=?"),
+            {QDateTime::currentDateTime().toString(Qt::ISODateWithMs), locationId});
+    }
+    if (ok) {
+        ok = execute(QStringLiteral("DELETE FROM locations WHERE id=?"), {locationId})
+            && query.numRowsAffected() == 1;
+    }
+    const QString databaseError = query.lastError().text();
+    if (ok) {
+        ok = writeAudit(QStringLiteral("LOCATION_DELETE"), QStringLiteral("location"),
+                        locationId, code + QStringLiteral(" - ") + name);
+    }
+    if (!ok || !m_database.commit()) {
+        m_database.rollback();
+        QMessageBox::warning(
+            this, QStringLiteral("无法删除库位"),
+            QStringLiteral("删除库位时处理关联库存或历史资料失败，所有修改已回滚。\n\n%1")
+                .arg(databaseError));
+        return;
+    }
+    loadLocations();
+    emit dataChanged();
+}
+
 void WarehousePage::updateActions()
 {
     const bool allowed = m_session.canManageWarehouseData();
@@ -368,10 +590,12 @@ void WarehousePage::updateActions()
     const int locationRow = m_locationTable->currentRow();
     m_editWarehouseButton->setEnabled(allowed && warehouseRow >= 0);
     m_toggleWarehouseButton->setEnabled(allowed && warehouseRow >= 0);
+    m_deleteWarehouseButton->setEnabled(allowed && warehouseRow >= 0);
     m_addLocationButton->setEnabled(allowed && warehouseRow >= 0
         && m_warehouseTable->item(warehouseRow, 4)->text() == QStringLiteral("启用"));
     m_editLocationButton->setEnabled(allowed && locationRow >= 0);
     m_toggleLocationButton->setEnabled(allowed && locationRow >= 0);
+    m_deleteLocationButton->setEnabled(allowed && locationRow >= 0);
     if (warehouseRow >= 0) m_toggleWarehouseButton->setText(
         m_warehouseTable->item(warehouseRow, 4)->text() == QStringLiteral("启用")
             ? QStringLiteral("停用仓库") : QStringLiteral("启用仓库"));

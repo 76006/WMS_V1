@@ -8,6 +8,7 @@
 class QComboBox;
 class QDateEdit;
 class QDoubleSpinBox;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -31,6 +32,7 @@ signals:
 private slots:
     void importProductBom();
     void submit();
+    void updateIssueType();
 
 private:
     void refreshRecentDocuments();
@@ -38,6 +40,7 @@ private:
 
     QSqlDatabase m_database;
     Session m_session;
+    QComboBox *m_issueTypeCombo = nullptr;
     QComboBox *m_productCombo = nullptr;
     QLineEdit *m_batchEdit = nullptr;
     QDoubleSpinBox *m_plannedQuantity = nullptr;
@@ -46,6 +49,8 @@ private:
     QTextEdit *m_notesEdit = nullptr;
     QLabel *m_numberLabel = nullptr;
     QLabel *m_usageHint = nullptr;
+    QLabel *m_heading = nullptr;
+    QGroupBox *m_productionFieldsGroup = nullptr;
     StockLineTable *m_lines = nullptr;
     QPushButton *m_submitButton = nullptr;
     QTableWidget *m_recentTable = nullptr;

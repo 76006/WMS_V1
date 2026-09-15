@@ -31,6 +31,8 @@ signals:
 
 private slots:
     void submit();
+    void updateInspectionRequirement();
+    void openInspectionForm();
 
 private:
     void resetSubmissionToken();
@@ -45,8 +47,12 @@ private:
     QLineEdit *m_purposeEdit = nullptr;
     QLineEdit *m_supplierEdit = nullptr;
     QTextEdit *m_notesEdit = nullptr;
+    QComboBox *m_inspectionCombo = nullptr;
+    QPushButton *m_inspectionButton = nullptr;
+    QLabel *m_inspectionStatusLabel = nullptr;
     StockLineTable *m_lines = nullptr;
     QPushButton *m_submitButton = nullptr;
     QTableWidget *m_recentTable = nullptr;
     QString m_submissionToken;
+    qlonglong m_loadedInspectionNoticeId = 0;
 };

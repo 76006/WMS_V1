@@ -16,6 +16,8 @@ public:
     UserManagementPage(QSqlDatabase database, Session session, QWidget *parent = nullptr);
 public slots:
     void refresh();
+signals:
+    void usersChanged();
 private slots:
     void addUser();
     void editUser();

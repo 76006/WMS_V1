@@ -1,14 +1,22 @@
 #include "ui/pages/ShipmentQueryPage.h"
 
 #include "ui/widgets/ComboBoxSearch.h"
+#include "services/AttachmentService.h"
 #include "services/OfficeTemplateService.h"
+#include "services/ShipmentReceiptService.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
+#include <QDate>
+#include <QDateEdit>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QFrame>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -16,6 +24,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMimeDatabase>
 #include <QPushButton>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -52,10 +61,42 @@ QString materialProjectExpression(const QString &materialAlias)
         "ORDER BY length(p.code) DESC LIMIT 1),'')")
         .arg(materialAlias);
 }
+
+bool openStoredAttachment(QSqlDatabase database, qlonglong operatorId,
+                          qlonglong attachmentId, QWidget *parent)
+{
+    AttachmentPayload payload;
+    QString error;
+    AttachmentService service(database, operatorId);
+    if (!service.loadAttachment(attachmentId, &payload, &error) || payload.deleted
+        || payload.data.isEmpty()) {
+        QMessageBox::warning(parent, QStringLiteral("打开收货单失败"),
+                             error.isEmpty() ? QStringLiteral("收货单附件不存在或已经删除。") : error);
+        return false;
+    }
+    const QString directory = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                  .filePath(QStringLiteral("IceBeautyWms/shipment-receipts"));
+    if (!QDir().mkpath(directory)) {
+        QMessageBox::warning(parent, QStringLiteral("打开收货单失败"),
+                             QStringLiteral("无法创建临时文件夹。"));
+        return false;
+    }
+    const QString path = QDir(directory).filePath(
+        QStringLiteral("%1_%2").arg(QUuid::createUuid().toString(QUuid::WithoutBraces),
+                                    QFileInfo(payload.fileName).fileName()));
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(payload.data) != payload.data.size()) {
+        QMessageBox::warning(parent, QStringLiteral("打开收货单失败"),
+                             QStringLiteral("无法写入临时文件：%1").arg(file.errorString()));
+        return false;
+    }
+    file.close();
+    return OfficeTemplateService::openFileWithApplicationChoice(path, parent);
+}
 }
 
-ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, QWidget *parent)
-    : QWidget(parent), m_database(std::move(database))
+ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, Session session, QWidget *parent)
+    : QWidget(parent), m_database(std::move(database)), m_session(std::move(session))
 {
     setObjectName(QStringLiteral("pageRoot"));
     auto *root = new QVBoxLayout(this);
@@ -109,7 +150,8 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, QWidget *parent)
     shipmentLayout->setSpacing(8);
 
     auto *shipmentHeader = new QHBoxLayout;
-    auto *shipmentTitle = new QLabel(QStringLiteral("发货清单"), shipmentPanel);
+    auto *shipmentTitle = new QLabel(
+        QStringLiteral("发货清单（双击记录可确认签收；已签收必须上传收货单）"), shipmentPanel);
     shipmentTitle->setObjectName(QStringLiteral("sectionTitle"));
     m_summaryLabel = new QLabel(shipmentPanel);
     m_summaryLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -154,21 +196,30 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, QWidget *parent)
             this, &ShipmentQueryPage::openSelectedDeliveryForm);
     connect(m_shipmentTable->selectionModel(), &QItemSelectionModel::currentRowChanged,
             this, [this] { loadSelectedShipmentDetails(); });
+    connect(m_shipmentTable, &QTableView::doubleClicked,
+            this, &ShipmentQueryPage::editSelectedReceipt);
 
     refresh();
 }
 
 QString ShipmentQueryPage::customerFilter() const
 {
-    if (m_customerCombo->currentIndex() == 0) return {};
-    return m_customerCombo->currentText().trimmed();
+    const QString text = m_customerCombo->currentText().trimmed();
+    if (m_customerCombo->currentIndex() == 0 || text == QStringLiteral("全部客户")) {
+        return QStringLiteral("");
+    }
+    const QString selected = m_customerCombo->currentData().toString().trimmed();
+    return selected.isEmpty() ? text : selected;
 }
 
 QString ShipmentQueryPage::projectFilter() const
 {
-    if (m_projectCombo->currentIndex() == 0) return {};
+    const QString text = m_projectCombo->currentText().trimmed();
+    if (m_projectCombo->currentIndex() == 0 || text == QStringLiteral("全部项目")) {
+        return QStringLiteral("");
+    }
     const QString selectedCode = m_projectCombo->currentData().toString().trimmed();
-    return selectedCode.isEmpty() ? m_projectCombo->currentText().trimmed() : selectedCode;
+    return selectedCode.isEmpty() ? text : selectedCode;
 }
 
 void ShipmentQueryPage::loadFilterOptions()
@@ -230,36 +281,45 @@ void ShipmentQueryPage::resetFilters()
 
 void ShipmentQueryPage::loadShipments()
 {
-    const QString orderKeyword = QStringLiteral("%%1%").arg(m_orderEdit->text().trimmed());
+    const QString orderKeyword = QLatin1Char('%') + m_orderEdit->text().trimmed() + QLatin1Char('%');
     const QString customer = customerFilter();
-    const QString customerKeyword = QStringLiteral("%%1%").arg(customer);
+    const QString customerKeyword = QLatin1Char('%') + customer + QLatin1Char('%');
     const QString projectCode = projectFilter();
 
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT d.id,d.document_no,"
-        "COALESCE(NULLIF(s.delivery_date,''),d.document_date),s.sales_order_no,s.customer_company,"
-        "s.destination,s.contact_name,s.contact_phone,s.logistics_company,s.tracking_no,"
+        "COALESCE(NULLIF(s.delivery_date,''),d.document_date),COALESCE(s.sales_order_no,''),"
+        "COALESCE(s.customer_company,''),COALESCE(s.destination,''),COALESCE(s.contact_name,''),"
+        "COALESCE(s.contact_phone,''),COALESCE(s.logistics_company,''),COALESCE(s.tracking_no,''),"
         "d.handler_name,COUNT(i.id),COALESCE(SUM(i.quantity),0),"
         "COALESCE(SUM(i.reversed_quantity),0),"
         "COALESCE(SUM(i.quantity-i.reversed_quantity),0),"
         "CASE d.status WHEN 'POSTED' THEN '已发货' "
         "WHEN 'PARTIALLY_REVERSED' THEN '部分退回' "
-        "WHEN 'REVERSED' THEN '已全部退回' ELSE d.status END,d.notes "
+        "WHEN 'REVERSED' THEN '已全部退回' ELSE d.status END,"
+        "CASE COALESCE(s.receipt_status,'PENDING') WHEN 'SIGNED' THEN '已签收' ELSE '待签收' END,"
+        "COALESCE(s.receipt_date,''),COALESCE(ra.original_file_name,''),"
+        "COALESCE(ru.display_name,''),COALESCE(s.receipt_confirmed_at,''),d.notes "
         "FROM business_documents d "
-        "JOIN sales_outbound_details s ON s.document_id=d.id "
+        "LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
+        "LEFT JOIN attachments ra ON ra.id=s.receipt_attachment_id AND ra.is_deleted=0 "
+        "LEFT JOIN users ru ON ru.id=s.receipt_confirmed_by "
         "LEFT JOIN business_document_items i ON i.document_id=d.id "
         "WHERE d.document_type='XSCK' "
-        "AND (s.sales_order_no LIKE ? OR d.document_no LIKE ?) "
-        "AND (?='' OR s.customer_company LIKE ?) "
-        "AND (?='' OR EXISTS(SELECT 1 FROM business_document_items pi "
+        "AND (COALESCE(s.sales_order_no,'') LIKE ? OR d.document_no LIKE ?) "
+        "AND (COALESCE(?,'')='' OR COALESCE(s.customer_company,'') LIKE ?) "
+        "AND (COALESCE(?,'')='' OR EXISTS(SELECT 1 FROM business_document_items pi "
         "JOIN materials pm ON pm.id=pi.material_id WHERE pi.document_id=d.id "
         "AND length(pm.code)=length(?)+5 "
         "AND substr(pm.code,2,length(?))=? COLLATE NOCASE)) "
         "GROUP BY d.id,d.document_no,COALESCE(NULLIF(s.delivery_date,''),d.document_date),"
-        "s.sales_order_no,s.customer_company,"
-        "s.destination,s.contact_name,s.contact_phone,s.logistics_company,s.tracking_no,"
-        "d.handler_name,d.status,d.notes "
+        "COALESCE(s.sales_order_no,''),COALESCE(s.customer_company,''),"
+        "COALESCE(s.destination,''),COALESCE(s.contact_name,''),COALESCE(s.contact_phone,''),"
+        "COALESCE(s.logistics_company,''),COALESCE(s.tracking_no,''),"
+        "d.handler_name,d.status,COALESCE(s.receipt_status,'PENDING'),"
+        "COALESCE(s.receipt_date,''),COALESCE(ra.original_file_name,''),"
+        "COALESCE(ru.display_name,''),COALESCE(s.receipt_confirmed_at,''),d.notes "
         "ORDER BY COALESCE(NULLIF(s.delivery_date,''),d.document_date) DESC,d.id DESC"));
     query.addBindValue(orderKeyword);
     query.addBindValue(orderKeyword);
@@ -286,7 +346,9 @@ void ShipmentQueryPage::loadShipments()
         QStringLiteral("联系人"), QStringLiteral("联系电话"), QStringLiteral("物流公司"),
         QStringLiteral("物流单号"), QStringLiteral("经办人"), QStringLiteral("明细数"),
         QStringLiteral("发货数量"), QStringLiteral("已退数量"), QStringLiteral("实发数量"),
-        QStringLiteral("状态"), QStringLiteral("备注")};
+        QStringLiteral("库存状态"), QStringLiteral("签收状态"), QStringLiteral("签收日期"),
+        QStringLiteral("收货单"), QStringLiteral("确认人"), QStringLiteral("确认时间"),
+        QStringLiteral("备注")};
     for (int column = 0; column < headers.size(); ++column) {
         m_shipmentModel->setHeaderData(column, Qt::Horizontal, headers.at(column));
     }
@@ -332,6 +394,155 @@ void ShipmentQueryPage::loadSelectedShipmentDetails()
                                .arg(documentNo, orderNo.isEmpty() ? QStringLiteral("-") : orderNo,
                                     customer));
     loadShipmentDetails(documentId);
+}
+
+void ShipmentQueryPage::editSelectedReceipt()
+{
+    const QModelIndex currentIndex = m_shipmentTable->currentIndex();
+    if (!currentIndex.isValid()) return;
+    const qlonglong documentId = m_shipmentModel->index(currentIndex.row(), 0).data().toLongLong();
+    if (documentId <= 0) return;
+
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT d.document_no,COALESCE(s.sales_order_no,''),COALESCE(s.customer_company,''),"
+        "COALESCE(s.receipt_status,'PENDING'),COALESCE(s.receipt_date,''),"
+        "COALESCE(s.receipt_attachment_id,0),COALESCE(a.original_file_name,'') "
+        "FROM business_documents d JOIN sales_outbound_details s ON s.document_id=d.id "
+        "LEFT JOIN attachments a ON a.id=s.receipt_attachment_id AND a.is_deleted=0 "
+        "WHERE d.id=? AND d.document_type='XSCK'"));
+    query.addBindValue(documentId);
+    if (!query.exec() || !query.next()) {
+        QMessageBox::warning(this, QStringLiteral("读取发货记录失败"),
+                             query.lastError().text().isEmpty()
+                                 ? QStringLiteral("没有找到所选销售出库单。")
+                                 : query.lastError().text());
+        return;
+    }
+
+    const QString documentNumber = query.value(0).toString();
+    const QString orderNumber = query.value(1).toString();
+    const QString customer = query.value(2).toString();
+    const QString currentStatus = query.value(3).toString();
+    const QDate currentReceiptDate = QDate::fromString(query.value(4).toString(), Qt::ISODate);
+    const qlonglong currentAttachmentId = query.value(5).toLongLong();
+    const QString currentFileName = query.value(6).toString();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(currentStatus == QStringLiteral("SIGNED")
+                              ? QStringLiteral("查看/更换签收信息")
+                              : QStringLiteral("确认发货签收"));
+    dialog.setMinimumWidth(620);
+    auto *root = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *documentLabel = new QLabel(documentNumber, &dialog);
+    auto *orderLabel = new QLabel(orderNumber.isEmpty() ? QStringLiteral("-") : orderNumber, &dialog);
+    auto *customerLabel = new QLabel(customer.isEmpty() ? QStringLiteral("-") : customer, &dialog);
+    form->addRow(QStringLiteral("发货单号"), documentLabel);
+    form->addRow(QStringLiteral("客户订单号"), orderLabel);
+    form->addRow(QStringLiteral("客户单位"), customerLabel);
+
+    auto *statusCombo = new QComboBox(&dialog);
+    statusCombo->addItem(QStringLiteral("待签收"), QStringLiteral("PENDING"));
+    statusCombo->addItem(QStringLiteral("已签收"), QStringLiteral("SIGNED"));
+    statusCombo->setCurrentIndex(currentStatus == QStringLiteral("SIGNED") ? 1 : 0);
+    form->addRow(QStringLiteral("签收状态 *"), statusCombo);
+
+    auto *dateEdit = new QDateEdit(
+        currentReceiptDate.isValid() ? currentReceiptDate : QDate::currentDate(), &dialog);
+    dateEdit->setCalendarPopup(true);
+    dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    form->addRow(QStringLiteral("签收日期 *"), dateEdit);
+
+    auto *fileRow = new QWidget(&dialog);
+    auto *fileLayout = new QHBoxLayout(fileRow);
+    fileLayout->setContentsMargins(0, 0, 0, 0);
+    auto *fileLabel = new QLabel(
+        currentFileName.isEmpty() ? QStringLiteral("尚未上传")
+                                  : QStringLiteral("当前：%1").arg(currentFileName), fileRow);
+    fileLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto *selectFileButton = new QPushButton(
+        currentAttachmentId > 0 ? QStringLiteral("选择新收货单") : QStringLiteral("上传收货单"), fileRow);
+    auto *openFileButton = new QPushButton(QStringLiteral("打开当前收货单"), fileRow);
+    openFileButton->setEnabled(currentAttachmentId > 0 && !currentFileName.isEmpty());
+    fileLayout->addWidget(fileLabel, 1);
+    fileLayout->addWidget(selectFileButton);
+    fileLayout->addWidget(openFileButton);
+    form->addRow(QStringLiteral("收货单附件 *"), fileRow);
+    root->addLayout(form);
+
+    auto *hint = new QLabel(
+        QStringLiteral("待签收记录只有在选择“已签收”并上传收货单后才能保存。"), &dialog);
+    hint->setObjectName(QStringLiteral("mutedText"));
+    hint->setWordWrap(true);
+    root->addWidget(hint);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Save)->setText(
+        currentStatus == QStringLiteral("SIGNED") ? QStringLiteral("保存新收货单")
+                                                   : QStringLiteral("保存签收"));
+    root->addWidget(buttons);
+
+    QString selectedFilePath;
+    connect(selectFileButton, &QPushButton::clicked, &dialog, [&] {
+        const QString path = QFileDialog::getOpenFileName(
+            &dialog, QStringLiteral("选择已签收的收货单"), QString(),
+            QStringLiteral("收货单文件 (*.pdf *.xlsx *.xls *.docx *.doc *.png *.jpg *.jpeg);;所有文件 (*.*)"));
+        if (path.isEmpty()) return;
+        selectedFilePath = path;
+        fileLabel->setText(QStringLiteral("待上传：%1").arg(QFileInfo(path).fileName()));
+    });
+    connect(openFileButton, &QPushButton::clicked, &dialog, [&, currentAttachmentId] {
+        openStoredAttachment(m_database, m_session.userId, currentAttachmentId, &dialog);
+    });
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    for (;;) {
+        if (dialog.exec() != QDialog::Accepted) return;
+        if (statusCombo->currentData().toString() != QStringLiteral("SIGNED")) {
+            QMessageBox::warning(&dialog, QStringLiteral("尚未确认签收"),
+                                 QStringLiteral("请将签收状态改为“已签收”。"));
+            continue;
+        }
+        if (selectedFilePath.isEmpty()) {
+            if (currentStatus == QStringLiteral("SIGNED") && currentAttachmentId > 0) {
+                QMessageBox::information(&dialog, QStringLiteral("无需保存"),
+                                         QStringLiteral("该记录已经签收。如需更换收货单，请先选择新文件。"));
+                continue;
+            }
+            QMessageBox::warning(&dialog, QStringLiteral("缺少收货单"),
+                                 QStringLiteral("改为已签收前必须上传收货单，当前状态没有改变。"));
+            continue;
+        }
+
+        QFile file(selectedFilePath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMessageBox::warning(&dialog, QStringLiteral("读取收货单失败"), file.errorString());
+            continue;
+        }
+        if (file.size() <= 0 || file.size() > AttachmentService::MaximumAttachmentBytes) {
+            QMessageBox::warning(&dialog, QStringLiteral("收货单无效"),
+                                 QStringLiteral("收货单必须有内容且不能超过 50 MB。"));
+            file.close();
+            continue;
+        }
+        const QByteArray data = file.readAll();
+        file.close();
+        const QString mimeType = QMimeDatabase().mimeTypeForFile(selectedFilePath).name();
+        ShipmentReceiptService service(m_database, m_session.userId);
+        QString error;
+        if (!service.confirmSigned(documentId, dateEdit->date(),
+                                   QFileInfo(selectedFilePath).fileName(), mimeType, data,
+                                   nullptr, &error)) {
+            QMessageBox::warning(&dialog, QStringLiteral("保存签收失败"), error);
+            continue;
+        }
+        QMessageBox::information(this, QStringLiteral("签收已保存"),
+                                 QStringLiteral("发货单 %1 已更新为已签收，收货单已保存到附件。")
+                                     .arg(documentNumber));
+        loadShipments();
+        return;
+    }
 }
 
 void ShipmentQueryPage::openSelectedDeliveryForm()
@@ -388,7 +599,7 @@ void ShipmentQueryPage::loadShipmentDetails(qlonglong documentId)
         "LEFT JOIN material_categories c ON c.id=m.category_id "
         "LEFT JOIN warehouses w ON w.id=i.warehouse_id "
         "LEFT JOIN locations l ON l.id=i.location_id "
-        "WHERE i.document_id=? AND (?='' OR (length(m.code)=length(?)+5 "
+        "WHERE i.document_id=? AND (COALESCE(?,'')='' OR (length(m.code)=length(?)+5 "
         "AND substr(m.code,2,length(?))=? COLLATE NOCASE)) "
         "ORDER BY i.line_number")
                       .arg(materialProjectExpression(QStringLiteral("m"))));

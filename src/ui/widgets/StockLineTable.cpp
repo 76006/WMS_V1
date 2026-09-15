@@ -277,6 +277,20 @@ void StockLineTable::addLine()
                     loadWarehouses(currentRow);
                 }
             });
+    connect(material, &QComboBox::editTextChanged, this,
+            [this, material](const QString &text) {
+                // 可编辑下拉框的清除按钮只会清空显示文字，可能仍保留原物料索引。
+                // 显式退回占位项并刷新依赖字段，确保未提交行的自动批号立即释放。
+                if (!text.trimmed().isEmpty() || selectedMaterialId(material) <= 0) return;
+                const int currentRow = rowForWidget(material, MaterialColumn);
+                if (currentRow < 0) return;
+                {
+                    const QSignalBlocker blocker(material);
+                    material->setCurrentIndex(0);
+                }
+                loadUnitUsage(currentRow);
+                loadWarehouses(currentRow);
+            });
     connect(warehouse, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this, warehouse] {
                 const int currentRow = rowForWidget(warehouse, WarehouseColumn);
@@ -767,10 +781,12 @@ QString StockLineTable::nextAutomaticBatchNumber(int excludedRow) const
         m_documentDate.toString(QStringLiteral("yyyyMMdd")));
     const QRegularExpression pattern(
         QStringLiteral("^%1(\\d{3})$").arg(QRegularExpression::escape(prefix)));
-    int maximum = 0;
-    const auto includeNumber = [&pattern, &maximum](const QString &candidate) {
+    QSet<int> usedSequences;
+    const auto includeNumber = [&pattern, &usedSequences](const QString &candidate) {
         const QRegularExpressionMatch match = pattern.match(candidate.trimmed().toUpper());
-        if (match.hasMatch()) maximum = qMax(maximum, match.captured(1).toInt());
+        if (!match.hasMatch()) return;
+        const int sequence = match.captured(1).toInt();
+        if (sequence >= 1 && sequence <= 999) usedSequences.insert(sequence);
     };
 
     // 批次可能存在于档案、余额、单据或台账中的任意一处，统一扫描避免重复编号。
@@ -794,9 +810,14 @@ QString StockLineTable::nextAutomaticBatchNumber(int excludedRow) const
             includeNumber(batch->currentText());
         }
     }
-    return maximum >= 999
-        ? QString()
-        : QStringLiteral("%1%2").arg(prefix).arg(maximum + 1, 3, 10, QLatin1Char('0'));
+    // 未提交且已删除的行不会出现在 usedSequences 中，因此其号码可以立即复用。
+    for (int sequence = 1; sequence <= 999; ++sequence) {
+        if (!usedSequences.contains(sequence)) {
+            return QStringLiteral("%1%2").arg(prefix).arg(
+                sequence, 3, 10, QLatin1Char('0'));
+        }
+    }
+    return {};
 }
 
 void StockLineTable::setBatchText(QComboBox *batch, const QString &text, bool automatic)

@@ -56,7 +56,49 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     if (!applyInspectionNoticesMigration(database, errorMessage)) {
         return false;
     }
+    if (!applyProductionReturnNumberMigration(database, errorMessage)) {
+        return false;
+    }
+    if (!applyShipmentReceiptsMigration(database, errorMessage)) {
+        return false;
+    }
     return ensureDefaultAdministrator(database, errorMessage);
+}
+
+bool SchemaMigrator::applyShipmentReceiptsMigration(QSqlDatabase database,
+                                                     QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=15"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/015_shipment_receipts.sql"),
+                              QStringLiteral("升级数据库到版本15"),
+                              errorMessage);
+}
+
+bool SchemaMigrator::applyProductionReturnNumberMigration(QSqlDatabase database,
+                                                            QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=14"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/014_production_return_number.sql"),
+                              QStringLiteral("升级数据库到版本14"),
+                              errorMessage);
 }
 
 bool SchemaMigrator::applyInspectionNoticesMigration(QSqlDatabase database,

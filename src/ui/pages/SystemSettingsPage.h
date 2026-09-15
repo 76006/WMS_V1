@@ -10,13 +10,17 @@ class SystemSettingsPage final : public QWidget
 public:
     SystemSettingsPage(QSqlDatabase database, Session session,
                        const QString &databaseFilePath, QWidget *parent = nullptr);
+signals:
+    void businessDataCleared();
 private slots:
     void changePassword();
     void loadNumberRules();
     void saveNumberRules();
+    void clearBusinessData();
 private:
     QSqlDatabase m_database;
     Session m_session;
+    QString m_databaseFilePath;
     QLineEdit *m_currentPassword = nullptr;
     QLineEdit *m_newPassword = nullptr;
     QLineEdit *m_confirmPassword = nullptr;

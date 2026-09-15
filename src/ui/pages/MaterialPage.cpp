@@ -4,6 +4,7 @@
 #include "import/XlsxExporter.h"
 #include "services/InventoryService.h"
 #include "services/MaterialCodeService.h"
+#include "services/UserService.h"
 #include "ui/dialogs/MaterialDialog.h"
 #include "ui/widgets/ComboBoxSearch.h"
 #include "ui/widgets/TableExcelExport.h"
@@ -1111,7 +1112,8 @@ void MaterialPage::editStock()
                 }
                 InventoryCountRequest request;
                 request.documentDate = dateEdit->date();
-                request.handlerName = m_session.displayName;
+                request.handlerName = UserService::displayNameForUser(
+                    m_database, m_session.userId, m_session.displayName);
                 request.notes = reason;
                 request.submissionToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
                 InventoryCountLine line;
@@ -2255,7 +2257,8 @@ void MaterialPage::importMaterials()
         const QString key = QStringLiteral("%1|%2").arg(warehouseId).arg(locationId);
         InitialInventoryRequest &request = stockRequests[key];
         request.documentDate = QDate::currentDate();
-        request.handlerName = m_session.displayName;
+        request.handlerName = UserService::displayNameForUser(
+            m_database, m_session.userId, m_session.displayName);
         request.sourceFile = QFileInfo(path).fileName();
         request.warehouseId = warehouseId;
         request.locationId = locationId;

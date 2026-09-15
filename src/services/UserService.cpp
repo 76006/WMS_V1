@@ -19,6 +19,19 @@ QString dbText(const QString &value) {
 UserService::UserService(QSqlDatabase database, qlonglong operatorId)
     : m_database(std::move(database)), m_operatorId(operatorId) {}
 
+QString UserService::displayNameForUser(QSqlDatabase database, qlonglong userId,
+                                        const QString &fallback)
+{
+    if (!database.isOpen() || userId <= 0) return fallback.trimmed();
+    QSqlQuery query(database);
+    query.prepare(QStringLiteral(
+        "SELECT display_name FROM users WHERE id=? AND is_active=1"));
+    query.addBindValue(userId);
+    if (!query.exec() || !query.next()) return fallback.trimmed();
+    const QString displayName = query.value(0).toString().trimmed();
+    return displayName.isEmpty() ? fallback.trimmed() : displayName;
+}
+
 bool UserService::requireAdministrator(QString *errorMessage) const
 {
     QSqlQuery query(m_database);

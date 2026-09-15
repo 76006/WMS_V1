@@ -8,6 +8,9 @@ class UserService
 public:
     UserService(QSqlDatabase database, qlonglong operatorId);
 
+    static QString displayNameForUser(QSqlDatabase database, qlonglong userId,
+                                      const QString &fallback = QString());
+
     bool createUser(const QString &username, const QString &displayName,
                     const QString &roleCode, const QString &password,
                     qlonglong *userId = nullptr, QString *errorMessage = nullptr);

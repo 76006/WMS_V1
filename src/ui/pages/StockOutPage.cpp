@@ -9,6 +9,8 @@
 #include <QAbstractItemView>
 #include <QComboBox>
 #include <QDateEdit>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFormLayout>
 #include <QFrame>
@@ -59,13 +61,12 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     m_typeCombo = new QComboBox(panel);
     m_typeCombo->addItem(QStringLiteral("销售出库"), QStringLiteral("XSCK"));
-    m_typeCombo->addItem(QStringLiteral("维修领用"), QStringLiteral("WXLY"));
-    m_typeCombo->addItem(QStringLiteral("研发领用"), QStringLiteral("YPLY"));
-    m_typeCombo->addItem(QStringLiteral("其他出库"), QStringLiteral("QTCK"));
     m_dateEdit = new QDateEdit(QDate::currentDate(), panel);
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     m_handlerEdit = new QLineEdit(m_session.displayName, panel);
+    m_handlerEdit->setProperty("currentUserDefault", true);
+    m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_purposeEdit = new QLineEdit(panel);
     m_numberLabel = new QLabel(QStringLiteral("提交时自动生成"), panel);
     m_numberLabel->setObjectName(QStringLiteral("mutedText"));
@@ -93,21 +94,21 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     m_deliveryDateEdit = new QDateEdit(QDate::currentDate(), m_salesDetailsGroup);
     m_deliveryDateEdit->setCalendarPopup(true);
     m_deliveryDateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
-    salesLayout->addWidget(new QLabel(QStringLiteral("客户公司名称 *"), m_salesDetailsGroup), 0, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("客户公司名称"), m_salesDetailsGroup), 0, 0);
     salesLayout->addWidget(m_customerCompanyEdit, 0, 1);
-    salesLayout->addWidget(new QLabel(QStringLiteral("销售目的地/收货地址 *"), m_salesDetailsGroup), 0, 2);
+    salesLayout->addWidget(new QLabel(QStringLiteral("销售目的地/收货地址"), m_salesDetailsGroup), 0, 2);
     salesLayout->addWidget(m_destinationEdit, 0, 3);
-    salesLayout->addWidget(new QLabel(QStringLiteral("客户联系人 *"), m_salesDetailsGroup), 1, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("客户联系人"), m_salesDetailsGroup), 1, 0);
     salesLayout->addWidget(m_customerContactEdit, 1, 1);
-    salesLayout->addWidget(new QLabel(QStringLiteral("联系电话 *"), m_salesDetailsGroup), 1, 2);
+    salesLayout->addWidget(new QLabel(QStringLiteral("联系电话"), m_salesDetailsGroup), 1, 2);
     salesLayout->addWidget(m_customerPhoneEdit, 1, 3);
-    salesLayout->addWidget(new QLabel(QStringLiteral("客户合同号/订单号 *"), m_salesDetailsGroup), 2, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("客户合同号/订单号"), m_salesDetailsGroup), 2, 0);
     salesLayout->addWidget(m_salesOrderEdit, 2, 1);
-    salesLayout->addWidget(new QLabel(QStringLiteral("物流/快递公司 *"), m_salesDetailsGroup), 2, 2);
+    salesLayout->addWidget(new QLabel(QStringLiteral("物流/快递公司"), m_salesDetailsGroup), 2, 2);
     salesLayout->addWidget(m_logisticsCompanyEdit, 2, 3);
-    salesLayout->addWidget(new QLabel(QStringLiteral("运单号 *"), m_salesDetailsGroup), 3, 0);
+    salesLayout->addWidget(new QLabel(QStringLiteral("运单号"), m_salesDetailsGroup), 3, 0);
     salesLayout->addWidget(m_trackingNumberEdit, 3, 1);
-    salesLayout->addWidget(new QLabel(QStringLiteral("送货日期 *"), m_salesDetailsGroup), 3, 2);
+    salesLayout->addWidget(new QLabel(QStringLiteral("送货日期"), m_salesDetailsGroup), 3, 2);
     salesLayout->addWidget(m_deliveryDateEdit, 3, 3);
     salesLayout->setColumnStretch(1, 1);
     salesLayout->setColumnStretch(3, 1);
@@ -126,11 +127,14 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
     recentToolbar->addWidget(new QLabel(
-        QStringLiteral("近期普通出库单（双击销售出库可查看完整销售资料）"), recentPanel));
+        QStringLiteral("近期销售出库单（可先出库，发货时再补充销售资料）"), recentPanel));
     recentToolbar->addStretch();
     auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
     editRecentButton->setProperty("primary", true);
+    auto *shipmentButton = new QPushButton(QStringLiteral("发货"), recentPanel);
+    shipmentButton->setProperty("primary", true);
     auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
+    recentToolbar->addWidget(shipmentButton);
     recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenRecentButton);
     recentLayout->addLayout(recentToolbar);
@@ -154,6 +158,7 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
         TableExcelExport::editSelectedBusinessDocument(
             m_recentTable, this, [this] { refreshRecentDocuments(); });
     });
+    connect(shipmentButton, &QPushButton::clicked, this, &StockOutPage::editShipmentDetails);
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部普通出库单"), this, [this] { refreshRecentDocuments(); });
@@ -173,11 +178,8 @@ void StockOutPage::updateSalesFieldsVisibility()
     const QString documentType = m_typeCombo->currentData().toString();
     const bool salesOutbound = documentType == QStringLiteral("XSCK");
     m_salesDetailsGroup->setVisible(salesOutbound);
-    const bool finishedGoodsOnly = documentType == QStringLiteral("XSCK")
-        || documentType == QStringLiteral("WXLY")
-        || documentType == QStringLiteral("YPLY");
     m_lines->setMaterialCategoryFilter(
-        finishedGoodsOnly ? QStringLiteral("FINISHED") : QString());
+        salesOutbound ? QStringLiteral("FINISHED") : QString());
 }
 
 void StockOutPage::resetSubmissionToken()
@@ -197,14 +199,12 @@ void StockOutPage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.id,d.document_no,CASE d.document_type "
-        "WHEN 'XSCK' THEN '销售出库' WHEN 'WXLY' THEN '维修领用' "
-        "WHEN 'YPLY' THEN '研发领用' ELSE '其他出库' END,"
+        "SELECT d.id,d.document_no,'销售出库',"
         "COALESCE(NULLIF(s.delivery_date,''),d.document_date),"
         "COALESCE(s.customer_company,''),COALESCE(s.destination,''),COUNT(i.id) "
         "FROM business_documents d LEFT JOIN business_document_items i ON i.document_id=d.id "
         "LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
-        "WHERE d.stock_direction='OUT' AND d.document_type IN ('XSCK','WXLY','YPLY','QTCK') "
+        "WHERE d.stock_direction='OUT' AND d.document_type='XSCK' "
         "GROUP BY d.id ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
@@ -249,39 +249,145 @@ void StockOutPage::showSalesDetails(int row, int)
                        "物流/快递公司：%8\n运单号：%9")
             .arg(valueOrEmpty(0), valueOrEmpty(8), valueOrEmpty(1), valueOrEmpty(2),
                  valueOrEmpty(3), valueOrEmpty(4), valueOrEmpty(5), valueOrEmpty(6),
-                 valueOrEmpty(7)));
+                  valueOrEmpty(7)));
+}
+
+void StockOutPage::editShipmentDetails()
+{
+    const int row = m_recentTable->currentRow();
+    const QTableWidgetItem *selected = row >= 0 ? m_recentTable->item(row, 0) : nullptr;
+    const qlonglong documentId = selected ? selected->data(Qt::UserRole).toLongLong() : 0;
+    if (documentId <= 0) {
+        QMessageBox::information(this, QStringLiteral("请选择出库单"),
+                                 QStringLiteral("请先在近期销售出库单中选择一条记录。"));
+        return;
+    }
+
+    QSqlQuery current(m_database);
+    current.prepare(QStringLiteral(
+        "SELECT d.document_no,d.document_date,COALESCE(s.customer_company,''),"
+        "COALESCE(s.destination,''),COALESCE(s.contact_name,''),COALESCE(s.contact_phone,''),"
+        "COALESCE(s.sales_order_no,''),COALESCE(s.logistics_company,''),"
+        "COALESCE(s.tracking_no,''),COALESCE(s.delivery_date,'') "
+        "FROM business_documents d LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
+        "WHERE d.id=? AND d.document_type='XSCK'"));
+    current.addBindValue(documentId);
+    if (!current.exec() || !current.next()) {
+        QMessageBox::warning(this, QStringLiteral("读取发货资料失败"),
+                             current.lastError().text().isEmpty()
+                                 ? QStringLiteral("所选记录不是销售出库单。")
+                                 : current.lastError().text());
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("发货｜%1").arg(current.value(0).toString()));
+    dialog.setMinimumWidth(720);
+    auto *dialogLayout = new QVBoxLayout(&dialog);
+    auto *hint = new QLabel(
+        QStringLiteral("补充或修改销售出库信息；所有栏目均可留空，保存后同步到发货查询和表单。"),
+        &dialog);
+    hint->setObjectName(QStringLiteral("mutedText"));
+    dialogLayout->addWidget(hint);
+    auto *form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    auto *customerCompany = new QLineEdit(current.value(2).toString(), &dialog);
+    auto *destination = new QLineEdit(current.value(3).toString(), &dialog);
+    auto *contact = new QLineEdit(current.value(4).toString(), &dialog);
+    auto *phone = new QLineEdit(current.value(5).toString(), &dialog);
+    auto *orderNumber = new QLineEdit(current.value(6).toString(), &dialog);
+    auto *logistics = new QLineEdit(current.value(7).toString(), &dialog);
+    auto *tracking = new QLineEdit(current.value(8).toString(), &dialog);
+    auto *deliveryDate = new QDateEdit(&dialog);
+    const QDate emptyDate(1900, 1, 1);
+    deliveryDate->setMinimumDate(emptyDate);
+    deliveryDate->setMaximumDate(QDate(2999, 12, 31));
+    deliveryDate->setCalendarPopup(true);
+    deliveryDate->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    deliveryDate->setSpecialValueText(QStringLiteral("未填写"));
+    const QDate savedDeliveryDate = QDate::fromString(current.value(9).toString(), Qt::ISODate);
+    deliveryDate->setDate(savedDeliveryDate.isValid() ? savedDeliveryDate : emptyDate);
+    form->addRow(QStringLiteral("客户单位"), customerCompany);
+    form->addRow(QStringLiteral("收货地址"), destination);
+    form->addRow(QStringLiteral("收货人"), contact);
+    form->addRow(QStringLiteral("联系电话"), phone);
+    form->addRow(QStringLiteral("客户合同号/订单号"), orderNumber);
+    form->addRow(QStringLiteral("物流/快递公司"), logistics);
+    form->addRow(QStringLiteral("运单号"), tracking);
+    form->addRow(QStringLiteral("送货日期"), deliveryDate);
+    dialogLayout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存发货资料"));
+    buttons->button(QDialogButtonBox::Save)->setProperty("primary", true);
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    dialogLayout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    if (!m_database.transaction()) {
+        QMessageBox::warning(this, QStringLiteral("保存发货资料失败"), m_database.lastError().text());
+        return;
+    }
+    QSqlQuery save(m_database);
+    save.prepare(QStringLiteral(
+        "INSERT INTO sales_outbound_details(document_id,customer_company,destination,contact_name,"
+        "contact_phone,sales_order_no,logistics_company,tracking_no,delivery_date) "
+        "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET "
+        "customer_company=excluded.customer_company,destination=excluded.destination,"
+        "contact_name=excluded.contact_name,contact_phone=excluded.contact_phone,"
+        "sales_order_no=excluded.sales_order_no,logistics_company=excluded.logistics_company,"
+        "tracking_no=excluded.tracking_no,delivery_date=excluded.delivery_date"));
+    save.addBindValue(documentId);
+    save.addBindValue(customerCompany->text().trimmed());
+    save.addBindValue(destination->text().trimmed());
+    save.addBindValue(contact->text().trimmed());
+    save.addBindValue(phone->text().trimmed());
+    save.addBindValue(orderNumber->text().trimmed());
+    save.addBindValue(logistics->text().trimmed());
+    save.addBindValue(tracking->text().trimmed());
+    save.addBindValue(deliveryDate->date() == emptyDate
+                          ? QStringLiteral("") : deliveryDate->date().toString(Qt::ISODate));
+    bool ok = save.exec();
+    QString error = save.lastError().text();
+    if (ok) {
+        QSqlQuery audit(m_database);
+        audit.prepare(QStringLiteral(
+            "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
+            "VALUES(?,'SHIPMENT_DETAILS_UPDATE','business_document',?,?)"));
+        audit.addBindValue(m_session.userId);
+        audit.addBindValue(documentId);
+        audit.addBindValue(current.value(0).toString());
+        ok = audit.exec();
+        if (!ok) error = audit.lastError().text();
+    }
+    if (!ok || !m_database.commit()) {
+        if (error.isEmpty()) error = m_database.lastError().text();
+        m_database.rollback();
+        QMessageBox::warning(this, QStringLiteral("保存发货资料失败"), error);
+        return;
+    }
+
+    QStringList formErrors;
+    QStringList savedPaths;
+    OfficeTemplateService::synchronizeDocumentForms(
+        m_database, m_session.userId, documentId, &formErrors, false, &savedPaths);
+    refreshRecentDocuments();
+    emit stockChanged();
+    if (formErrors.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("发货资料已保存"),
+                                 QStringLiteral("销售出库信息、发货查询和对应表单已同步更新。"));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("发货资料已保存，部分表单未同步"),
+            QStringLiteral("销售出库信息已经保存；以下表单可在附件管理中重新生成：\n\n%1")
+                .arg(formErrors.join(QStringLiteral("\n"))));
+    }
 }
 
 void StockOutPage::submit()
 {
     const bool salesOutbound = m_typeCombo->currentData().toString() == QStringLiteral("XSCK");
-    if (salesOutbound) {
-        QStringList missing;
-        if (m_customerCompanyEdit->text().trimmed().isEmpty())
-            missing.append(QStringLiteral("客户公司名称"));
-        if (m_destinationEdit->text().trimmed().isEmpty())
-            missing.append(QStringLiteral("销售目的地/收货地址"));
-        if (m_customerContactEdit->text().trimmed().isEmpty())
-            missing.append(QStringLiteral("客户联系人"));
-        if (m_customerPhoneEdit->text().trimmed().isEmpty())
-            missing.append(QStringLiteral("联系电话"));
-        if (m_salesOrderEdit->text().trimmed().isEmpty())
-            missing.append(QStringLiteral("客户合同号/订单号"));
-        if (m_logisticsCompanyEdit->text().trimmed().isEmpty())
-            missing.append(QStringLiteral("物流/快递公司"));
-        if (m_trackingNumberEdit->text().trimmed().isEmpty())
-            missing.append(QStringLiteral("运单号"));
-        if (!m_deliveryDateEdit->date().isValid())
-            missing.append(QStringLiteral("送货日期"));
-        if (!missing.isEmpty()) {
-            QMessageBox::warning(
-                this, QStringLiteral("销售资料不完整"),
-                QStringLiteral("销售出库必须完整填写以下带 * 的发货资料：\n\n%1\n\n"
-                               "请补充后再提交，其他出库类型不受影响。")
-                    .arg(missing.join(QStringLiteral("、"))));
-            return;
-        }
-    }
     QString error;
     const QList<StockMovementRequest> lines = m_lines->lines(&error);
     if (lines.isEmpty()) {
@@ -295,6 +401,7 @@ void StockOutPage::submit()
     outboundForm.documentDate = m_dateEdit->date();
     outboundForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
     outboundForm.fields.insert(QStringLiteral("purpose"), m_purposeEdit->text().trimmed());
+    outboundForm.fields.insert(QStringLiteral("notes"), m_notesEdit->toPlainText().trimmed());
     if (salesOutbound) {
         outboundForm.fields.insert(QStringLiteral("customerCompany"),
                                    m_customerCompanyEdit->text().trimmed());

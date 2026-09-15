@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/Session.h"
+
 #include <QSqlDatabase>
 #include <QString>
 #include <QWidget>
@@ -16,7 +18,8 @@ class ShipmentQueryPage final : public QWidget
     Q_OBJECT
 
 public:
-    explicit ShipmentQueryPage(QSqlDatabase database, QWidget *parent = nullptr);
+    explicit ShipmentQueryPage(QSqlDatabase database, Session session,
+                               QWidget *parent = nullptr);
 
 public slots:
     void refresh();
@@ -25,6 +28,7 @@ private slots:
     void resetFilters();
     void loadSelectedShipmentDetails();
     void openSelectedDeliveryForm();
+    void editSelectedReceipt();
 
 private:
     void loadFilterOptions();
@@ -34,6 +38,7 @@ private:
     QString projectFilter() const;
 
     QSqlDatabase m_database;
+    Session m_session;
     QLineEdit *m_orderEdit = nullptr;
     QComboBox *m_customerCombo = nullptr;
     QComboBox *m_projectCombo = nullptr;

@@ -1,6 +1,7 @@
 #include "ui/pages/LedgerPage.h"
 
 #include "services/InventoryService.h"
+#include "services/UserService.h"
 
 #include <QComboBox>
 #include <QDateEdit>
@@ -68,9 +69,9 @@ LedgerPage::LedgerPage(QSqlDatabase database, Session session, QWidget *parent)
     m_typeCombo->addItem(QStringLiteral("生产退料"), QStringLiteral("SCTL"));
     m_typeCombo->addItem(QStringLiteral("成品入库"), QStringLiteral("CPRK"));
     m_typeCombo->addItem(QStringLiteral("销售出库"), QStringLiteral("XSCK"));
-    m_typeCombo->addItem(QStringLiteral("维修领用"), QStringLiteral("WXLY"));
-    m_typeCombo->addItem(QStringLiteral("研发领用"), QStringLiteral("YPLY"));
-    m_typeCombo->addItem(QStringLiteral("其他出库"), QStringLiteral("QTCK"));
+    m_typeCombo->addItem(QStringLiteral("售后领料"), QStringLiteral("WXLY"));
+    m_typeCombo->addItem(QStringLiteral("研发领料"), QStringLiteral("YPLY"));
+    m_typeCombo->addItem(QStringLiteral("其他领料"), QStringLiteral("QTCK"));
     m_typeCombo->addItem(QStringLiteral("库存调拨"), QStringLiteral("DB"));
     m_typeCombo->addItem(QStringLiteral("撤销"), QStringLiteral("CX"));
     m_fromDate = new QDateEdit(QDate::currentDate().addMonths(-1), this);
@@ -311,7 +312,9 @@ void LedgerPage::reverseSelectedItem()
                     giftSpin->setMaximum(qMin(value, remainingGift));
                 });
     }
-    auto *handlerEdit = new QLineEdit(m_session.displayName, &dialog);
+    auto *handlerEdit = new QLineEdit(
+        UserService::displayNameForUser(m_database, m_session.userId, m_session.displayName),
+        &dialog);
     auto *notesEdit = new QTextEdit(&dialog);
     notesEdit->setMaximumHeight(70);
     form->addRow(QStringLiteral("撤销日期 *"), dateEdit);

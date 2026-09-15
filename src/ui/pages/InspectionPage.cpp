@@ -2,6 +2,7 @@
 
 #include "services/InspectionService.h"
 #include "services/OfficeTemplateService.h"
+#include "services/UserService.h"
 #include "ui/widgets/ComboBoxSearch.h"
 #include "ui/widgets/TableExcelExport.h"
 
@@ -116,7 +117,10 @@ public:
         m_arrivalDate = new QDateEdit(QDate::currentDate(), this);
         m_arrivalDate->setCalendarPopup(true);
         m_arrivalDate->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
-        m_entrusted = new QLineEdit(m_session.displayName, this);
+        m_entrusted = new QLineEdit(
+            UserService::displayNameForUser(m_database, m_session.userId,
+                                            m_session.displayName),
+            this);
         m_department = new QLineEdit(QStringLiteral("检验部"), this);
         m_urgency = new QComboBox(this);
         m_urgency->addItem(QStringLiteral("加急（1-3天）"), QStringLiteral("EXPEDITED"));
@@ -292,10 +296,12 @@ private:
         const QRegularExpression pattern(
             QStringLiteral("^%1(\\d{3})$").arg(QRegularExpression::escape(prefix)),
             QRegularExpression::CaseInsensitiveOption);
-        int maximum = 0;
-        const auto includeNumber = [&pattern, &maximum](const QString &candidate) {
+        QSet<int> usedSequences;
+        const auto includeNumber = [&pattern, &usedSequences](const QString &candidate) {
             const QRegularExpressionMatch match = pattern.match(candidate.trimmed());
-            if (match.hasMatch()) maximum = qMax(maximum, match.captured(1).toInt());
+            if (!match.hasMatch()) return;
+            const int sequence = match.captured(1).toInt();
+            if (sequence >= 1 && sequence <= 999) usedSequences.insert(sequence);
         };
 
         QSqlQuery query(m_database);
@@ -304,9 +310,13 @@ private:
             "UNION ALL SELECT batch_no FROM stock_balances WHERE UPPER(batch_no) GLOB ? "
             "UNION ALL SELECT batch_no FROM business_document_items WHERE UPPER(batch_no) GLOB ? "
             "UNION ALL SELECT batch_no FROM inventory_ledger WHERE UPPER(batch_no) GLOB ? "
-            "UNION ALL SELECT batch_no FROM inspection_notice_items WHERE UPPER(batch_no) GLOB ?"));
+            "UNION ALL SELECT batch_no FROM inspection_notice_items "
+            "WHERE UPPER(batch_no) GLOB ? AND notice_id<>?"));
         const QString glob = prefix + QStringLiteral("[0-9][0-9][0-9]");
         for (int index = 0; index < 5; ++index) query.addBindValue(glob);
+        // 编辑已保存的送检单时，数据库仍保留着保存前的旧明细。
+        // 排除当前单据后，再由下方界面行决定哪些批号仍在使用。
+        query.addBindValue(m_noticeId);
         if (query.exec()) {
             while (query.next()) includeNumber(query.value(0).toString());
         }
@@ -318,10 +328,14 @@ private:
                 includeNumber(batch->text());
             }
         }
-        return maximum >= 999
-            ? QString()
-            : QStringLiteral("%1%2").arg(prefix).arg(
-                  maximum + 1, 3, 10, QLatin1Char('0'));
+        // 删除尚未保存的明细后，该行号码不再存在于 usedSequences，可立即重新使用。
+        for (int sequence = 1; sequence <= 999; ++sequence) {
+            if (!usedSequences.contains(sequence)) {
+                return QStringLiteral("%1%2").arg(prefix).arg(
+                    sequence, 3, 10, QLatin1Char('0'));
+            }
+        }
+        return {};
     }
 
     void updateBatchForMaterial(int row, QComboBox *material, QLineEdit *batch)
@@ -548,7 +562,10 @@ public:
         m_date = new QDateEdit(QDate::currentDate(), this);
         m_date->setCalendarPopup(true);
         m_date->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
-        m_inspector = new QLineEdit(m_session.displayName, this);
+        m_inspector = new QLineEdit(
+            UserService::displayNameForUser(m_database, m_session.userId,
+                                            m_session.displayName),
+            this);
         m_result = new QComboBox(this);
         m_result->addItem(QStringLiteral("合格"), QStringLiteral("QUALIFIED"));
         m_result->addItem(QStringLiteral("不合格"), QStringLiteral("UNQUALIFIED"));

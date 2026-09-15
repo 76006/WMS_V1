@@ -25,12 +25,14 @@
 #include "ui/pages/WarehousePage.h"
 #include "ui/widgets/TableExcelExport.h"
 #include "ui/dialogs/BusinessDocumentEditDialog.h"
+#include "services/UserService.h"
 
 #include <QButtonGroup>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
@@ -103,16 +105,16 @@ void MainWindow::buildUi()
     m_pageTitle->setObjectName(QStringLiteral("pageTitle"));
     auto *refreshButton = new QPushButton(QStringLiteral("刷新"), topBar);
     auto *exportButton = new QPushButton(QStringLiteral("导出Excel"), topBar);
-    auto *userLabel = new QLabel(QStringLiteral("%1（%2）")
-                                     .arg(m_session.displayName, m_session.roleCode), topBar);
-    userLabel->setObjectName(QStringLiteral("mutedText"));
+    m_userLabel = new QLabel(QStringLiteral("%1（%2）")
+                                 .arg(m_session.displayName, m_session.roleCode), topBar);
+    m_userLabel->setObjectName(QStringLiteral("mutedText"));
     topLayout->addWidget(m_pageTitle);
     topLayout->addStretch();
     topLayout->addWidget(exportButton);
     topLayout->addSpacing(8);
     topLayout->addWidget(refreshButton);
     topLayout->addSpacing(10);
-    topLayout->addWidget(userLabel);
+    topLayout->addWidget(m_userLabel);
     contentLayout->addWidget(topBar);
 
     m_stack = new QStackedWidget(content);
@@ -140,7 +142,7 @@ void MainWindow::buildUi()
     m_stockInPage = new StockInPage(m_database, m_session, m_stack);
     m_inspectionPage = new InspectionPage(m_database, m_session, m_stack);
     m_stockOutPage = new StockOutPage(m_database, m_session, m_stack);
-    m_shipmentQueryPage = new ShipmentQueryPage(m_database, m_stack);
+    m_shipmentQueryPage = new ShipmentQueryPage(m_database, m_session, m_stack);
     m_productionIssuePage = new ProductionIssuePage(m_database, m_session, m_stack);
     m_productionReturnPage = new ProductionReturnPage(m_database, m_session, m_stack);
     m_finishedGoodsInPage = new FinishedGoodsInPage(m_database, m_session, m_stack);
@@ -165,7 +167,7 @@ void MainWindow::buildUi()
     add(QStringLiteral("入库管理"), m_stockInPage, m_session.canManageWarehouse());
     add(QStringLiteral("出库管理"), m_stockOutPage, m_session.canManageWarehouse());
     add(QStringLiteral("发货查询"), m_shipmentQueryPage, m_session.canViewInventory());
-    add(QStringLiteral("生产领料"), m_productionIssuePage, m_session.canPostProduction());
+    add(QStringLiteral("领料管理"), m_productionIssuePage, m_session.canPostProduction());
     add(QStringLiteral("生产退料"), m_productionReturnPage, m_session.canPostProduction());
     add(QStringLiteral("成品入库"), m_finishedGoodsInPage, m_session.canPostProduction());
     add(QStringLiteral("库存查询"), m_inventoryPage, m_session.canViewInventory());
@@ -211,6 +213,10 @@ void MainWindow::buildUi()
     connect(m_finishedGoodsInPage, &FinishedGoodsInPage::stockChanged,
             this, &MainWindow::refreshInventoryViews);
     connect(m_ledgerPage, &LedgerPage::stockChanged, this, &MainWindow::refreshInventoryViews);
+    connect(m_systemSettingsPage, &SystemSettingsPage::businessDataCleared,
+            this, &MainWindow::refreshInventoryViews);
+    connect(m_userManagementPage, &UserManagementPage::usersChanged,
+            this, &MainWindow::refreshCurrentUserDisplayName);
 }
 
 void MainWindow::showPage(int index)
@@ -224,6 +230,7 @@ void MainWindow::showPage(int index)
 
 void MainWindow::refreshCurrentPage()
 {
+    refreshCurrentUserDisplayName();
     QWidget *page = m_stack->currentWidget();
     if (page == m_dashboardPage) m_dashboardPage->refresh();
     else if (page == m_materialPage) m_materialPage->refresh();
@@ -268,6 +275,29 @@ void MainWindow::refreshInventoryViews()
     m_productionIssuePage->refreshReferenceData();
     m_productionReturnPage->refreshReferenceData();
     m_finishedGoodsInPage->refreshReferenceData();
+}
+
+void MainWindow::refreshCurrentUserDisplayName()
+{
+    const QString previousName = m_session.displayName.trimmed();
+    const QString currentName = UserService::displayNameForUser(
+        m_database, m_session.userId, previousName);
+    if (currentName.isEmpty()) return;
+    m_session.displayName = currentName;
+    if (m_userLabel) {
+        m_userLabel->setText(QStringLiteral("%1（%2）")
+                                 .arg(currentName, m_session.roleCode));
+    }
+    const auto edits = findChildren<QLineEdit *>();
+    for (QLineEdit *edit : edits) {
+        if (!edit->property("currentUserDefault").toBool()) continue;
+        const QString previousDefault = edit->property("lastCurrentUserDefault").toString();
+        const QString text = edit->text().trimmed();
+        if (text.isEmpty() || text == previousDefault || text == previousName) {
+            edit->setText(currentName);
+        }
+        edit->setProperty("lastCurrentUserDefault", currentName);
+    }
 }
 
 void MainWindow::editDocumentById(qlonglong documentId, QWidget *dialogParent)

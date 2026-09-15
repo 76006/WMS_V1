@@ -1278,7 +1278,9 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
     QStringList desiredKinds;
     const QString documentType = header.value(1).toString().trimmed().toUpper();
     bool recognizedDocumentType = true;
-    if (documentType == QStringLiteral("SCLL") || documentType == QStringLiteral("SCTL")) {
+    if (QStringList{QStringLiteral("SCLL"), QStringLiteral("SCTL"),
+                    QStringLiteral("WXLY"), QStringLiteral("YPLY"),
+                    QStringLiteral("QTCK")}.contains(documentType)) {
         desiredKinds.append(formCode(OfficeFormKind::ProductionIssue));
     } else if (documentType == QStringLiteral("CPRK")
                || documentType == QStringLiteral("SCWG")) {
@@ -1286,11 +1288,9 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
     } else if (QStringList{QStringLiteral("CGRK"), QStringLiteral("TLRK"),
                            QStringLiteral("QTRK"), QStringLiteral("QC")}.contains(documentType)) {
         desiredKinds.append(formCode(OfficeFormKind::RawMaterialInbound));
-    } else if (QStringList{QStringLiteral("XSCK"), QStringLiteral("WXLY"),
-                           QStringLiteral("YPLY"), QStringLiteral("QTCK")}.contains(documentType)) {
+    } else if (documentType == QStringLiteral("XSCK")) {
         desiredKinds.append(formCode(OfficeFormKind::StockOutbound));
-        if (documentType == QStringLiteral("XSCK"))
-            desiredKinds.append(formCode(OfficeFormKind::DeliveryConfirmation));
+        desiredKinds.append(formCode(OfficeFormKind::DeliveryConfirmation));
     } else if (documentType != QStringLiteral("DB") && documentType != QStringLiteral("PD")
                && documentType != QStringLiteral("CX")) {
         recognizedDocumentType = false;
@@ -1377,6 +1377,18 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         document.fields.insert(QStringLiteral("productModel"), header.value(17).toString());
         document.fields.insert(QStringLiteral("plannedQuantity"),
                                QString::number(header.value(18).toDouble(), 'g', 12));
+        if (kind == OfficeFormKind::ProductionIssue)
+            document.fields.insert(QStringLiteral("issueType"), documentType);
+        if (kind == OfficeFormKind::ProductionIssue
+            && document.fields.value(QStringLiteral("receivingDepartment")).trimmed().isEmpty()) {
+            const QString department = (documentType == QStringLiteral("SCLL")
+                                        || documentType == QStringLiteral("SCTL"))
+                ? QStringLiteral("生产部")
+                : documentType == QStringLiteral("WXLY") ? QStringLiteral("售后部")
+                : documentType == QStringLiteral("YPLY") ? QStringLiteral("研发部")
+                                                           : QStringLiteral("其他");
+            document.fields.insert(QStringLiteral("receivingDepartment"), department);
+        }
         if (kind == OfficeFormKind::Inspection && hasLegacyInspection) {
             // 送检单保留自己的编号、日期和委托信息，不替换成入库单的表头。
             document.fields = originalFields;

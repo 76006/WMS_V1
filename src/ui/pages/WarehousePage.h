@@ -29,6 +29,8 @@ private slots:
     void editLocation();
     void toggleWarehouse();
     void toggleLocation();
+    void deleteWarehouse();
+    void deleteLocation();
     void updateActions();
 
 private:
@@ -49,4 +51,6 @@ private:
     QPushButton *m_editLocationButton = nullptr;
     QPushButton *m_toggleWarehouseButton = nullptr;
     QPushButton *m_toggleLocationButton = nullptr;
+    QPushButton *m_deleteWarehouseButton = nullptr;
+    QPushButton *m_deleteLocationButton = nullptr;
 };

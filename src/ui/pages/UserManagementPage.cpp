@@ -90,7 +90,7 @@ void UserManagementPage::editRolePermissions()
         {QStringLiteral("MANAGE_MATERIALS"), QStringLiteral("维护物料与物料图片")},
         {QStringLiteral("MANAGE_WAREHOUSES"), QStringLiteral("维护仓库和库位")},
         {QStringLiteral("POST_INVENTORY"), QStringLiteral("办理出入库、调拨、盘点和撤销")},
-        {QStringLiteral("POST_PRODUCTION"), QStringLiteral("办理生产领料、退料和成品入库")},
+        {QStringLiteral("POST_PRODUCTION"), QStringLiteral("办理各类领料、生产退料和成品入库")},
         {QStringLiteral("MANAGE_ATTACHMENTS"), QStringLiteral("上传、删除和恢复附件")},
         {QStringLiteral("MANAGE_USERS"), QStringLiteral("维护用户和角色权限")},
         {QStringLiteral("MANAGE_SYSTEM"), QStringLiteral("维护系统与单据编号规则")},
@@ -219,7 +219,10 @@ void UserManagementPage::addUser()
     QString error;
     if (!service.createUser(username, displayName, role, password, nullptr, &error))
         QMessageBox::warning(this, QStringLiteral("创建失败"), error);
-    else refresh();
+    else {
+        refresh();
+        emit usersChanged();
+    }
 }
 
 void UserManagementPage::editUser()
@@ -244,7 +247,10 @@ void UserManagementPage::editUser()
     QString error;
     if (!service.updateUser(selectedUserId(), displayName, role, active, &error))
         QMessageBox::warning(this, QStringLiteral("更新失败"), error);
-    else refresh();
+    else {
+        refresh();
+        emit usersChanged();
+    }
 }
 
 void UserManagementPage::resetPassword()

@@ -53,8 +53,9 @@ struct InspectionNoticeSnapshot
 
 QString inspectionLineKey(qlonglong materialId, const QString &batchNumber)
 {
-    Q_UNUSED(batchNumber);
-    return QString::number(materialId);
+    return QStringLiteral("%1\x1f%2")
+        .arg(materialId)
+        .arg(batchNumber.trimmed().toUpper());
 }
 
 bool loadAndValidateInspectionNotice(QSqlDatabase database,
@@ -118,14 +119,14 @@ bool loadAndValidateInspectionNotice(QSqlDatabase database,
         inboundQuantities[inspectionLineKey(line.materialId, line.batchNo)] += line.quantity;
     }
     if (noticeQuantities.size() != inboundQuantities.size()) {
-        setDocumentError(errorMessage, QStringLiteral("入库物料与所选送检通知不一致。"));
+        setDocumentError(errorMessage, QStringLiteral("入库物料或批号与所选送检通知不一致。"));
         return false;
     }
     for (auto it = noticeQuantities.cbegin(); it != noticeQuantities.cend(); ++it) {
         const auto inbound = inboundQuantities.constFind(it.key());
         if (inbound == inboundQuantities.cend()
             || std::abs(inbound.value() - it.value()) > DocumentQuantityTolerance) {
-            setDocumentError(errorMessage, QStringLiteral("入库物料或数量与所选送检通知不一致。"));
+            setDocumentError(errorMessage, QStringLiteral("入库物料、批号或数量与所选送检通知不一致。"));
             return false;
         }
     }
@@ -194,32 +195,6 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                              ? QStringLiteral("不能同时使用独立送检通知和旧版内嵌送检资料。")
                              : QStringLiteral("只有入库单可以关联送检通知。"));
         return false;
-    }
-    if (!inbound && type == QStringLiteral("XSCK")) {
-        // 发货资料由服务层独立校验，避免绕过界面写入不完整的销售出库单。
-        QStringList missing;
-        if (request.customerCompany.trimmed().isEmpty())
-            missing.append(QStringLiteral("客户公司名称"));
-        if (request.destination.trimmed().isEmpty())
-            missing.append(QStringLiteral("销售目的地/收货地址"));
-        if (request.customerContact.trimmed().isEmpty())
-            missing.append(QStringLiteral("客户联系人"));
-        if (request.customerPhone.trimmed().isEmpty())
-            missing.append(QStringLiteral("联系电话"));
-        if (request.salesOrderNumber.trimmed().isEmpty())
-            missing.append(QStringLiteral("客户合同号/订单号"));
-        if (request.logisticsCompany.trimmed().isEmpty())
-            missing.append(QStringLiteral("物流/快递公司"));
-        if (request.trackingNumber.trimmed().isEmpty())
-            missing.append(QStringLiteral("运单号"));
-        if (!request.deliveryDate.isValid())
-            missing.append(QStringLiteral("送货日期"));
-        if (!missing.isEmpty()) {
-            setDocumentError(errorMessage,
-                             QStringLiteral("销售出库必须完整填写以下发货资料：%1。")
-                                 .arg(missing.join(QStringLiteral("、"))));
-            return false;
-        }
     }
     if (inbound && request.inspectionNoticeId <= 0 && request.inspection.required) {
         if (request.inspection.inspectionNumber.trimmed().isEmpty()

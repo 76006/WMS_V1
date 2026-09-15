@@ -84,6 +84,8 @@ ExcelImportPage::ExcelImportPage(QSqlDatabase database, Session session, QWidget
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
     m_handlerEdit = new QLineEdit(m_session.displayName, panel);
+    m_handlerEdit->setProperty("currentUserDefault", true);
+    m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     form->addRow(QStringLiteral("导入仓库 *"), m_warehouseCombo);
     form->addRow(QStringLiteral("导入库位 *"), m_locationCombo);
     form->addRow(QStringLiteral("入账日期 *"), m_dateEdit);

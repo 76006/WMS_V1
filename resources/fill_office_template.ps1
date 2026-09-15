@@ -215,7 +215,15 @@ function Fill-Inbound($sheet, $data) {
     $extra = Expand-Table $sheet 5 19 $required 9 $false $false
     Clear-TableRows $sheet 5 ($required + [Math]::Max(0, 19 - $required)) 9
     $date = [datetime]::ParseExact((TextValue $data.documentDate), 'yyyy-MM-dd', $null)
-    Set-Cell $sheet 3 1 ($date.ToString('yyyy年MM月') + "　单号：" + (TextValue $data.documentNumber))
+    if ((TextValue $data.kind) -eq 'finishedInbound') {
+        # 新版成品入库单将月份和单号拆分为两个区域：A3:B3、F3:I3。
+        Set-Cell $sheet 3 1 $date.ToString('yyyy年M月')
+        Set-Cell $sheet 3 6 ("单号：" + (TextValue $data.documentNumber))
+    }
+    else {
+        # 原材料入库单仍使用 A3:I3 合并区域，保持原有填写方式。
+        Set-Cell $sheet 3 1 ($date.ToString('yyyy年MM月') + "　单号：" + (TextValue $data.documentNumber))
+    }
     for ($index = 0; $index -lt $required; $index++) {
         $line = @($data.lines)[$index]
         $row = 5 + $index
@@ -227,7 +235,11 @@ function Fill-Inbound($sheet, $data) {
         Set-Cell $sheet $row 6 (TextValue $line.specification)
         Set-Cell $sheet $row 7 (TextValue $line.unit)
         Set-Cell $sheet $row 8 (NumberValue $line.quantity)
-        Set-Cell $sheet $row 9 (TextValue $line.notes)
+        $lineNotes = TextValue $line.notes
+        if ([string]::IsNullOrWhiteSpace($lineNotes)) {
+            $lineNotes = TextValue (Get-Field $data 'notes')
+        }
+        Set-Cell $sheet $row 9 $lineNotes
     }
     Set-Cell $sheet (24 + $extra) 1 "入  库  人："
     Set-Cell $sheet (24 + $extra) 6 "日期："
@@ -259,9 +271,13 @@ function Fill-ProductionIssue($sheet, $data) {
         Set-Cell $sheet $row 11 (NumberValue $line.reworkQuantity)
         Set-Cell $sheet $row 12 (NumberValue $line.lossQuantity)
         Set-Cell $sheet $row 13 (NumberValue $line.returnQuantity)
+        $lineNotes = TextValue $line.notes
+        if ([string]::IsNullOrWhiteSpace($lineNotes)) {
+            $lineNotes = TextValue (Get-Field $data 'notes')
+        }
         $note = "领用：" + (TextValue $line.quantity)
-        if (-not [string]::IsNullOrWhiteSpace((TextValue $line.notes))) {
-            $note += "；" + (TextValue $line.notes)
+        if (-not [string]::IsNullOrWhiteSpace($lineNotes)) {
+            $note += "；" + $lineNotes
         }
         Set-Cell $sheet $row 14 $note
     }
@@ -295,7 +311,11 @@ function Fill-Outbound($sheet, $data) {
         Set-Cell $sheet $row 5 (NumberValue $line.quantity)
         Set-Cell $sheet $row 6 (TextValue $line.batchNo)
         Set-Cell $sheet $row 7 (TextValue $line.serialNumbers)
-        Set-Cell $sheet $row 8 (TextValue $line.notes)
+        $lineNotes = TextValue $line.notes
+        if ([string]::IsNullOrWhiteSpace($lineNotes)) {
+            $lineNotes = TextValue (Get-Field $data 'notes')
+        }
+        Set-Cell $sheet $row 8 $lineNotes
     }
     $sheet.PageSetup.PrintArea = '$A$1:$H$' + (20 + $extra)
 }
@@ -320,7 +340,11 @@ function Fill-Delivery($sheet, $data) {
         Set-Cell $sheet $row 6 (NumberValue $line.quantity)
         Set-Cell $sheet $row 7 (TextValue $line.batchNo)
         Set-Cell $sheet $row 8 (TextValue $line.serialNumbers)
-        Set-Cell $sheet $row 9 (TextValue $line.notes)
+        $lineNotes = TextValue $line.notes
+        if ([string]::IsNullOrWhiteSpace($lineNotes)) {
+            $lineNotes = TextValue (Get-Field $data 'notes')
+        }
+        Set-Cell $sheet $row 9 $lineNotes
     }
     Set-Cell $sheet (8 + $extra) 1 ("收货人信息：" + (Get-Field $data 'destination') +
                                     "；联系人：" + (Get-Field $data 'customerContact') +

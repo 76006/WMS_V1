@@ -364,7 +364,7 @@ INSERT OR IGNORE INTO number_rules(document_type, prefix, sequence_width) VALUES
     ('QTRK', 'QTRK', 4),
     ('QC', 'QC', 4),
     ('SCLL', 'SMLL', 3),
-    ('SCTL', 'SCTL', 4),
+    ('SCTL', 'SMTL', 4),
     ('CPRK', 'CPRK', 4),
     ('XSCK', 'XSCK', 4),
     ('WXLY', 'WXLY', 4),

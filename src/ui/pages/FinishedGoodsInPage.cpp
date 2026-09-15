@@ -90,6 +90,8 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     m_warehouseCombo = new QComboBox(panel);
     m_locationCombo = new QComboBox(panel);
     m_handlerEdit = new QLineEdit(m_session.displayName, panel);
+    m_handlerEdit->setProperty("currentUserDefault", true);
+    m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_serialEdit = new QTextEdit(panel);
     m_serialEdit->setMaximumHeight(115);
     m_serialEdit->setPlaceholderText(QStringLiteral("每行一个成品SN"));
@@ -226,7 +228,7 @@ void FinishedGoodsInPage::loadRunDetails()
     if (index < 0) {
         m_productMaterialId = 0;
         m_serialEdit->clear();
-        m_productLabel->setText(QStringLiteral("请先在生产领料页创建生产批次。"));
+        m_productLabel->setText(QStringLiteral("请先在领料管理中通过生产领料创建生产批次。"));
         m_progressLabel->clear();
         m_submitButton->setEnabled(false);
         return;
@@ -358,12 +360,14 @@ void FinishedGoodsInPage::submit()
     line.warehouseId = m_warehouseCombo->currentData().toLongLong();
     line.locationId = m_locationCombo->currentData().toLongLong();
     line.serialNumbers = serials;
+    line.notes = m_notesEdit->toPlainText().trimmed();
 
     OfficeTemplateDocument inboundForm;
     inboundForm.kind = OfficeFormKind::FinishedGoodsInbound;
     inboundForm.documentNumber = QStringLiteral("提交后自动生成");
     inboundForm.documentDate = m_dateEdit->date();
     inboundForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
+    inboundForm.fields.insert(QStringLiteral("notes"), m_notesEdit->toPlainText().trimmed());
     QString formError;
     inboundForm.lines = OfficeTemplateService::materialLines(m_database, {line}, &formError);
     if (inboundForm.lines.isEmpty()) {

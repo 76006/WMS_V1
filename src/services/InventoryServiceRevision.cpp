@@ -749,6 +749,27 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         return fail(errorMessage, QStringLiteral("保存单头失败：%1")
                                       .arg(updateDocument.lastError().text()));
 
+    QVariant previousReceiptStatus;
+    QVariant previousReceiptDate;
+    QVariant previousReceiptAttachmentId;
+    QVariant previousReceiptConfirmedBy;
+    QVariant previousReceiptConfirmedAt;
+    QSqlQuery previousSales(m_database);
+    previousSales.prepare(QStringLiteral(
+        "SELECT receipt_status,receipt_date,receipt_attachment_id,receipt_confirmed_by,"
+        "receipt_confirmed_at FROM sales_outbound_details WHERE document_id=?"));
+    previousSales.addBindValue(document.documentId);
+    if (!previousSales.exec())
+        return fail(errorMessage, QStringLiteral("读取原签收资料失败：%1")
+                                      .arg(previousSales.lastError().text()));
+    if (previousSales.next()) {
+        previousReceiptStatus = previousSales.value(0);
+        previousReceiptDate = previousSales.value(1);
+        previousReceiptAttachmentId = previousSales.value(2);
+        previousReceiptConfirmedBy = previousSales.value(3);
+        previousReceiptConfirmedAt = previousSales.value(4);
+    }
+
     QSqlQuery removeSales(m_database);
     removeSales.prepare(QStringLiteral("DELETE FROM sales_outbound_details WHERE document_id=?"));
     removeSales.addBindValue(document.documentId);
@@ -764,8 +785,9 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         QSqlQuery sales(m_database);
         sales.prepare(QStringLiteral(
             "INSERT INTO sales_outbound_details(document_id,customer_company,destination,contact_name,"
-            "contact_phone,sales_order_no,logistics_company,tracking_no,delivery_date) "
-            "VALUES(?,?,?,?,?,?,?,?,?)"));
+            "contact_phone,sales_order_no,logistics_company,tracking_no,delivery_date,"
+            "receipt_status,receipt_date,receipt_attachment_id,receipt_confirmed_by,"
+            "receipt_confirmed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
         sales.addBindValue(document.documentId);
         sales.addBindValue(normalized(document.customerCompany));
         sales.addBindValue(normalized(document.destination));
@@ -776,6 +798,12 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         sales.addBindValue(normalized(document.trackingNumber));
         sales.addBindValue((document.deliveryDate.isValid() ? document.deliveryDate
                                                              : document.documentDate).toString(Qt::ISODate));
+        sales.addBindValue(previousReceiptStatus.isValid()
+                               ? previousReceiptStatus : QVariant(QStringLiteral("PENDING")));
+        sales.addBindValue(previousReceiptDate);
+        sales.addBindValue(previousReceiptAttachmentId);
+        sales.addBindValue(previousReceiptConfirmedBy);
+        sales.addBindValue(previousReceiptConfirmedAt);
         if (!sales.exec())
             return fail(errorMessage, QStringLiteral("保存销售资料失败：%1")
                                           .arg(sales.lastError().text()));
