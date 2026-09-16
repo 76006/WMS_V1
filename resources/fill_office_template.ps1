@@ -324,9 +324,10 @@ function Fill-Delivery($sheet, $data) {
     $required = @($data.lines).Count
     $extra = Expand-Table $sheet 5 3 $required 9 $false $false
     Clear-TableRows $sheet 5 ($required + [Math]::Max(0, 3 - $required)) 9
-    Set-Cell $sheet 3 1 ("发往单位：" + (Get-Field $data 'customerCompany') +
-                         "　送货日期：" + (TextValue $data.documentDate) +
-                         "　单号：" + (TextValue $data.documentNumber))
+    # 新版模板将发往单位、送货日期和单号拆成 A3:B3、C3:F3、G3:I3 三个区域。
+    Set-Cell $sheet 3 1 ("发往单位：" + (Get-Field $data 'customerCompany'))
+    Set-Cell $sheet 3 3 ("　送货日期：" + (TextValue $data.documentDate))
+    Set-Cell $sheet 3 7 ("　单号：" + (TextValue $data.documentNumber))
     for ($index = 0; $index -lt $required; $index++) {
         $line = @($data.lines)[$index]
         $row = 5 + $index
@@ -346,11 +347,7 @@ function Fill-Delivery($sheet, $data) {
         }
         Set-Cell $sheet $row 9 $lineNotes
     }
-    Set-Cell $sheet (8 + $extra) 1 ("收货人信息：" + (Get-Field $data 'destination') +
-                                    "；联系人：" + (Get-Field $data 'customerContact') +
-                                    "；联系电话：" + (Get-Field $data 'customerPhone') +
-                                    "；物流：" + (Get-Field $data 'logisticsCompany') +
-                                    "；运单号：" + (Get-Field $data 'trackingNumber'))
+    Set-Cell $sheet (8 + $extra) 1 ("收货地址：" + (Get-Field $data 'destination'))
     Set-Cell $sheet (9 + $extra) 1 "收货人："
     Set-Cell $sheet (9 + $extra) 6 "日期："
     $sheet.PageSetup.PrintArea = '$A$1:$I$' + (9 + $extra)

@@ -1403,13 +1403,14 @@ qlonglong InventoryService::createLedger(qlonglong documentId,
 bool InventoryService::attachSerialsToInbound(const StockMovementRequest &request,
                                               qlonglong documentId,
                                               qlonglong ledgerId,
-                                              QString *errorMessage)
+                                              QString *errorMessage,
+                                              bool allowOutboundForCountAdjustment)
 {
     const QString inboundAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     for (const QString &serial : request.serialNumbers) {
         const QString serialNo = serial.trimmed().toUpper();
-        // 全局SN唯一：先查已有记录。不存在则按原逻辑新增；存在时只允许“同物料且已作废”
-        // 的SN复用（例如入库被撤销后重新入库），保留原SN主键和历史流水关联。
+        // 全局SN唯一：普通入库仅允许同物料的已作废SN复用；盘点调整还可将
+        // 同物料的已出库SN重新确认为在库，并始终保留原SN主键和历史流水关联。
         QSqlQuery existing(m_database);
         existing.prepare(QStringLiteral(
             "SELECT id,material_id,status FROM serial_numbers WHERE serial_no=?"));
@@ -1426,9 +1427,11 @@ bool InventoryService::attachSerialsToInbound(const StockMovementRequest &reques
                 return false;
             }
             const QString status = existing.value(2).toString();
-            if (status != QStringLiteral("VOIDED")) {
+            if (status != QStringLiteral("VOIDED")
+                && !(allowOutboundForCountAdjustment
+                     && status == QStringLiteral("OUTBOUND"))) {
                 setError(errorMessage,
-                         QStringLiteral("SN %1 已存在且状态为“%2”，只有已作废的SN才能重新入库。")
+                         QStringLiteral("SN %1 已存在且状态为“%2”，当前操作不能将其重新入库。")
                              .arg(serialNo, serialStatusText(status)));
                 return false;
             }
@@ -1436,7 +1439,10 @@ bool InventoryService::attachSerialsToInbound(const StockMovementRequest &reques
             reuse.prepare(QStringLiteral(
                 "UPDATE serial_numbers SET status='IN_STOCK', batch_no=?, warehouse_id=?, "
                 "location_id=?, production_batch='', inbound_at=?, outbound_at=NULL, "
-                "last_document_id=? WHERE id=? AND material_id=? AND status='VOIDED'"));
+                "last_document_id=? WHERE id=? AND material_id=? AND %1")
+                              .arg(allowOutboundForCountAdjustment
+                                       ? QStringLiteral("status IN ('VOIDED','OUTBOUND')")
+                                       : QStringLiteral("status='VOIDED'")));
             reuse.addBindValue(databaseText(request.batchNo));
             reuse.addBindValue(request.warehouseId);
             reuse.addBindValue(request.locationId);

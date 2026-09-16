@@ -10,6 +10,7 @@
 #include <QVariant>
 
 #include <cmath>
+#include <utility>
 
 namespace {
 constexpr double DocumentQuantityTolerance = 0.0000001;
@@ -805,10 +806,126 @@ bool InventoryService::postInventoryCount(const InventoryCountRequest &request,
             return false;
         }
         const double difference = line.actualQuantity - line.systemQuantity;
-        if (rules.requireSerial && std::abs(difference) > DocumentQuantityTolerance) {
+        QStringList serialsToAdd;
+        QStringList serialsToRemove;
+        QStringList targetSerials;
+        bool registerUntrackedSerials = false;
+        if (rules.requireSerial) {
+            const bool systemIsWhole = std::abs(line.systemQuantity
+                                                - std::round(line.systemQuantity))
+                <= DocumentQuantityTolerance;
+            const bool actualIsWhole = std::abs(line.actualQuantity
+                                                - std::round(line.actualQuantity))
+                <= DocumentQuantityTolerance;
+            if (!systemIsWhole || !actualIsWhole) {
+                setDocumentError(errorMessage,
+                                 lineError(index + 1,
+                                           QStringLiteral("SN管理物料的账面库存和目标库存必须是整数。")));
+                rollback();
+                return false;
+            }
+            if (std::abs(difference) > DocumentQuantityTolerance
+                && !line.serialNumbersSpecified) {
+                setDocumentError(errorMessage,
+                                 lineError(index + 1,
+                                           QStringLiteral("SN管理物料发生差异时必须提供调整后的完整SN列表。")));
+                rollback();
+                return false;
+            }
+            if (line.serialNumbersSpecified) {
+                QSet<QString> targetSet;
+                for (const QString &value : line.serialNumbers) {
+                    const QString serial = value.trimmed().toUpper();
+                    if (serial.isEmpty() || targetSet.contains(serial)) {
+                        setDocumentError(
+                            errorMessage,
+                            lineError(index + 1,
+                                      serial.isEmpty()
+                                          ? QStringLiteral("SN不能为空。")
+                                          : QStringLiteral("SN %1 重复。可用SN不能重复。")
+                                                .arg(serial)));
+                        rollback();
+                        return false;
+                    }
+                    targetSet.insert(serial);
+                    targetSerials.append(serial);
+                }
+                const int targetQuantity = static_cast<int>(std::llround(line.actualQuantity));
+                if (targetSerials.size() != targetQuantity) {
+                    setDocumentError(
+                        errorMessage,
+                        lineError(index + 1,
+                                  QStringLiteral("调整后SN数量（%1）必须等于目标库存（%2）。")
+                                      .arg(targetSerials.size()).arg(targetQuantity)));
+                    rollback();
+                    return false;
+                }
+
+                QStringList currentSerials;
+                QSet<QString> currentSet;
+                QSqlQuery serialQuery(m_database);
+                serialQuery.prepare(QStringLiteral(
+                    "SELECT serial_no FROM serial_numbers WHERE material_id=? "
+                    "AND status='IN_STOCK' AND warehouse_id=? AND location_id=? "
+                    "AND batch_no=? ORDER BY serial_no"));
+                serialQuery.addBindValue(line.materialId);
+                serialQuery.addBindValue(line.warehouseId);
+                serialQuery.addBindValue(line.locationId);
+                serialQuery.addBindValue(normalizedText(line.batchNo));
+                if (!serialQuery.exec()) {
+                    setDocumentError(
+                        errorMessage,
+                        lineError(index + 1,
+                                  QStringLiteral("读取当前在库SN失败：%1")
+                                      .arg(serialQuery.lastError().text())));
+                    rollback();
+                    return false;
+                }
+                while (serialQuery.next()) {
+                    const QString serial = serialQuery.value(0).toString().trimmed().toUpper();
+                    currentSerials.append(serial);
+                    currentSet.insert(serial);
+                }
+                const int systemQuantity = static_cast<int>(std::llround(line.systemQuantity));
+                if (currentSerials.size() != systemQuantity) {
+                    // 旧数据在启用SN管理前可能只有账面库存，没有SN明细。
+                    // 仅在“一个有效SN都没有”时允许一次性登记；部分缺失仍视为数据异常。
+                    if (currentSerials.isEmpty() && systemQuantity > 0) {
+                        registerUntrackedSerials = true;
+                        serialsToAdd = targetSerials;
+                    } else {
+                        setDocumentError(
+                            errorMessage,
+                            lineError(index + 1,
+                                      QStringLiteral("当前账面库存为%1，但有效在库SN为%2个。"
+                                                     "只有完全未登记SN的旧库存可以一次性补齐，"
+                                                     "部分缺失请先核查历史数据。")
+                                          .arg(systemQuantity).arg(currentSerials.size())));
+                        rollback();
+                        return false;
+                    }
+                }
+                if (!registerUntrackedSerials) {
+                    for (const QString &serial : std::as_const(targetSerials)) {
+                        if (!currentSet.contains(serial)) serialsToAdd.append(serial);
+                    }
+                    for (const QString &serial : std::as_const(currentSerials)) {
+                        if (!targetSet.contains(serial)) serialsToRemove.append(serial);
+                    }
+                    if (serialsToAdd.size() - serialsToRemove.size()
+                        != static_cast<int>(std::llround(difference))) {
+                        setDocumentError(errorMessage,
+                                         lineError(index + 1,
+                                                   QStringLiteral("SN变化数量与库存差异不一致。")));
+                        rollback();
+                        return false;
+                    }
+                }
+            }
+        } else if (line.serialNumbersSpecified || !line.serialNumbers.isEmpty()) {
             setDocumentError(errorMessage,
                              lineError(index + 1,
-                                       QStringLiteral("SN管理物料发生差异时需先通过出入库调整SN。")));
+                                       QStringLiteral("该物料未启用SN管理，不能提交SN列表。")));
             rollback();
             return false;
         }
@@ -868,6 +985,90 @@ bool InventoryService::postInventoryCount(const InventoryCountRequest &request,
             setDocumentError(errorMessage, lineError(index + 1, countItem.lastError().text()));
             rollback();
             return false;
+        }
+        if (rules.requireSerial && line.serialNumbersSpecified) {
+            const auto postSerialMovement = [&](const QStringList &serials,
+                                                bool inbound) -> bool {
+                if (serials.isEmpty()) return true;
+                StockMovementRequest movement;
+                movement.documentType = QStringLiteral("PD");
+                movement.documentDate = request.documentDate;
+                movement.materialId = line.materialId;
+                movement.quantity = serials.size();
+                movement.batchNo = line.batchNo;
+                movement.warehouseId = line.warehouseId;
+                movement.locationId = line.locationId;
+                movement.serialNumbers = serials;
+                movement.notes = line.differenceReason;
+                const qlonglong itemId = createDocumentItem(
+                    documentId, ++documentLine, movement, QVariant(), &detail);
+                double before = 0.0;
+                double after = 0.0;
+                const double delta = inbound ? serials.size() : -serials.size();
+                if (itemId <= 0
+                    || !changeBalance(line.materialId, line.warehouseId, line.locationId,
+                                      line.batchNo, delta, &before, &after, &detail)) {
+                    return false;
+                }
+                const qlonglong ledgerId = createLedger(
+                    documentId, itemId,
+                    inbound ? QStringLiteral("PD-PY") : QStringLiteral("PD-PK"),
+                    line.materialId, line.batchNo,
+                    inbound ? serials.size() : 0.0,
+                    inbound ? 0.0 : serials.size(),
+                    before, after, line.warehouseId, line.locationId,
+                    line.differenceReason, &detail);
+                if (ledgerId <= 0) return false;
+                return inbound
+                    ? attachSerialsToInbound(movement, documentId, ledgerId, &detail, true)
+                    : attachSerialsToOutbound(movement, documentId, ledgerId, &detail);
+            };
+            const auto removeUntrackedStock = [&](int quantity) -> bool {
+                if (quantity <= 0) return true;
+                StockMovementRequest movement;
+                movement.documentType = QStringLiteral("PD");
+                movement.documentDate = request.documentDate;
+                movement.materialId = line.materialId;
+                movement.quantity = quantity;
+                movement.batchNo = line.batchNo;
+                movement.warehouseId = line.warehouseId;
+                movement.locationId = line.locationId;
+                movement.notes = line.differenceReason.trimmed().isEmpty()
+                    ? QStringLiteral("为旧库存补登SN") : line.differenceReason;
+                const qlonglong itemId = createDocumentItem(
+                    documentId, ++documentLine, movement, QVariant(), &detail);
+                double before = 0.0;
+                double after = 0.0;
+                if (itemId <= 0
+                    || !changeBalance(line.materialId, line.warehouseId, line.locationId,
+                                      line.batchNo, -quantity, &before, &after, &detail)) {
+                    return false;
+                }
+                return createLedger(documentId, itemId, QStringLiteral("PD-PK"),
+                                    line.materialId, line.batchNo, 0.0, quantity,
+                                    before, after, line.warehouseId, line.locationId,
+                                    movement.notes, &detail) > 0;
+            };
+            if (registerUntrackedSerials) {
+                const int systemQuantity = static_cast<int>(std::llround(line.systemQuantity));
+                // 先将没有SN关联的旧库存整体盘亏，再按目标SN整体盘盈。
+                // 两步在同一事务中完成，最终账面数量等于目标SN数量。
+                if (!removeUntrackedStock(systemQuantity)
+                    || !postSerialMovement(targetSerials, true)) {
+                    setDocumentError(errorMessage, lineError(index + 1, detail));
+                    rollback();
+                    return false;
+                }
+                continue;
+            }
+            // 先移除盘亏SN，再加入盘盈SN；同一事务内最终库存严格等于目标SN数量。
+            if (!postSerialMovement(serialsToRemove, false)
+                || !postSerialMovement(serialsToAdd, true)) {
+                setDocumentError(errorMessage, lineError(index + 1, detail));
+                rollback();
+                return false;
+            }
+            continue;
         }
         if (std::abs(difference) <= DocumentQuantityTolerance) continue;
 

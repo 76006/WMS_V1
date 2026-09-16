@@ -55,13 +55,9 @@ QList<FieldDefinition> fieldDefinitions(const OfficeTemplateDocument &document)
         };
     case OfficeFormKind::DeliveryConfirmation:
         return {
-            {QStringLiteral("customerCompany"), QStringLiteral("客户单位"), QString(), false},
-            {QStringLiteral("salesOrderNumber"), QStringLiteral("订单号"), QString(), false},
-            {QStringLiteral("destination"), QStringLiteral("收货地址"), QString(), false},
-            {QStringLiteral("customerContact"), QStringLiteral("收货人"), QString(), false},
-            {QStringLiteral("customerPhone"), QStringLiteral("联系电话"), QString(), false},
-            {QStringLiteral("logisticsCompany"), QStringLiteral("物流公司"), QString(), false},
-            {QStringLiteral("trackingNumber"), QStringLiteral("运单号"), QString(), false}
+            {QStringLiteral("customerCompany"), QStringLiteral("发往单位"), QString(), false},
+            {QStringLiteral("salesOrderNumber"), QStringLiteral("客户合同号/订单号"), QString(), false},
+            {QStringLiteral("destination"), QStringLiteral("收货地址"), QString(), false}
         };
     case OfficeFormKind::Inspection:
         return {
@@ -156,9 +152,10 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
                    QStringLiteral("序列号"), QStringLiteral("备注")};
         break;
     case OfficeFormKind::DeliveryConfirmation:
-        headers = {QStringLiteral("序号"), QStringLiteral("订单号"), QStringLiteral("产品名称"),
+        headers = {QStringLiteral("序号"), QStringLiteral("客户合同号/订单号"),
+                   QStringLiteral("产品名称"),
                    QStringLiteral("规格型号"), QStringLiteral("单位"), QStringLiteral("数量"),
-                   QStringLiteral("批号"), QStringLiteral("序列号"), QStringLiteral("备注")};
+                   QStringLiteral("生产批号"), QStringLiteral("序列号"), QStringLiteral("备注")};
         break;
     case OfficeFormKind::ProductionIssue:
         headers = {QStringLiteral("序号"), QStringLiteral("物料编码"), QStringLiteral("物料名称"),

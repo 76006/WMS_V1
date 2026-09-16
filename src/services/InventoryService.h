@@ -196,6 +196,10 @@ struct InventoryCountLine
     double actualQuantity = 0.0;
     QString supplier;
     QString differenceReason;
+    // SN管理物料通过“调整后的完整在库SN列表”执行盘点调整。
+    // serialNumbersSpecified 用于区分“明确调整为空”与普通盘点页面未提供SN。
+    bool serialNumbersSpecified = false;
+    QStringList serialNumbers;
 };
 
 struct InventoryCountRequest
@@ -346,7 +350,8 @@ private:
     bool attachSerialsToInbound(const StockMovementRequest &request,
                                 qlonglong documentId,
                                 qlonglong ledgerId,
-                                QString *errorMessage);
+                                QString *errorMessage,
+                                bool allowOutboundForCountAdjustment = false);
     bool attachSerialsToOutbound(const StockMovementRequest &request,
                                  qlonglong documentId,
                                  qlonglong ledgerId,

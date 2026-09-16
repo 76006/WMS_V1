@@ -38,7 +38,10 @@
 #include <QMap>
 #include <QPushButton>
 #include <QPixmap>
+#include <QRegularExpression>
 #include <QScreen>
+#include <QSet>
+#include <QSignalBlocker>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlQueryModel>
@@ -46,6 +49,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTextEdit>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QUuid>
@@ -821,13 +825,6 @@ void MaterialPage::editStock()
                              QStringLiteral("该物料已停用，请先恢复为正常状态。"));
         return;
     }
-    if (requireSerial) {
-        QMessageBox::information(
-            this, QStringLiteral("SN物料需同步调整SN"),
-            QStringLiteral("该物料启用了SN管理，不能只修改库存数字。请通过入库管理或出库管理同步录入具体SN。"));
-        return;
-    }
-
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("编辑库存 - %1").arg(materialCode));
     dialog.resize(820, 640);
@@ -837,7 +834,9 @@ void MaterialPage::editStock()
     heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
     layout->addWidget(heading);
     auto *hint = new QLabel(
-        QStringLiteral("可直接把指定仓库、库位和批次的库存数量或批次供应商改为新值。保存后系统自动生成盘点调整单；数量有差异时同时生成库存流水，不会覆盖历史记录。"),
+        requireSerial
+            ? QStringLiteral("该物料启用了SN管理。请维护调整后的完整在库SN列表，目标库存会自动等于SN数量；保存时库存、SN状态和流水将在同一事务中更新。")
+            : QStringLiteral("可直接把指定仓库、库位和批次的库存数量或批次供应商改为新值。保存后系统自动生成盘点调整单；数量有差异时同时生成库存流水，不会覆盖历史记录。"),
         &dialog);
     hint->setObjectName(QStringLiteral("mutedText"));
     hint->setWordWrap(true);
@@ -859,8 +858,20 @@ void MaterialPage::editStock()
     auto *currentLabel = new QLabel(QStringLiteral("0"), &dialog);
     currentLabel->setStyleSheet(QStringLiteral("font-weight:600;"));
     auto *targetSpin = new QDoubleSpinBox(&dialog);
-    targetSpin->setDecimals(6);
+    targetSpin->setDecimals(requireSerial ? 0 : 6);
     targetSpin->setRange(0.0, 999999999999.0);
+    targetSpin->setReadOnly(requireSerial);
+    if (requireSerial) targetSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    QTextEdit *serialEdit = nullptr;
+    QLabel *serialHint = nullptr;
+    if (requireSerial) {
+        serialEdit = new QTextEdit(&dialog);
+        serialEdit->setMaximumHeight(125);
+        serialEdit->setPlaceholderText(QStringLiteral("调整后仍在此仓库、库位和批次内的全部SN；每行一个，也可用逗号分隔"));
+        serialHint = new QLabel(QStringLiteral("当前有效SN：0个；调整后SN：0个"), &dialog);
+        serialHint->setObjectName(QStringLiteral("mutedText"));
+        serialHint->setWordWrap(true);
+    }
     auto *reasonEdit = new QLineEdit(QStringLiteral("物料维护直接编辑库存"), &dialog);
     auto *dateEdit = new QDateEdit(QDate::currentDate(), &dialog);
     dateEdit->setCalendarPopup(true);
@@ -872,6 +883,15 @@ void MaterialPage::editStock()
     form->addRow(QStringLiteral("供应商"), supplierEdit);
     form->addRow(QStringLiteral("当前库存"), currentLabel);
     form->addRow(QStringLiteral("目标库存 *"), targetSpin);
+    if (serialEdit) {
+        auto *serialBlock = new QWidget(&dialog);
+        auto *serialLayout = new QVBoxLayout(serialBlock);
+        serialLayout->setContentsMargins(0, 0, 0, 0);
+        serialLayout->setSpacing(4);
+        serialLayout->addWidget(serialEdit);
+        serialLayout->addWidget(serialHint);
+        form->addRow(QStringLiteral("调整后SN列表 *"), serialBlock);
+    }
     form->addRow(QStringLiteral("调整原因 *"), reasonEdit);
     form->addRow(QStringLiteral("调整日期 *"), dateEdit);
     layout->addLayout(form);
@@ -925,10 +945,18 @@ void MaterialPage::editStock()
     const auto selectedBatch = [batchCombo, requireBatch] {
         return requireBatch ? batchCombo->currentText().trimmed() : QStringLiteral("");
     };
+    const auto parseSerialNumbers = [](const QString &text) {
+        QStringList serials = text.split(
+            QRegularExpression(QStringLiteral("[\\s,，;；]+")), Qt::SkipEmptyParts);
+        for (QString &serial : serials) serial = serial.trimmed().toUpper();
+        return serials;
+    };
     refreshCurrentStock = [this, materialId, warehouseCombo, locationCombo, batchCombo,
-                           supplierEdit, currentLabel, targetSpin, selectedBatch, requireBatch] {
+                           supplierEdit, currentLabel, targetSpin, serialEdit, serialHint,
+                           selectedBatch, requireBatch, requireSerial] {
         double quantity = 0.0;
         QString supplier;
+        QStringList serials;
         if (warehouseCombo->currentIndex() >= 0 && locationCombo->currentIndex() >= 0) {
             QSqlQuery current(m_database);
             current.prepare(QStringLiteral(
@@ -947,10 +975,55 @@ void MaterialPage::editStock()
                 batch.addBindValue(selectedBatch());
                 if (batch.exec() && batch.next()) supplier = batch.value(0).toString();
             }
+            if (requireSerial) {
+                QSqlQuery serialQuery(m_database);
+                serialQuery.prepare(QStringLiteral(
+                    "SELECT serial_no FROM serial_numbers WHERE material_id=? "
+                    "AND status='IN_STOCK' AND warehouse_id=? AND location_id=? "
+                    "AND batch_no=? ORDER BY serial_no"));
+                serialQuery.addBindValue(materialId);
+                serialQuery.addBindValue(warehouseCombo->currentData());
+                serialQuery.addBindValue(locationCombo->currentData());
+                serialQuery.addBindValue(selectedBatch());
+                if (serialQuery.exec()) {
+                    while (serialQuery.next())
+                        serials.append(serialQuery.value(0).toString().trimmed().toUpper());
+                }
+            }
         }
         currentLabel->setText(QString::number(quantity, 'g', 12));
-        targetSpin->setValue(quantity);
         targetSpin->setProperty("systemQuantity", quantity);
+        if (serialEdit) {
+            const QSignalBlocker blocker(serialEdit);
+            serialEdit->setPlainText(serials.join(QLatin1Char('\n')));
+            serialEdit->setProperty("originalSerials", serials);
+            targetSpin->setValue(serials.size());
+            const bool consistent = std::abs(quantity - serials.size()) <= 0.0000001;
+            const bool canRegisterLegacyStock = !consistent && serials.isEmpty()
+                && quantity > 0.0000001
+                && std::abs(quantity - std::round(quantity)) <= 0.0000001;
+            if (consistent) {
+                serialHint->setText(
+                    QStringLiteral("当前有效SN：%1个；调整后SN：%1个。目标库存随列表自动计算。")
+                        .arg(serials.size()));
+            } else if (canRegisterLegacyStock) {
+                serialHint->setText(
+                    QStringLiteral("该批次账面库存为%1，尚未登记SN。请填写%2个完整SN后保存，"
+                                   "系统会在同一事务中补齐关联。")
+                        .arg(QString::number(quantity, 'g', 12))
+                        .arg(static_cast<int>(std::llround(quantity))));
+            } else {
+                serialHint->setText(
+                    QStringLiteral("警告：账面库存为%1，但当前有效在库SN为%2个。"
+                                   "存在部分缺失，请先核查历史数据。")
+                        .arg(QString::number(quantity, 'g', 12))
+                        .arg(serials.size()));
+            }
+            serialHint->setStyleSheet(consistent ? QString()
+                                                 : QStringLiteral("color:#b45309;"));
+        } else {
+            targetSpin->setValue(quantity);
+        }
         supplierEdit->setText(supplier);
         supplierEdit->setProperty("originalSupplier", supplier);
         batchCombo->setToolTip(requireBatch && selectedBatch().isEmpty()
@@ -1023,6 +1096,19 @@ void MaterialPage::editStock()
             [loadBatches](int) { loadBatches(); });
     connect(batchCombo, &QComboBox::currentTextChanged, &dialog,
             [refreshCurrentStock](const QString &) { refreshCurrentStock(); });
+    if (serialEdit) {
+        connect(serialEdit, &QTextEdit::textChanged, &dialog,
+                [serialEdit, serialHint, targetSpin, parseSerialNumbers] {
+                    const QStringList serials = parseSerialNumbers(serialEdit->toPlainText());
+                    targetSpin->setValue(serials.size());
+                    const QStringList original =
+                        serialEdit->property("originalSerials").toStringList();
+                    serialHint->setStyleSheet(QString());
+                    serialHint->setText(
+                        QStringLiteral("当前有效SN：%1个；调整后SN：%2个。目标库存随列表自动计算。")
+                            .arg(original.size()).arg(serials.size()));
+                });
+    }
     loadLocations();
 
     connect(stockTable, &QTableWidget::cellDoubleClicked, &dialog,
@@ -1048,8 +1134,8 @@ void MaterialPage::editStock()
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked, &dialog,
             [this, &dialog, materialId, materialCode, warehouseCombo, locationCombo, batchCombo,
-             supplierEdit, currentLabel, targetSpin, reasonEdit, dateEdit,
-             selectedBatch, requireBatch] {
+             supplierEdit, currentLabel, targetSpin, serialEdit, reasonEdit, dateEdit,
+             selectedBatch, parseSerialNumbers, requireBatch, requireSerial] {
                 if (warehouseCombo->currentIndex() < 0 || locationCombo->currentIndex() < 0) {
                     QMessageBox::warning(&dialog, QStringLiteral("资料不完整"),
                                          QStringLiteral("请选择有效的仓库和库位。"));
@@ -1070,12 +1156,46 @@ void MaterialPage::editStock()
                     return;
                 }
                 const double systemQuantity = targetSpin->property("systemQuantity").toDouble();
-                const double targetQuantity = targetSpin->value();
+                QStringList targetSerials;
+                QStringList originalSerials;
+                bool serialsChanged = false;
+                int addedSerialCount = 0;
+                int removedSerialCount = 0;
+                if (requireSerial) {
+                    targetSerials = parseSerialNumbers(serialEdit->toPlainText());
+                    originalSerials = serialEdit->property("originalSerials").toStringList();
+                    QSet<QString> targetSet;
+                    for (const QString &serial : std::as_const(targetSerials)) {
+                        if (serial.isEmpty() || targetSet.contains(serial)) {
+                            QMessageBox::warning(
+                                &dialog, QStringLiteral("SN列表无效"),
+                                serial.isEmpty()
+                                    ? QStringLiteral("SN不能为空。")
+                                    : QStringLiteral("SN %1 重复，请每个SN只保留一次。")
+                                          .arg(serial));
+                            serialEdit->setFocus();
+                            return;
+                        }
+                        targetSet.insert(serial);
+                    }
+                    QSet<QString> originalSet;
+                    for (const QString &serial : std::as_const(originalSerials))
+                        originalSet.insert(serial.trimmed().toUpper());
+                    for (const QString &serial : std::as_const(targetSerials)) {
+                        if (!originalSet.contains(serial)) ++addedSerialCount;
+                    }
+                    for (const QString &serial : std::as_const(originalSerials)) {
+                        if (!targetSet.contains(serial.trimmed().toUpper())) ++removedSerialCount;
+                    }
+                    serialsChanged = targetSet != originalSet;
+                }
+                const double targetQuantity = requireSerial
+                    ? static_cast<double>(targetSerials.size()) : targetSpin->value();
                 const QString supplier = supplierEdit->text().trimmed();
                 const QString originalSupplier =
                     supplierEdit->property("originalSupplier").toString().trimmed();
                 if (std::abs(targetQuantity - systemQuantity) <= 0.0000001
-                    && supplier == originalSupplier) {
+                    && supplier == originalSupplier && !serialsChanged) {
                     QMessageBox::information(&dialog, QStringLiteral("没有变化"),
                                              QStringLiteral("库存数量和供应商均未发生变化。"));
                     return;
@@ -1096,6 +1216,11 @@ void MaterialPage::editStock()
                         .arg(originalSupplier.isEmpty() ? QStringLiteral("未填写") : originalSupplier,
                              supplier.isEmpty() ? QStringLiteral("未填写") : supplier);
                 }
+                if (requireSerial && serialsChanged) {
+                    changeDescription += QStringLiteral("；在库SN由 %1 个调整为 %2 个（新增 %3，移除 %4）")
+                        .arg(originalSerials.size()).arg(targetSerials.size())
+                        .arg(addedSerialCount).arg(removedSerialCount);
+                }
                 if (QMessageBox::warning(
                         &dialog, QStringLiteral("确认直接编辑库存"),
                         QStringLiteral("确认将 %1 在当前位置%2的库存资料调整如下？\n\n%3\n\n"
@@ -1103,7 +1228,7 @@ void MaterialPage::editStock()
                             .arg(materialCode,
                                  batchNo.isEmpty() ? QString() : QStringLiteral("、批次 %1").arg(batchNo),
                                  changeDescription,
-                                 quantityChanged
+                                 quantityChanged || serialsChanged
                                      ? QStringLiteral("和库存流水")
                                      : QStringLiteral("（数量无差异，不产生库存流水）")),
                         QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
@@ -1125,6 +1250,8 @@ void MaterialPage::editStock()
                 line.actualQuantity = targetQuantity;
                 line.supplier = supplier.isEmpty() ? QStringLiteral("") : supplier;
                 line.differenceReason = reason;
+                line.serialNumbersSpecified = requireSerial;
+                line.serialNumbers = targetSerials;
                 request.lines.append(line);
                 InventoryService service(m_database, m_session.userId);
                 PostedDocument posted;

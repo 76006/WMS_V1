@@ -66,7 +66,9 @@ struct MaterialImportRow
     QString defaultWarehouseCode;
     QString defaultLocationCode;
     bool requireBatch = false;
+    bool requireBatchProvided = false;
     bool requireSerial = false;
+    bool requireSerialProvided = false;
     QString inventoryBatch;
     QStringList inventorySerialNumbers;
     bool isActive = true;

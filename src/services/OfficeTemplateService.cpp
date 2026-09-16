@@ -137,7 +137,7 @@ QString sheetName(OfficeFormKind kind)
     case OfficeFormKind::ProductionIssue:
         return QStringLiteral("领料单");
     case OfficeFormKind::DeliveryConfirmation:
-        return QStringLiteral("耗材-秘令0907（南京）");
+        return QStringLiteral("送货确认单");
     default:
         return QStringLiteral("Sheet1");
     }

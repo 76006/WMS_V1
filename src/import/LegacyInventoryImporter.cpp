@@ -471,13 +471,16 @@ bool parseBoolean(const QString &raw, bool *value)
     const QString normalized = raw.trimmed().toUpper();
     if (normalized.isEmpty() || normalized == QStringLiteral("否") || normalized == QStringLiteral("0")
         || normalized == QStringLiteral("N") || normalized == QStringLiteral("NO")
-        || normalized == QStringLiteral("FALSE")) {
+        || normalized == QStringLiteral("FALSE") || normalized == QStringLiteral("OFF")
+        || normalized == QStringLiteral("关闭") || normalized == QStringLiteral("停用")
+        || normalized == QStringLiteral("禁用")) {
         if (value) *value = false;
         return true;
     }
     if (normalized == QStringLiteral("是") || normalized == QStringLiteral("1")
         || normalized == QStringLiteral("Y") || normalized == QStringLiteral("YES")
-        || normalized == QStringLiteral("TRUE")) {
+        || normalized == QStringLiteral("TRUE") || normalized == QStringLiteral("ON")
+        || normalized == QStringLiteral("开启") || normalized == QStringLiteral("启用")) {
         if (value) *value = true;
         return true;
     }
@@ -673,14 +676,16 @@ bool MaterialExcelImporter::parseFile(const QString &filePath,
                 appendMaterialMessage(&row, MaterialImportStatus::Error,
                                       QStringLiteral("现有库存必须是大于等于0的数字"));
         }
-        if (requireBatchColumn > 0
+        row.requireBatchProvided = requireBatchColumn > 0;
+        if (row.requireBatchProvided
             && !parseBoolean(valueAt(sourceRow, requireBatchColumn), &row.requireBatch))
             appendMaterialMessage(&row, MaterialImportStatus::Error,
-                                  QStringLiteral("批次管理只能填写是或否"));
-        if (requireSerialColumn > 0
+                                  QStringLiteral("批次管理只能填写是/否或启用/停用"));
+        row.requireSerialProvided = requireSerialColumn > 0;
+        if (row.requireSerialProvided
             && !parseBoolean(valueAt(sourceRow, requireSerialColumn), &row.requireSerial))
             appendMaterialMessage(&row, MaterialImportStatus::Error,
-                                  QStringLiteral("SN管理只能填写是或否"));
+                                  QStringLiteral("SN管理只能填写是/否或启用/停用"));
         if (row.defaultWarehouseCode.isEmpty() && !row.defaultLocationCode.isEmpty())
             appendMaterialMessage(&row, MaterialImportStatus::Error,
                                   QStringLiteral("填写默认库位时必须同时填写默认仓库"));
@@ -719,7 +724,9 @@ bool MaterialExcelImporter::parseFile(const QString &filePath,
                 && first.defaultWarehouseCode == row.defaultWarehouseCode
                 && first.defaultLocationCode == row.defaultLocationCode
                 && first.requireBatch == row.requireBatch
+                && first.requireBatchProvided == row.requireBatchProvided
                 && first.requireSerial == row.requireSerial
+                && first.requireSerialProvided == row.requireSerialProvided
                 && first.inventoryBatch == row.inventoryBatch
                 && first.inventorySerialNumbers == row.inventorySerialNumbers
                 && first.isActive == row.isActive
@@ -771,6 +778,7 @@ void MaterialExcelImporter::validateReferences(QSqlDatabase database,
 
         bool materialExists = false;
         bool hasBusinessRecords = false;
+        double existingStock = 0.0;
         QSqlQuery existing(database);
         existing.prepare(QStringLiteral(
             "SELECT id,require_batch,require_serial,unit_usage,processing_method,is_active "
@@ -789,32 +797,55 @@ void MaterialExcelImporter::validateReferences(QSqlDatabase database,
                 continue;
             }
             hasBusinessRecords = used.value(0).toBool();
+            QSqlQuery stock(database);
+            stock.prepare(QStringLiteral(
+                "SELECT COALESCE(SUM(quantity),0) FROM stock_balances WHERE material_id=?"));
+            stock.addBindValue(materialId);
+            if (!stock.exec() || !stock.next()) {
+                appendMaterialMessage(&row, MaterialImportStatus::Error,
+                                      QStringLiteral("无法检查物料现有库存"));
+                continue;
+            }
+            existingStock = stock.value(0).toDouble();
             if (!row.unitUsageProvided) row.unitUsage = existing.value(3).toDouble();
             if (!row.processingMethodProvided)
                 row.processingMethod = existing.value(4).toString();
             if (!row.isActiveProvided) row.isActive = existing.value(5).toBool();
             if (!row.isActive) {
-                QSqlQuery stock(database);
-                stock.prepare(QStringLiteral(
-                    "SELECT COALESCE(SUM(quantity),0) FROM stock_balances WHERE material_id=?"));
-                stock.addBindValue(materialId);
-                if (!stock.exec() || !stock.next()) {
-                    appendMaterialMessage(&row, MaterialImportStatus::Error,
-                                          QStringLiteral("无法检查物料现有库存"));
-                    continue;
-                }
-                if (stock.value(0).toDouble() > 0.0000001) {
+                if (existingStock > 0.0000001) {
                     appendMaterialMessage(&row, MaterialImportStatus::Error,
                                           QStringLiteral("物料仍有库存，不能停用"));
                     continue;
                 }
             }
-            if ((existing.value(1).toBool() != row.requireBatch
-                 || existing.value(2).toBool() != row.requireSerial)
-                && hasBusinessRecords) {
-                appendMaterialMessage(&row, MaterialImportStatus::Error,
-                    QStringLiteral("已有业务记录，不能通过Excel修改批次或SN管理方式"));
-                continue;
+            const bool existingRequireBatch = existing.value(1).toBool();
+            const bool existingRequireSerial = existing.value(2).toBool();
+            if (!row.requireBatchProvided) row.requireBatch = existingRequireBatch;
+            if (!row.requireSerialProvided) row.requireSerial = existingRequireSerial;
+
+            if (row.requireBatch != existingRequireBatch && existingStock > 0.0000001) {
+                row.requireBatch = existingRequireBatch;
+                appendMaterialMessage(
+                    &row, MaterialImportStatus::Warning,
+                    QStringLiteral("物料仍有库存，为避免原库存批次断链，批次管理设置保持不变"));
+            }
+            if (existingRequireSerial && !row.requireSerial
+                && existingStock > 0.0000001) {
+                row.requireSerial = true;
+                appendMaterialMessage(
+                    &row, MaterialImportStatus::Warning,
+                    QStringLiteral("物料仍有库存，为避免在库SN失去关联，SN管理设置保持启用"));
+            } else if (!existingRequireSerial && row.requireSerial
+                       && existingStock > 0.0000001) {
+                appendMaterialMessage(
+                    &row, MaterialImportStatus::Warning,
+                    QStringLiteral("将启用SN管理；导入后请在“编辑库存”中为各批次现有库存登记SN"));
+            } else if ((row.requireBatch != existingRequireBatch
+                        || row.requireSerial != existingRequireSerial)
+                       && hasBusinessRecords) {
+                appendMaterialMessage(
+                    &row, MaterialImportStatus::Warning,
+                    QStringLiteral("已有历史业务，新的批次/SN管理方式将从后续业务开始生效"));
             }
             if (row.currentStockProvided && row.currentStock > 0.0000001) {
                 row.importCurrentStock = !hasBusinessRecords;
@@ -825,6 +856,25 @@ void MaterialExcelImporter::validateReferences(QSqlDatabase database,
             }
         } else if (row.currentStockProvided && row.currentStock > 0.0000001) {
             row.importCurrentStock = true;
+        }
+
+        // 跟踪资料不完整时仍允许导入物料档案，但绝不猜测批次或自动伪造SN。
+        // 预览会明确标为警告，该行现有库存不入账。
+        if (row.importCurrentStock && row.requireBatch && row.inventoryBatch.isEmpty()) {
+            row.importCurrentStock = false;
+            appendMaterialMessage(
+                &row, MaterialImportStatus::Warning,
+                QStringLiteral("物料档案可导入，但现有库存未入账：启用批次管理时必须填写库存批次"));
+        }
+        if (row.importCurrentStock && row.requireSerial) {
+            const double rounded = std::round(row.currentStock);
+            if (std::abs(row.currentStock - rounded) > 0.0000001
+                || row.inventorySerialNumbers.size() != static_cast<int>(rounded)) {
+                row.importCurrentStock = false;
+                appendMaterialMessage(
+                    &row, MaterialImportStatus::Warning,
+                    QStringLiteral("物料档案可导入，但现有库存未入账：SN数量必须等于整数现有库存"));
+            }
         }
 
         qlonglong warehouseId = 0;
@@ -888,20 +938,6 @@ void MaterialExcelImporter::validateReferences(QSqlDatabase database,
                 appendMaterialMessage(&row, MaterialImportStatus::Error,
                                       QStringLiteral("停用物料不能导入现有库存"));
                 continue;
-            }
-            if (row.requireBatch && row.inventoryBatch.isEmpty()) {
-                appendMaterialMessage(&row, MaterialImportStatus::Error,
-                                      QStringLiteral("批次管理物料导入现有库存时必须填写库存批次"));
-                continue;
-            }
-            if (row.requireSerial) {
-                const double rounded = std::round(row.currentStock);
-                if (std::abs(row.currentStock - rounded) > 0.0000001
-                    || row.inventorySerialNumbers.size() != static_cast<int>(rounded)) {
-                    appendMaterialMessage(&row, MaterialImportStatus::Error,
-                                          QStringLiteral("SN物料的库存SN数量必须等于整数现有库存"));
-                    continue;
-                }
             }
         }
 
