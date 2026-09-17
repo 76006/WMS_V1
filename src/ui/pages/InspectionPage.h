@@ -31,6 +31,7 @@ private slots:
     void viewHistoryNotice();
     void recordInspectionResult();
     void editHistoryResult();
+    void cancelSelectedNotice(QTableWidget *table);
     void refreshNotices();
 
 private:

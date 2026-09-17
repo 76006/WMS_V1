@@ -231,6 +231,13 @@ public:
                             QString *errorMessage = nullptr) const;
     bool revisePostedDocument(const PostedDocumentEdit &document,
                               QString *errorMessage = nullptr);
+    // 整单撤销仅适用于未发生部分撤销或后续关联业务的已入账单据。
+    // 单据、库存流水、SN状态和生成表单附件在同一数据库事务中同步更新。
+    bool reversePostedDocument(qlonglong documentId,
+                               const QString &handlerName,
+                               const QString &reason,
+                               QString *documentNumber = nullptr,
+                               QString *errorMessage = nullptr);
     bool importInitialInventory(const InitialInventoryRequest &request,
                                 PostedDocument *postedDocument,
                                 QString *errorMessage = nullptr);

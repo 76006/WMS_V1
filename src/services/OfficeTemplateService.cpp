@@ -247,6 +247,79 @@ QString OfficeTemplateService::archiveFilePath(const OfficeTemplateDocument &doc
         .filePath(QStringLiteral("%1.%2").arg(safeFilePart(number), suffix));
 }
 
+bool OfficeTemplateService::archiveReversedDocumentForms(QSqlDatabase database,
+                                                         qlonglong documentId,
+                                                         QStringList *archivedPaths,
+                                                         QStringList *errors)
+{
+    if (documentId <= 0 || !database.isOpen()) {
+        if (errors) errors->append(QStringLiteral("单据编号无效或数据库未打开。"));
+        return false;
+    }
+    QSqlQuery forms(database);
+    forms.prepare(QStringLiteral(
+        "SELECT payload FROM document_forms WHERE document_id=? ORDER BY id"));
+    forms.addBindValue(documentId);
+    if (!forms.exec()) {
+        if (errors) errors->append(QStringLiteral("读取撤销单据的表单记录失败：%1")
+                                       .arg(forms.lastError().text()));
+        return false;
+    }
+    bool allOk = true;
+    while (forms.next()) {
+        OfficeTemplateDocument document;
+        QString parseError;
+        if (!documentFromPayload(forms.value(0).toString(), &document, &parseError)) {
+            allOk = false;
+            if (errors) errors->append(QStringLiteral("读取表单归档地址失败：%1").arg(parseError));
+            continue;
+        }
+        const QString sourcePath = archiveFilePath(document);
+        if (sourcePath.isEmpty()) {
+            allOk = false;
+            if (errors) errors->append(QStringLiteral("%1没有可用的本地归档地址。")
+                                           .arg(formTitle(document.kind)));
+            continue;
+        }
+        const QFileInfo sourceInfo(sourcePath);
+        QDir cancelledDir(sourceInfo.dir().filePath(QStringLiteral("已撤销")));
+        if (!cancelledDir.exists() && !sourceInfo.dir().mkpath(QStringLiteral("已撤销"))) {
+            allOk = false;
+            if (errors) errors->append(QStringLiteral("无法创建撤销归档目录：%1")
+                                           .arg(QDir::toNativeSeparators(cancelledDir.path())));
+            continue;
+        }
+        QString targetPath = cancelledDir.filePath(
+            QStringLiteral("已撤销-%1").arg(sourceInfo.fileName()));
+        if (!sourceInfo.exists()) {
+            if (QFileInfo::exists(targetPath)) {
+                if (archivedPaths) archivedPaths->append(QDir::toNativeSeparators(targetPath));
+            } else {
+                allOk = false;
+                if (errors) errors->append(QStringLiteral("未找到需要归档的表单文件：%1")
+                                               .arg(QDir::toNativeSeparators(sourcePath)));
+            }
+            continue;
+        }
+        if (QFileInfo::exists(targetPath)) {
+            const QString suffix = QFileInfo(targetPath).suffix();
+            const QString baseName = QFileInfo(targetPath).completeBaseName();
+            const QString timestamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+            targetPath = cancelledDir.filePath(QStringLiteral("%1-%2.%3")
+                .arg(baseName, timestamp, suffix));
+        }
+        if (!QFile::rename(sourcePath, targetPath)) {
+            allOk = false;
+            if (errors) errors->append(QStringLiteral(
+                "无法移动表单文件（文件可能正被占用）：%1")
+                    .arg(QDir::toNativeSeparators(sourcePath)));
+            continue;
+        }
+        if (archivedPaths) archivedPaths->append(QDir::toNativeSeparators(targetPath));
+    }
+    return allOk;
+}
+
 QList<OfficeTemplateLine> OfficeTemplateService::materialLines(
     QSqlDatabase database,
     const QList<StockMovementRequest> &lines,

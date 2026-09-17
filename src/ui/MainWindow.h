@@ -46,6 +46,7 @@ private slots:
     void refreshInventoryViews();
     void refreshCurrentUserDisplayName();
     void editDocumentById(qlonglong documentId, QWidget *dialogParent);
+    void reverseDocumentById(qlonglong documentId, QWidget *dialogParent);
 
 private:
     void buildUi();

@@ -25,10 +25,15 @@
 #include "ui/pages/WarehousePage.h"
 #include "ui/widgets/TableExcelExport.h"
 #include "ui/dialogs/BusinessDocumentEditDialog.h"
+#include "services/InventoryService.h"
+#include "services/OfficeTemplateService.h"
 #include "services/UserService.h"
 
 #include <QButtonGroup>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -36,8 +41,11 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTextEdit>
 #include <QVBoxLayout>
 
 #include <utility>
@@ -310,4 +318,120 @@ void MainWindow::editDocumentById(qlonglong documentId, QWidget *dialogParent)
     BusinessDocumentEditDialog dialog(m_database, m_session, documentId, dialogParent ? dialogParent : this);
     dialog.exec();
     if (dialog.saved()) refreshInventoryViews();
+}
+
+void MainWindow::reverseDocumentById(qlonglong documentId, QWidget *dialogParent)
+{
+    QWidget *parent = dialogParent ? dialogParent : this;
+    if (documentId <= 0) {
+        QMessageBox::information(parent, QStringLiteral("无法撤销"),
+                                 QStringLiteral("没有取得当前单据的编号。"));
+        return;
+    }
+    if (!m_session.canManageWarehouse()) {
+        QMessageBox::warning(parent, QStringLiteral("没有权限"),
+                             QStringLiteral("当前账号没有库存单据撤销权限。"));
+        return;
+    }
+    QSqlQuery header(m_database);
+    header.prepare(QStringLiteral(
+        "SELECT document_no,document_type,status,created_by,handler_name "
+        "FROM business_documents WHERE id=?"));
+    header.addBindValue(documentId);
+    if (!header.exec() || !header.next()) {
+        QMessageBox::warning(parent, QStringLiteral("无法撤销"),
+                             QStringLiteral("读取单据信息失败：%1")
+                                 .arg(header.lastError().text()));
+        return;
+    }
+    const QString documentNumber = header.value(0).toString();
+    const QString documentType = header.value(1).toString();
+    const QString status = header.value(2).toString().trimmed().toUpper();
+    const qlonglong creatorId = header.value(3).toLongLong();
+    const bool allowedOwner = m_session.isAdministrator() || creatorId == m_session.userId;
+    if (!allowedOwner) {
+        QMessageBox::warning(parent, QStringLiteral("无法撤销"),
+                             QStringLiteral("只有管理员或原单创建人可以撤销这张单据。"));
+        return;
+    }
+    if (status != QStringLiteral("POSTED")) {
+        QMessageBox::warning(parent, QStringLiteral("无法撤销"),
+                             QStringLiteral("只有状态为“已入账”的单据可以整单撤销；"
+                                            "当前状态为 %1。")
+                                 .arg(status));
+        return;
+    }
+
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("撤销整张单据"));
+    dialog.setMinimumWidth(540);
+    auto *root = new QVBoxLayout(&dialog);
+    auto *warning = new QLabel(QStringLiteral(
+        "撤销后将回退整张单据产生的库存和 SN 状态，并将系统生成的表单文件移入“已撤销”归档。"
+        "此操作会保留单据和审计记录。"), &dialog);
+    warning->setWordWrap(true);
+    warning->setProperty("warning", true);
+    root->addWidget(warning);
+    auto *form = new QFormLayout;
+    auto *documentLabel = new QLabel(
+        QStringLiteral("%1（%2）").arg(documentNumber, documentType), &dialog);
+    auto *handlerEdit = new QLineEdit(m_session.displayName, &dialog);
+    handlerEdit->setProperty("currentUserDefault", true);
+    auto *reasonEdit = new QTextEdit(&dialog);
+    reasonEdit->setPlaceholderText(QStringLiteral("必须填写撤销原因，例如：录入错误、重复入库"));
+    reasonEdit->setMinimumHeight(100);
+    form->addRow(QStringLiteral("单据"), documentLabel);
+    form->addRow(QStringLiteral("撤销人"), handlerEdit);
+    form->addRow(QStringLiteral("撤销原因 *"), reasonEdit);
+    root->addLayout(form);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+    auto *confirmButton = buttons->addButton(QStringLiteral("确认撤销"),
+                                             QDialogButtonBox::AcceptRole);
+    confirmButton->setProperty("danger", true);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    root->addWidget(buttons);
+
+    while (dialog.exec() == QDialog::Accepted) {
+        const QString reason = reasonEdit->toPlainText().trimmed();
+        if (reason.isEmpty()) {
+            QMessageBox::information(&dialog, QStringLiteral("请填写原因"),
+                                     QStringLiteral("撤销原因不能为空。"));
+            continue;
+        }
+        if (QMessageBox::question(
+                parent, QStringLiteral("最终确认"),
+                QStringLiteral("确定撤销单据 %1 吗？\n库存与相关文件会立即同步更新。")
+                    .arg(documentNumber),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+            return;
+        }
+
+        InventoryService service(m_database, m_session.userId);
+        QString reversedNumber;
+        QString error;
+        if (!service.reversePostedDocument(documentId, handlerEdit->text(), reason,
+                                           &reversedNumber, &error)) {
+            QMessageBox::warning(parent, QStringLiteral("撤销失败"), error);
+            return;
+        }
+        QStringList archivedPaths;
+        QStringList fileWarnings;
+        OfficeTemplateService::archiveReversedDocumentForms(
+            m_database, documentId, &archivedPaths, &fileWarnings);
+        refreshInventoryViews();
+
+        QString message = QStringLiteral("单据 %1 已撤销，库存和 SN 状态已同步更新。")
+                              .arg(reversedNumber);
+        if (!archivedPaths.isEmpty()) {
+            message += QStringLiteral("\n\n已撤销表单文件：\n%1")
+                           .arg(archivedPaths.join(QLatin1Char('\n')));
+        }
+        if (!fileWarnings.isEmpty()) {
+            message += QStringLiteral("\n\n文件归档提示：\n%1")
+                           .arg(fileWarnings.join(QLatin1Char('\n')));
+        }
+        QMessageBox::information(parent, QStringLiteral("撤销完成"), message);
+        return;
+    }
 }

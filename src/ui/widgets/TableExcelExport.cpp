@@ -165,6 +165,32 @@ void TableExcelExport::install(QWidget *page, const QString &pageTitle)
                                               safeTable.data());
             }
         });
+        if (table->property("businessDocumentTable").toBool()) {
+            QWidget *tableParent = table->parentWidget();
+            auto *box = tableParent
+                ? qobject_cast<QBoxLayout *>(tableParent->layout()) : nullptr;
+            const int tableIndex = box ? box->indexOf(table) : -1;
+            if (box && tableIndex >= 0) {
+                auto *actionBar = new QWidget(tableParent);
+                actionBar->setObjectName(QStringLiteral("businessDocumentActionBar"));
+                auto *actionLayout = new QHBoxLayout(actionBar);
+                actionLayout->setContentsMargins(0, 0, 0, 0);
+                actionLayout->addStretch();
+                auto *reverseButton = new QPushButton(QStringLiteral("撤销单据"), actionBar);
+                reverseButton->setProperty("danger", true);
+                reverseButton->setToolTip(QStringLiteral(
+                    "撤销选中的整张单据，并同步回退库存、SN状态和归档文件"));
+                actionLayout->addWidget(reverseButton);
+                box->insertWidget(tableIndex, actionBar);
+                QPointer<QWidget> safeWindow(page->window());
+                QObject::connect(reverseButton, &QPushButton::clicked, actionBar,
+                                 [safeTable, safeWindow, actionBar] {
+                    if (!safeTable) return;
+                    TableExcelExport::reverseSelectedBusinessDocument(
+                        safeTable.data(), actionBar, {}, safeWindow.data());
+                });
+            }
+        }
     }
 }
 
@@ -184,6 +210,27 @@ void TableExcelExport::editSelectedBusinessDocument(
             Q_ARG(QWidget *, dialogParent))) {
         QMessageBox::warning(dialogParent, QStringLiteral("无法修改"),
                              QStringLiteral("当前窗口没有可用的单据修改入口。"));
+        return;
+    }
+    if (reload) reload();
+}
+
+void TableExcelExport::reverseSelectedBusinessDocument(
+    QTableView *table, QWidget *dialogParent,
+    const std::function<void()> &reload, QWidget *editorWindow)
+{
+    const qlonglong documentId = selectedBusinessDocumentId(table);
+    if (documentId <= 0) {
+        QMessageBox::information(dialogParent, QStringLiteral("请选择单据"),
+                                 QStringLiteral("请先在表格中选中一行单据。"));
+        return;
+    }
+    QWidget *targetWindow = editorWindow ? editorWindow : table->window();
+    if (!targetWindow || !QMetaObject::invokeMethod(targetWindow, "reverseDocumentById",
+            Qt::DirectConnection, Q_ARG(qlonglong, documentId),
+            Q_ARG(QWidget *, dialogParent))) {
+        QMessageBox::warning(dialogParent, QStringLiteral("无法撤销"),
+                             QStringLiteral("当前窗口没有可用的整单撤销入口。"));
         return;
     }
     if (reload) reload();
@@ -218,17 +265,22 @@ void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
     auto *heading = new QLabel(title, &fullScreen);
     heading->setStyleSheet(QStringLiteral("font-size:18px;font-weight:600;"));
     QPushButton *editButton = nullptr;
+    QPushButton *reverseButton = nullptr;
     if (table->property("businessDocumentTable").toBool()) {
         editButton = new QPushButton(QStringLiteral("修改单据"), &fullScreen);
         editButton->setProperty("primary", true);
+        reverseButton = new QPushButton(QStringLiteral("撤销单据"), &fullScreen);
+        reverseButton->setProperty("danger", true);
     }
     auto *exitButton = new QPushButton(QStringLiteral("退出全屏"), &fullScreen);
     toolbar->addWidget(heading);
     toolbar->addStretch();
     if (editButton) toolbar->addWidget(editButton);
+    if (reverseButton) toolbar->addWidget(reverseButton);
     QList<QPushButton *> actionButtons;
     for (const auto &action : actions) {
         auto *button = new QPushButton(action.text, &fullScreen);
+        if (action.danger) button->setProperty("danger", true);
         toolbar->addWidget(button);
         actionButtons.append(button);
     }
@@ -296,6 +348,13 @@ void TableExcelExport::fullScreenTable(QTableView *table, const QString &title,
         QObject::connect(editButton, &QPushButton::clicked, &fullScreen,
                          [&fullScreen, table, originalWindow, reloadAndFilter] {
             TableExcelExport::editSelectedBusinessDocument(
+                table, &fullScreen, reloadAndFilter, originalWindow.data());
+        });
+    }
+    if (reverseButton) {
+        QObject::connect(reverseButton, &QPushButton::clicked, &fullScreen,
+                         [&fullScreen, table, originalWindow, reloadAndFilter] {
+            TableExcelExport::reverseSelectedBusinessDocument(
                 table, &fullScreen, reloadAndFilter, originalWindow.data());
         });
     }

@@ -14,11 +14,15 @@ public:
     struct FullScreenAction {
         QString text;
         std::function<void()> trigger;
+        bool danger = false;
     };
 
     static void install(QWidget *page, const QString &pageTitle);
     static void exportPage(QWidget *page, const QString &pageTitle, QWidget *dialogParent);
     static void editSelectedBusinessDocument(
+        QTableView *table, QWidget *dialogParent,
+        const std::function<void()> &reload = {}, QWidget *editorWindow = nullptr);
+    static void reverseSelectedBusinessDocument(
         QTableView *table, QWidget *dialogParent,
         const std::function<void()> &reload = {}, QWidget *editorWindow = nullptr);
     static void fullScreenTable(QTableView *table, const QString &title, QWidget *dialogParent,

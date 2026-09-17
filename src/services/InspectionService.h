@@ -121,7 +121,9 @@ public:
     bool recordTemplateArtifact(qlonglong noticeId,
                                 const InspectionTemplateArtifact &artifact,
                                 QString *errorMessage = nullptr);
-    bool cancelNotice(qlonglong noticeId, QString *errorMessage = nullptr);
+    bool cancelNotice(qlonglong noticeId,
+                      const QString &reason,
+                      QString *errorMessage = nullptr);
 
 private:
     bool validateDraft(const InspectionNoticeDraft &draft, QString *errorMessage) const;

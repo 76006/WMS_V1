@@ -704,23 +704,44 @@ bool InspectionService::recordTemplateArtifact(qlonglong noticeId,
     return true;
 }
 
-bool InspectionService::cancelNotice(qlonglong noticeId, QString *errorMessage)
+bool InspectionService::cancelNotice(qlonglong noticeId,
+                                     const QString &reason,
+                                     QString *errorMessage)
 {
-    if (noticeId <= 0 || m_operatorId <= 0 || !beginImmediate(errorMessage)) return false;
+    if (noticeId <= 0 || m_operatorId <= 0 || reason.trimmed().isEmpty()) {
+        setError(errorMessage, QStringLiteral("送检通知编号或撤销原因无效。"));
+        return false;
+    }
+    if (!beginImmediate(errorMessage)) return false;
+    const QString cancelledAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral(
         "UPDATE inspection_notices SET status='CANCELLED',updated_by=?,updated_at=? "
         "WHERE id=? AND status IN ('PENDING','QUALIFIED','UNQUALIFIED') "
         "AND linked_document_id IS NULL"));
     update.addBindValue(m_operatorId);
-    update.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    update.addBindValue(cancelledAt);
     update.addBindValue(noticeId);
-    if (!update.exec() || update.numRowsAffected() != 1
-        || !writeAudit(QStringLiteral("INSPECTION_NOTICE_CANCEL"), noticeId, QString(), errorMessage)
-        || !commit(errorMessage)) {
+    if (!update.exec() || update.numRowsAffected() != 1) {
         if (errorMessage && errorMessage->isEmpty()) {
             setError(errorMessage, QStringLiteral("送检通知不存在、已取消或已经用于入库。"));
         }
+        rollback();
+        return false;
+    }
+    QSqlQuery hideAttachments(m_database);
+    hideAttachments.prepare(QStringLiteral(
+        "UPDATE attachments SET is_deleted=1,deleted_by=?,deleted_at=? "
+        "WHERE business_type='inspection_notice' AND business_id=? AND is_deleted=0"));
+    hideAttachments.addBindValue(m_operatorId);
+    hideAttachments.addBindValue(cancelledAt);
+    hideAttachments.addBindValue(noticeId);
+    if (!hideAttachments.exec()
+        || !writeAudit(QStringLiteral("INSPECTION_NOTICE_CANCEL"), noticeId,
+                       reason.trimmed(), errorMessage)
+        || !commit(errorMessage)) {
+        if (errorMessage && errorMessage->isEmpty())
+            setError(errorMessage, QStringLiteral("同步送检通知附件状态失败。"));
         rollback();
         return false;
     }

@@ -58,6 +58,12 @@ public:
     static QString outputFileName(const OfficeTemplateDocument &document);
     static QString archiveRootPath();
     static QString archiveFilePath(const OfficeTemplateDocument &document);
+    // 将已撤销业务单据对应的本地正本移入同目录下的“已撤销”文件夹。
+    // 文件只移动、不删除；数据库附件状态由库存撤销事务统一处理。
+    static bool archiveReversedDocumentForms(QSqlDatabase database,
+                                             qlonglong documentId,
+                                             QStringList *archivedPaths = nullptr,
+                                             QStringList *errors = nullptr);
 
     static QList<OfficeTemplateLine> materialLines(
         QSqlDatabase database,

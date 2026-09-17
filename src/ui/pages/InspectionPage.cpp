@@ -10,6 +10,7 @@
 #include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDateEdit>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -22,6 +23,7 @@
 #include <QFrame>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -695,11 +697,14 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     m_editPendingButton = new QPushButton(QStringLiteral("修改通知单"), panel);
     m_recordResultButton = new QPushButton(QStringLiteral("录入/修改检验结果"), panel);
     auto *openPendingNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
+    auto *cancelPendingNotice = new QPushButton(QStringLiteral("撤销通知单"), panel);
+    cancelPendingNotice->setProperty("danger", true);
     auto *fullScreenPending = new QPushButton(QStringLiteral("全屏显示"), panel);
     openPendingNotice->setVisible(false);
     pendingToolbar->addWidget(m_editPendingButton);
     pendingToolbar->addWidget(m_recordResultButton);
     pendingToolbar->addWidget(openPendingNotice);
+    pendingToolbar->addWidget(cancelPendingNotice);
     pendingToolbar->addWidget(fullScreenPending);
     layout->addLayout(pendingToolbar);
     m_pendingTable = new QTableWidget(0, 9, panel);
@@ -720,6 +725,8 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     auto *historyResult = new QPushButton(QStringLiteral("修改检验结果"), panel);
     auto *openHistoryNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
     auto *openInspectionAttachment = new QPushButton(QStringLiteral("打开检验附件"), panel);
+    auto *cancelHistoryNotice = new QPushButton(QStringLiteral("撤销通知单"), panel);
+    cancelHistoryNotice->setProperty("danger", true);
     auto *fullScreenHistory = new QPushButton(QStringLiteral("全屏显示"), panel);
     openHistoryNotice->setVisible(false);
     openInspectionAttachment->setVisible(false);
@@ -727,6 +734,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     historyToolbar->addWidget(historyResult);
     historyToolbar->addWidget(openHistoryNotice);
     historyToolbar->addWidget(openInspectionAttachment);
+    historyToolbar->addWidget(cancelHistoryNotice);
     historyToolbar->addWidget(fullScreenHistory);
     layout->addLayout(historyToolbar);
     m_historyTable = new QTableWidget(0, 10, panel);
@@ -749,6 +757,10 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     connect(m_recordResultButton, &QPushButton::clicked, this, &InspectionPage::recordInspectionResult);
     connect(m_viewHistoryButton, &QPushButton::clicked, this, &InspectionPage::viewHistoryNotice);
     connect(historyResult, &QPushButton::clicked, this, &InspectionPage::editHistoryResult);
+    connect(cancelPendingNotice, &QPushButton::clicked, this,
+            [this] { cancelSelectedNotice(m_pendingTable); });
+    connect(cancelHistoryNotice, &QPushButton::clicked, this,
+            [this] { cancelSelectedNotice(m_historyTable); });
     const auto openNoticeFile = [this](QTableWidget *table, bool templateFile) {
         const qlonglong id = selectedNoticeId(table);
         if (id <= 0) {
@@ -799,6 +811,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
             [this] { refreshNotices(); }, {
                 {QStringLiteral("修改通知单"), [this] { editPendingNotice(); }},
                 {QStringLiteral("录入/修改检验结果"), [this] { recordInspectionResult(); }},
+                {QStringLiteral("撤销通知单"), [this] { cancelSelectedNotice(m_pendingTable); }, true},
                 {QStringLiteral("打开通知单Excel"), [this, openNoticeFile] { openNoticeFile(m_pendingTable, true); }}
             });
     });
@@ -807,6 +820,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
             [this] { refreshNotices(); }, {
                 {QStringLiteral("查看/修改通知单"), [this] { viewHistoryNotice(); }},
                 {QStringLiteral("修改检验结果"), [this] { editHistoryResult(); }},
+                {QStringLiteral("撤销通知单"), [this] { cancelSelectedNotice(m_historyTable); }, true},
                 {QStringLiteral("打开通知单Excel"), [this, openNoticeFile] { openNoticeFile(m_historyTable, true); }},
                 {QStringLiteral("打开检验附件"), [this, openNoticeFile] { openNoticeFile(m_historyTable, false); }}
             });
@@ -902,6 +916,95 @@ void InspectionPage::editHistoryResult()
         refreshNotices();
         emit inspectionChanged();
     }
+}
+
+void InspectionPage::cancelSelectedNotice(QTableWidget *table)
+{
+    const qlonglong noticeId = selectedNoticeId(table);
+    if (noticeId <= 0) {
+        QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"),
+                                 QStringLiteral("请先选择一条送检通知单。"));
+        return;
+    }
+    if (!m_session.canManageWarehouse()) {
+        QMessageBox::warning(activeDialogParent(), QStringLiteral("没有权限"),
+                             QStringLiteral("当前账号没有撤销送检通知单的权限。"));
+        return;
+    }
+    InspectionService service(m_database, m_session.userId);
+    InspectionNotice notice;
+    QString error;
+    if (!service.readNotice(noticeId, &notice, &error)) {
+        QMessageBox::warning(activeDialogParent(), QStringLiteral("无法撤销"), error);
+        return;
+    }
+    if (!m_session.isAdministrator() && notice.createdBy != m_session.userId) {
+        QMessageBox::warning(activeDialogParent(), QStringLiteral("无法撤销"),
+                             QStringLiteral("只有管理员或通知单创建人可以撤销。"));
+        return;
+    }
+    if (notice.status == QStringLiteral("CANCELLED")) {
+        QMessageBox::information(activeDialogParent(), QStringLiteral("无需撤销"),
+                                 QStringLiteral("该通知单已经撤销。"));
+        return;
+    }
+    if (notice.linkedDocumentId > 0 || notice.status == QStringLiteral("USED")) {
+        QMessageBox::warning(activeDialogParent(), QStringLiteral("请先撤销入库单"),
+                             QStringLiteral("该通知单已经关联入库单。请先在入库历史中撤销对应入库单，"
+                                            "库存同步完成后再撤销本通知单。"));
+        return;
+    }
+    bool accepted = false;
+    const QString reason = QInputDialog::getMultiLineText(
+        activeDialogParent(), QStringLiteral("撤销送检通知单"),
+        QStringLiteral("请输入撤销原因（必填）："), QString(), &accepted).trimmed();
+    if (!accepted) return;
+    if (reason.isEmpty()) {
+        QMessageBox::information(activeDialogParent(), QStringLiteral("请填写原因"),
+                                 QStringLiteral("撤销原因不能为空。"));
+        return;
+    }
+    if (QMessageBox::question(activeDialogParent(), QStringLiteral("确认撤销"),
+            QStringLiteral("确定撤销送检通知单 %1 吗？").arg(notice.inspectionNumber),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+    if (!service.cancelNotice(noticeId, reason, &error)) {
+        QMessageBox::warning(activeDialogParent(), QStringLiteral("撤销失败"), error);
+        return;
+    }
+
+    QString archivedPath;
+    QString fileWarning;
+    const QString sourcePath = notice.archivePath.trimmed();
+    if (!sourcePath.isEmpty() && QFileInfo::exists(sourcePath)) {
+        const QFileInfo sourceInfo(sourcePath);
+        QDir cancelledDir(sourceInfo.dir().filePath(QStringLiteral("已撤销")));
+        if ((!cancelledDir.exists() && !sourceInfo.dir().mkpath(QStringLiteral("已撤销")))) {
+            fileWarning = QStringLiteral("无法创建撤销归档目录：%1")
+                              .arg(QDir::toNativeSeparators(cancelledDir.path()));
+        } else {
+            QString targetPath = cancelledDir.filePath(
+                QStringLiteral("已撤销-%1").arg(sourceInfo.fileName()));
+            if (QFileInfo::exists(targetPath)) {
+                targetPath = cancelledDir.filePath(QStringLiteral("已撤销-%1-%2.%3")
+                    .arg(sourceInfo.completeBaseName(),
+                         QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")),
+                         sourceInfo.suffix()));
+            }
+            if (QFile::rename(sourcePath, targetPath))
+                archivedPath = QDir::toNativeSeparators(targetPath);
+            else
+                fileWarning = QStringLiteral("通知单文件可能正被占用，暂时无法移动：%1")
+                                  .arg(QDir::toNativeSeparators(sourcePath));
+        }
+    }
+    refreshNotices();
+    emit inspectionChanged();
+    QString message = QStringLiteral("送检通知单 %1 已撤销，相关附件已从有效文件中隐藏。")
+                          .arg(notice.inspectionNumber);
+    if (!archivedPath.isEmpty()) message += QStringLiteral("\n\n文件已移至：\n%1").arg(archivedPath);
+    if (!fileWarning.isEmpty()) message += QStringLiteral("\n\n文件提示：%1").arg(fileWarning);
+    QMessageBox::information(activeDialogParent(), QStringLiteral("撤销完成"), message);
 }
 
 void InspectionPage::populateTable(QTableWidget *table, const QStringList &statuses)

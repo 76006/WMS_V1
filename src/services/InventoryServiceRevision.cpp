@@ -582,10 +582,94 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     };
 
     QSqlQuery exists(m_database);
-    exists.prepare(QStringLiteral("SELECT 1 FROM business_documents WHERE id=?"));
+    exists.prepare(QStringLiteral(
+        "SELECT status,document_type FROM business_documents WHERE id=?"));
     exists.addBindValue(document.documentId);
     if (!exists.exec() || !exists.next())
         return fail(errorMessage, QStringLiteral("业务单据已不存在，请刷新后重试。"));
+    if (status == QStringLiteral("REVERSED")) {
+        const QString currentStatus = exists.value(0).toString().trimmed().toUpper();
+        const QString currentType = exists.value(1).toString().trimmed().toUpper();
+        if (currentStatus != QStringLiteral("POSTED"))
+            return fail(errorMessage, QStringLiteral(
+                "只有未撤销的已入账单据可以整单撤销；当前状态为 %1。")
+                    .arg(currentStatus));
+        if (currentType == QStringLiteral("CX"))
+            return fail(errorMessage, QStringLiteral(
+                "撤销单（CX）不能再次撤销；如需恢复，请重新办理原业务。"));
+        QSqlQuery reversalState(m_database);
+        reversalState.prepare(QStringLiteral(
+            "SELECT 1 FROM business_document_items WHERE document_id=? "
+            "AND (ABS(reversed_quantity)>0.0000001 OR ABS(reversed_gift_quantity)>0.0000001 "
+            "OR ABS(returned_quantity)>0.0000001) LIMIT 1"));
+        reversalState.addBindValue(document.documentId);
+        if (!reversalState.exec())
+            return fail(errorMessage, QStringLiteral("检查单据撤销状态失败：%1")
+                                          .arg(reversalState.lastError().text()));
+        if (reversalState.next())
+            return fail(errorMessage, QStringLiteral(
+                "该单据已有部分撤销或生产退料记录，不能再整单撤销；"
+                "请在库存流水中按剩余数量处理。"));
+        QSqlQuery downstream(m_database);
+        downstream.prepare(QStringLiteral(
+            "SELECT child_doc.document_no FROM business_document_items child "
+            "JOIN business_documents child_doc ON child_doc.id=child.document_id "
+            "WHERE child.source_item_id IN (SELECT id FROM business_document_items "
+            "WHERE document_id=?) AND child_doc.status IN ('POSTED','PARTIALLY_REVERSED') LIMIT 1"));
+        downstream.addBindValue(document.documentId);
+        if (!downstream.exec())
+            return fail(errorMessage, QStringLiteral("检查后续关联业务失败：%1")
+                                          .arg(downstream.lastError().text()));
+        if (downstream.next())
+            return fail(errorMessage, QStringLiteral(
+                "该单据已有后续关联单据 %1，不能整单撤销；请先处理后续业务。")
+                    .arg(downstream.value(0).toString()));
+        QSqlQuery stockCheck(m_database);
+        stockCheck.prepare(QStringLiteral(
+            "SELECT m.code,w.name,loc.code,l.batch_no,"
+            "COALESCE(b.quantity,0)-SUM(l.quantity_in-l.quantity_out) AS after_quantity "
+            "FROM inventory_ledger l "
+            "JOIN materials m ON m.id=l.material_id "
+            "JOIN warehouses w ON w.id=l.warehouse_id "
+            "JOIN locations loc ON loc.id=l.location_id "
+            "LEFT JOIN stock_balances b ON b.material_id=l.material_id "
+            "AND b.warehouse_id=l.warehouse_id AND b.location_id=l.location_id "
+            "AND b.batch_no=l.batch_no WHERE l.document_id=? "
+            "GROUP BY l.material_id,l.warehouse_id,l.location_id,l.batch_no "
+            "HAVING after_quantity < -0.0000001 LIMIT 1"));
+        stockCheck.addBindValue(document.documentId);
+        if (!stockCheck.exec())
+            return fail(errorMessage, QStringLiteral("检查撤销后库存失败：%1")
+                                          .arg(stockCheck.lastError().text()));
+        if (stockCheck.next())
+            return fail(errorMessage, QStringLiteral(
+                "物料 %1 在 %2/%3（批次：%4）的库存已被后续业务使用，"
+                "整单撤销会造成负库存。")
+                    .arg(stockCheck.value(0).toString(), stockCheck.value(1).toString(),
+                         stockCheck.value(2).toString(),
+                         stockCheck.value(3).toString().isEmpty()
+                             ? QStringLiteral("无") : stockCheck.value(3).toString()));
+        QSqlQuery serialCheck(m_database);
+        serialCheck.prepare(QStringLiteral(
+            "SELECT sn.serial_no FROM inventory_ledger source "
+            "JOIN inventory_ledger_serials source_link ON source_link.ledger_id=source.id "
+            "JOIN serial_numbers sn ON sn.id=source_link.serial_id "
+            "WHERE source.document_id=? AND EXISTS("
+            "SELECT 1 FROM inventory_ledger_serials other_link "
+            "JOIN inventory_ledger other ON other.id=other_link.ledger_id "
+            "WHERE other_link.serial_id=source_link.serial_id AND other.document_id<>? "
+            "AND (other.occurred_at>source.occurred_at "
+            "OR (other.occurred_at=source.occurred_at AND other.id>source.id))) LIMIT 1"));
+        serialCheck.addBindValue(document.documentId);
+        serialCheck.addBindValue(document.documentId);
+        if (!serialCheck.exec())
+            return fail(errorMessage, QStringLiteral("检查SN后续流转失败：%1")
+                                          .arg(serialCheck.lastError().text()));
+        if (serialCheck.next())
+            return fail(errorMessage, QStringLiteral(
+                "SN %1 已发生后续流转，不能整单撤销；请先处理该SN的后续业务。")
+                    .arg(serialCheck.value(0).toString()));
+    }
 
     QString occurredAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     QSqlQuery firstLedger(m_database);
@@ -621,9 +705,9 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     QSqlQuery dependents(m_database);
     dependents.prepare(QStringLiteral(
         "SELECT child.id,source.id,d.document_type,"
-        "CASE WHEN d.status='DRAFT' THEN 0 WHEN d.document_type='SCTL' "
+        "CASE WHEN d.status IN ('DRAFT','REVERSED') THEN 0 WHEN d.document_type='SCTL' "
         "THEN child.quantity-child.reversed_quantity ELSE child.quantity END,"
-        "CASE WHEN d.status='DRAFT' THEN 0 ELSE child.gift_quantity END "
+        "CASE WHEN d.status IN ('DRAFT','REVERSED') THEN 0 ELSE child.gift_quantity END "
         "FROM business_document_items child "
         "JOIN business_document_items source ON source.id=child.source_item_id "
         "JOIN business_documents d ON d.id=child.document_id "
@@ -811,7 +895,8 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
 
     qlonglong oldNoticeId = before.inspectionNoticeId;
     if (!setNoticeLink(m_database, document.documentId, oldNoticeId,
-                       direction == QStringLiteral("IN") ? document.inspectionNoticeId : 0,
+                       direction == QStringLiteral("IN") && status != QStringLiteral("REVERSED")
+                           ? document.inspectionNoticeId : 0,
                        m_operatorId, errorMessage)) {
         rollback();
         return false;
@@ -825,7 +910,7 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
     if (!preserveLegacyInspection && !removeInspection.exec())
         return fail(errorMessage, QStringLiteral("清理原入库检验资料失败：%1")
                                       .arg(removeInspection.lastError().text()));
-    if (direction == QStringLiteral("IN")) {
+    if (direction == QStringLiteral("IN") && status != QStringLiteral("REVERSED")) {
         QSqlQuery inspection(m_database);
         if (document.inspectionNoticeId > 0) {
             inspection.prepare(QStringLiteral(
@@ -914,7 +999,7 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
             ledgerIdsForLine.append(insertLedger.lastInsertId().toLongLong());
             return true;
         };
-        if (status != QStringLiteral("DRAFT")) {
+        if (status != QStringLiteral("DRAFT") && status != QStringLiteral("REVERSED")) {
             if (lineDirection == QStringLiteral("TRANSFER")) {
                 if (!addLedger(QStringLiteral("DB-OUT"), 0.0, line.quantity,
                                line.warehouseId, line.locationId)
@@ -968,7 +1053,7 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
                                               .arg(serial, linkSerial.lastError().text()));
             }
         }
-        if (status != QStringLiteral("DRAFT")
+        if (status != QStringLiteral("DRAFT") && status != QStringLiteral("REVERSED")
             && (lineDirection == QStringLiteral("IN")
                 || lineDirection == QStringLiteral("TRANSFER"))
             && !line.batchNo.trimmed().isEmpty()) {
@@ -1032,15 +1117,18 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
             "UPDATE business_document_items AS source SET "
             "reversed_quantity=COALESCE((SELECT SUM(child.quantity) "
             "FROM business_document_items child JOIN business_documents d ON d.id=child.document_id "
-            "WHERE child.source_item_id=source.id AND d.document_type='CX' AND d.status<>'DRAFT'),0),"
+            "WHERE child.source_item_id=source.id AND d.document_type='CX' "
+            "AND d.status IN ('POSTED','PARTIALLY_REVERSED')),0),"
             "reversed_gift_quantity=COALESCE((SELECT SUM(child.gift_quantity) "
             "FROM business_document_items child JOIN business_documents d ON d.id=child.document_id "
-            "WHERE child.source_item_id=source.id AND d.document_type='CX' AND d.status<>'DRAFT'),0)"))
+            "WHERE child.source_item_id=source.id AND d.document_type='CX' "
+            "AND d.status IN ('POSTED','PARTIALLY_REVERSED')),0)"))
         || !refreshRelatedQuantities.exec(QStringLiteral(
             "UPDATE business_document_items AS source SET "
             "returned_quantity=COALESCE((SELECT SUM(child.quantity-child.reversed_quantity) "
             "FROM business_document_items child JOIN business_documents d ON d.id=child.document_id "
-            "WHERE child.source_item_id=source.id AND d.document_type='SCTL' AND d.status<>'DRAFT'),0)"))) {
+            "WHERE child.source_item_id=source.id AND d.document_type='SCTL' "
+            "AND d.status IN ('POSTED','PARTIALLY_REVERSED')),0)"))) {
         return fail(errorMessage, QStringLiteral("重算撤销/退料数量失败：%1")
                                       .arg(refreshRelatedQuantities.lastError().text()));
     }
@@ -1070,14 +1158,47 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         return false;
     }
 
+    if (status == QStringLiteral("REVERSED")) {
+        const QString reversedAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+        QSqlQuery cancelCount(m_database);
+        cancelCount.prepare(QStringLiteral(
+            "UPDATE inventory_counts SET status='CANCELLED' WHERE document_id=?"));
+        cancelCount.addBindValue(document.documentId);
+        if (!cancelCount.exec())
+            return fail(errorMessage, QStringLiteral("同步盘点单撤销状态失败：%1")
+                                          .arg(cancelCount.lastError().text()));
+        QSqlQuery hideAttachments(m_database);
+        hideAttachments.prepare(QStringLiteral(
+            "UPDATE attachments SET is_deleted=1,deleted_by=?,deleted_at=? "
+            "WHERE business_type='business_document' AND business_id=? AND is_deleted=0"));
+        hideAttachments.addBindValue(m_operatorId);
+        hideAttachments.addBindValue(reversedAt);
+        hideAttachments.addBindValue(document.documentId);
+        if (!hideAttachments.exec())
+            return fail(errorMessage, QStringLiteral("同步撤销单据附件失败：%1")
+                                          .arg(hideAttachments.lastError().text()));
+        QSqlQuery markForms(m_database);
+        markForms.prepare(QStringLiteral(
+            "UPDATE document_forms SET last_error='原业务单据已撤销',updated_at=? "
+            "WHERE document_id=?"));
+        markForms.addBindValue(reversedAt);
+        markForms.addBindValue(document.documentId);
+        if (!markForms.exec())
+            return fail(errorMessage, QStringLiteral("同步撤销表单记录失败：%1")
+                                          .arg(markForms.lastError().text()));
+    }
+
     QJsonObject detail;
     detail.insert(QStringLiteral("before"), auditSnapshot(before));
     detail.insert(QStringLiteral("after"), auditSnapshot(document));
     QSqlQuery audit(m_database);
     audit.prepare(QStringLiteral(
         "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
-        "VALUES(?,'BUSINESS_DOCUMENT_FULL_REVISE','business_document',?,?)"));
+        "VALUES(?,?,'business_document',?,?)"));
     audit.addBindValue(m_operatorId);
+    audit.addBindValue(status == QStringLiteral("REVERSED")
+                           ? QStringLiteral("BUSINESS_DOCUMENT_REVERSE")
+                           : QStringLiteral("BUSINESS_DOCUMENT_FULL_REVISE"));
     audit.addBindValue(document.documentId);
     audit.addBindValue(QString::fromUtf8(
         QJsonDocument(detail).toJson(QJsonDocument::Compact)));
@@ -1089,4 +1210,33 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         return false;
     }
     return true;
+}
+
+bool InventoryService::reversePostedDocument(qlonglong documentId,
+                                             const QString &handlerName,
+                                             const QString &reason,
+                                             QString *documentNumber,
+                                             QString *errorMessage)
+{
+    if (documentId <= 0 || m_operatorId <= 0 || !m_database.isOpen()) {
+        setError(errorMessage, QStringLiteral("单据编号或当前操作人无效。"));
+        return false;
+    }
+    const QString normalizedReason = reason.trimmed();
+    if (normalizedReason.isEmpty()) {
+        setError(errorMessage, QStringLiteral("请填写撤销原因。"));
+        return false;
+    }
+    PostedDocumentEdit document;
+    if (!loadPostedDocument(documentId, &document, errorMessage)) return false;
+    if (documentNumber) *documentNumber = document.documentNumber;
+    const QString operatorName = handlerName.trimmed().isEmpty()
+        ? QStringLiteral("未填写") : handlerName.trimmed();
+    const QString reversalNote = QStringLiteral("[整单撤销 %1，操作人：%2] %3")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+             operatorName, normalizedReason);
+    document.status = QStringLiteral("REVERSED");
+    document.notes = document.notes.trimmed().isEmpty()
+        ? reversalNote : QStringLiteral("%1\n%2").arg(document.notes.trimmed(), reversalNote);
+    return revisePostedDocument(document, errorMessage);
 }
