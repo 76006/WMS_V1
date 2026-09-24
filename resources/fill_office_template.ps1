@@ -252,6 +252,19 @@ function Fill-ProductionIssue($sheet, $data) {
     $required = @($data.lines).Count
     $extra = Expand-Table $sheet 6 40 $required 16 $true $false
     Clear-TableRows $sheet 6 ($required + [Math]::Max(0, 40 - $required)) 16
+    # 模板第6行的物料编码/名称文字格式与后续明细行不一致。
+    # 只同步文字显示属性，保留首行自身的边框等表格结构。
+    foreach ($column in 2, 3) {
+        $sourceCell = $sheet.Cells.Item(7, $column)
+        $targetCell = $sheet.Cells.Item(6, $column)
+        $targetCell.Font.Name = $sourceCell.Font.Name
+        $targetCell.Font.Size = $sourceCell.Font.Size
+        $targetCell.Font.Bold = $sourceCell.Font.Bold
+        $targetCell.Font.Italic = $sourceCell.Font.Italic
+        $targetCell.HorizontalAlignment = $sourceCell.HorizontalAlignment
+        $targetCell.VerticalAlignment = $sourceCell.VerticalAlignment
+        $targetCell.WrapText = $sourceCell.WrapText
+    }
     Set-Cell $sheet 2 3 (Get-Field $data 'receivingDepartment')
     Set-Cell $sheet 2 6 (TextValue $data.documentNumber)
     Set-Cell $sheet 2 14 (TextValue $data.documentDate)
@@ -259,6 +272,7 @@ function Fill-ProductionIssue($sheet, $data) {
     Set-Cell $sheet 3 6 (Get-Field $data 'productionBatch')
     Set-Cell $sheet 3 14 (Get-Field $data 'plannedQuantity')
     Set-Cell $sheet 4 3 (Get-Field $data 'productModel')
+    $isReturnDocument = -not [string]::IsNullOrWhiteSpace((Get-Field $data 'originalIssueNumber'))
     for ($index = 0; $index -lt $required; $index++) {
         $line = @($data.lines)[$index]
         $row = 6 + $index
@@ -267,19 +281,23 @@ function Fill-ProductionIssue($sheet, $data) {
         Set-Cell $sheet $row 3 (TextValue $line.name)
         Set-Cell $sheet $row 4 (NumberValue $line.unitUsage)
         Set-Cell $sheet $row 5 (TextValue $line.batchNo)
-        Set-Cell $sheet $row 10 (NumberValue $line.externalQuantity)
-        Set-Cell $sheet $row 11 (NumberValue $line.reworkQuantity)
-        Set-Cell $sheet $row 12 (NumberValue $line.lossQuantity)
-        Set-Cell $sheet $row 13 (NumberValue $line.returnQuantity)
+        if ($isReturnDocument) {
+            Set-Cell $sheet $row 10 (NumberValue $line.externalQuantity)
+            Set-Cell $sheet $row 11 (NumberValue $line.reworkQuantity)
+            Set-Cell $sheet $row 12 (NumberValue $line.lossQuantity)
+            Set-Cell $sheet $row 13 (NumberValue $line.returnQuantity)
+        } else {
+            Set-Cell $sheet $row 10 ($(if ((NumberValue $line.externalQuantity) -gt 0) { NumberValue $line.externalQuantity } else { "" }))
+            Set-Cell $sheet $row 11 ($(if ((NumberValue $line.reworkQuantity) -gt 0) { NumberValue $line.reworkQuantity } else { "" }))
+            Set-Cell $sheet $row 12 ($(if ((NumberValue $line.lossQuantity) -gt 0) { NumberValue $line.lossQuantity } else { "" }))
+            Set-Cell $sheet $row 13 ($(if ((NumberValue $line.returnQuantity) -gt 0) { NumberValue $line.returnQuantity } else { "" }))
+        }
         $lineNotes = TextValue $line.notes
         if ([string]::IsNullOrWhiteSpace($lineNotes)) {
             $lineNotes = TextValue (Get-Field $data 'notes')
         }
-        $note = "领用：" + (TextValue $line.quantity)
-        if (-not [string]::IsNullOrWhiteSpace($lineNotes)) {
-            $note += "；" + $lineNotes
-        }
-        Set-Cell $sheet $row 14 $note
+        # 备注只填写用户输入内容，不再自动追加“领用：数量”。
+        Set-Cell $sheet $row 14 $lineNotes
     }
     Set-Cell $sheet (47 + $extra) 1 "首次领用人"
     Set-Cell $sheet (47 + $extra) 7 "批准"

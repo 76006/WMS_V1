@@ -24,6 +24,13 @@ struct StockMovementRequest
     qlonglong warehouseId = 0;
     qlonglong locationId = 0;
     QStringList serialNumbers;
+    // 小于0表示未由业务明细指定，模板可回退到物料档案的默认单台用量。
+    double unitUsage = -1.0;
+    // 领料单逐行用途标记。它们不改变库存数量，只用于保存业务资料并同步到领料单模板。
+    bool externalDispatch = false;
+    bool secondaryDispatch = false;
+    bool lossMarked = false;
+    bool returnToStock = false;
 };
 
 struct InboundInspectionRequest
@@ -134,6 +141,11 @@ struct PostedDocumentEditLine
     QString movementDirection;
     QStringList serialNumbers;
     QString notes;
+    double unitUsage = -1.0;
+    bool externalDispatch = false;
+    bool secondaryDispatch = false;
+    bool lossMarked = false;
+    bool returnToStock = false;
 };
 
 struct PostedDocumentEdit
@@ -324,6 +336,9 @@ private:
                                  const StockMovementRequest &request,
                                  const QVariant &sourceItemId,
                                  QString *errorMessage);
+    bool saveIssueLineOptions(qlonglong documentItemId,
+                              const StockMovementRequest &request,
+                              QString *errorMessage);
     bool setDocumentProductionContext(qlonglong documentId,
                                       qlonglong productionRunId,
                                       const QString &submissionToken,

@@ -41,6 +41,7 @@ set(WMS_SOURCES
     src/ui/pages/BatchTracePage.cpp
     src/ui/pages/ExcelImportPage.cpp
     src/ui/pages/FinishedGoodsInPage.cpp
+    src/ui/pages/FormManagementPage.cpp
     src/ui/pages/InventoryPage.cpp
     src/ui/pages/InventoryReportPage.cpp
     src/ui/pages/InventoryCountPage.cpp
@@ -88,6 +89,7 @@ set(WMS_SOURCES
     src/ui/pages/BatchTracePage.h
     src/ui/pages/ExcelImportPage.h
     src/ui/pages/FinishedGoodsInPage.h
+    src/ui/pages/FormManagementPage.h
     src/ui/pages/InventoryPage.h
     src/ui/pages/InventoryReportPage.h
     src/ui/pages/InventoryCountPage.h
@@ -129,6 +131,8 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/013_inspection_notices.sql
         database/migrations/014_production_return_number.sql
         database/migrations/015_shipment_receipts.sql
+        database/migrations/016_issue_outbound_types.sql
+        database/migrations/017_issue_line_usage.sql
         resources/PdfPreview.qml
         resources/fill_office_template.ps1
         resources/styles.qss

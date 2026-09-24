@@ -201,7 +201,7 @@ void TransferPage::refreshTransfers()
         "JOIN materials m ON m.id=i.material_id JOIN warehouses sw ON sw.id=i.warehouse_id "
         "JOIN locations sl ON sl.id=i.location_id JOIN warehouses tw ON tw.id=i.target_warehouse_id "
         "JOIN locations tl ON tl.id=i.target_location_id "
-        "WHERE d.document_type='DB' AND d.stock_direction='TRANSFER' "
+        "WHERE d.document_type='DB' AND d.stock_direction='TRANSFER' AND d.status<>'REVERSED' "
         "ORDER BY d.id DESC")
         + (m_transferTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 30")));
     while (query.next()) {

@@ -40,6 +40,9 @@ public slots:
     void clearLines();
     void setPurchaseMode(bool enabled);
     void setProductionUsageMode(bool enabled);
+    void setIssueOptionsMode(bool enabled);
+    // 适用于领料页面：删除最后一行后保持空表，由用户主动点击“添加物料”。
+    void setKeepEmptyWhenNoRows(bool enabled);
     void setProductionQuantity(double quantity);
     void setMaterialCategoryFilter(const QString &categoryCode);
     void setDocumentDate(const QDate &date);
@@ -69,7 +72,9 @@ private:
     Mode m_mode = Mode::Outbound;
     bool m_purchaseMode = false;
     bool m_productionUsageMode = false;
+    bool m_issueOptionsMode = false;
     bool m_keepEmptyWhenNoRows = false;
+    bool m_forceKeepEmptyWhenNoRows = false;
     double m_productionQuantity = 1.0;
     QString m_materialCategoryFilter;
     QDate m_documentDate = QDate::currentDate();

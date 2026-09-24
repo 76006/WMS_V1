@@ -110,7 +110,11 @@ bool InventoryService::postMovement(const StockMovementRequest &request,
         return false;
     }
 
-    const QString documentNumber = nextDocumentNumber(request.documentType, request.documentDate, errorMessage);
+    const QString numberRuleType = QStringList{
+        QStringLiteral("SCLL"), QStringLiteral("SHLL"),
+        QStringLiteral("YFLL"), QStringLiteral("QTLL")}.contains(type)
+        ? QStringLiteral("SCLL") : type;
+    const QString documentNumber = nextDocumentNumber(numberRuleType, request.documentDate, errorMessage);
     if (documentNumber.isEmpty()) {
         rollback();
         return false;
@@ -1205,6 +1209,24 @@ QString InventoryService::nextDocumentNumber(const QString &documentType,
     int maximumSequence = 1;
     for (int digit = 0; digit < width; ++digit) maximumSequence *= 10;
     --maximumSequence;
+    const QString datePart = documentDate.toString(QStringLiteral("yyyyMMdd"));
+    QString documentNumber;
+    QSqlQuery collision(m_database);
+    collision.prepare(QStringLiteral("SELECT 1 FROM business_documents WHERE document_no=?"));
+    while (sequence <= maximumSequence) {
+        const QString sequencePart = QStringLiteral("%1").arg(
+            sequence, width, 10, QLatin1Char('0'));
+        documentNumber = type == QStringLiteral("SCLL")
+            ? prefix + datePart + sequencePart
+            : QStringLiteral("%1-%2-%3").arg(prefix, datePart, sequencePart);
+        collision.bindValue(0, documentNumber);
+        if (!collision.exec()) {
+            setError(errorMessage, collision.lastError().text());
+            return {};
+        }
+        if (!collision.next()) break;
+        ++sequence;
+    }
     if (sequence > maximumSequence) {
         setError(errorMessage,
                  QStringLiteral("%1 在 %2 的%3位流水号已用完。")
@@ -1222,13 +1244,7 @@ QString InventoryService::nextDocumentNumber(const QString &documentType,
         setError(errorMessage, update.lastError().text());
         return {};
     }
-    const QString datePart = documentDate.toString(QStringLiteral("yyyyMMdd"));
-    const QString sequencePart = QStringLiteral("%1").arg(
-        sequence, width, 10, QLatin1Char('0'));
-    if (type == QStringLiteral("SCLL")) {
-        return prefix + datePart + sequencePart;
-    }
-    return QStringLiteral("%1-%2-%3").arg(prefix, datePart, sequencePart);
+    return documentNumber;
 }
 
 qlonglong InventoryService::createDocument(const QString &number,
@@ -1289,7 +1305,9 @@ qlonglong InventoryService::createItem(qlonglong documentId,
         setError(errorMessage, QStringLiteral("创建业务明细失败：%1").arg(query.lastError().text()));
         return 0;
     }
-    return query.lastInsertId().toLongLong();
+    const qlonglong itemId = query.lastInsertId().toLongLong();
+    if (!saveIssueLineOptions(itemId, request, errorMessage)) return 0;
+    return itemId;
 }
 
 bool InventoryService::changeBalance(qlonglong materialId,

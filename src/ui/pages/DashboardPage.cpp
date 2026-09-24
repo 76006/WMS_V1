@@ -110,10 +110,12 @@ void DashboardPage::refresh()
         "SELECT COALESCE(SUM(quantity),0) FROM stock_balances")).toDouble(), 'f', 3)
                                      .remove(QRegularExpression(QStringLiteral("\\.?0+$"))));
     m_todayInbound->setText(scalar(QStringLiteral(
-        "SELECT COUNT(*) FROM business_documents WHERE stock_direction='IN' AND status!='DRAFT' "
+        "SELECT COUNT(*) FROM business_documents WHERE stock_direction='IN' "
+        "AND status NOT IN ('DRAFT','REVERSED') "
         "AND document_date=date('now','localtime')")).toString());
     m_todayOutbound->setText(scalar(QStringLiteral(
-        "SELECT COUNT(*) FROM business_documents WHERE stock_direction='OUT' AND status!='DRAFT' "
+        "SELECT COUNT(*) FROM business_documents WHERE stock_direction='OUT' "
+        "AND status NOT IN ('DRAFT','REVERSED') "
         "AND document_date=date('now','localtime')")).toString());
     m_pendingCounts->setText(scalar(QStringLiteral(
         "SELECT COUNT(*) FROM inventory_counts WHERE status='DRAFT'")).toString());
@@ -131,6 +133,7 @@ void DashboardPage::refresh()
         "JOIN materials m ON m.id=l.material_id "
         "JOIN warehouses w ON w.id=l.warehouse_id "
         "JOIN locations loc ON loc.id=l.location_id "
+        "WHERE d.status<>'REVERSED' "
         "ORDER BY l.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 12")));
     m_recentTable->setRowCount(0);

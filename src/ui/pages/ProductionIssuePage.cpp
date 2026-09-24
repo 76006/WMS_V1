@@ -63,9 +63,9 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     headerForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     m_issueTypeCombo = new QComboBox(panel);
     m_issueTypeCombo->addItem(QStringLiteral("生产领料（可导入BOM用料）"), QStringLiteral("SCLL"));
-    m_issueTypeCombo->addItem(QStringLiteral("售后领料"), QStringLiteral("WXLY"));
-    m_issueTypeCombo->addItem(QStringLiteral("研发领料"), QStringLiteral("YPLY"));
-    m_issueTypeCombo->addItem(QStringLiteral("其他领料"), QStringLiteral("QTCK"));
+    m_issueTypeCombo->addItem(QStringLiteral("售后领料"), QStringLiteral("SHLL"));
+    m_issueTypeCombo->addItem(QStringLiteral("研发领料"), QStringLiteral("YFLL"));
+    m_issueTypeCombo->addItem(QStringLiteral("其他领料"), QStringLiteral("QTLL"));
     m_productCombo = new QComboBox(panel);
     ComboBoxSearch::enableContainsSearch(
         m_productCombo, QStringLiteral("输入成品编码或名称检索"));
@@ -92,15 +92,17 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     headerForm->addRow(QStringLiteral("备注"), m_notesEdit);
     panelLayout->addLayout(headerForm);
 
-    m_productionFieldsGroup = new QGroupBox(QStringLiteral("生产领料信息"), panel);
+    m_productionFieldsGroup = new QGroupBox(QStringLiteral("生产领料信息（可选）"), panel);
     auto *productionForm = new QFormLayout(m_productionFieldsGroup);
     productionForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
-    productionForm->addRow(QStringLiteral("成品物料 *"), m_productCombo);
-    productionForm->addRow(QStringLiteral("生产批次 *"), m_batchEdit);
-    productionForm->addRow(QStringLiteral("生产台数 *"), m_plannedQuantity);
+    productionForm->addRow(QStringLiteral("成品物料"), m_productCombo);
+    productionForm->addRow(QStringLiteral("生产批次"), m_batchEdit);
+    productionForm->addRow(QStringLiteral("生产台数"), m_plannedQuantity);
     panelLayout->addWidget(m_productionFieldsGroup);
 
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Outbound, panel);
+    m_lines->setKeepEmptyWhenNoRows(true);
+    m_lines->setIssueOptionsMode(true);
     m_lines->setProductionUsageMode(true);
     m_lines->setProductionQuantity(m_plannedQuantity->value());
     m_submitButton = new QPushButton(QStringLiteral("确认并领料"), m_lines);
@@ -162,6 +164,8 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     });
     connect(m_productCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
         m_lines->clearLines();
+        if (m_productCombo->currentData().toLongLong() <= 0) m_batchEdit->clear();
+        updateIssueType();
         m_usageHint->setText(
             QStringLiteral("领料明细已清空。可逐项添加物料，或点击“一键导入BOM用料”。"));
     });
@@ -178,17 +182,22 @@ void ProductionIssuePage::resetSubmissionToken()
 void ProductionIssuePage::updateIssueType()
 {
     const bool production = m_issueTypeCombo->currentData().toString() == QStringLiteral("SCLL");
+    const bool hasProductionProduct = production
+        && m_productCombo->currentData().toLongLong() > 0;
     m_productionFieldsGroup->setVisible(production);
-    m_lines->setProductionUsageMode(production);
+    m_batchEdit->setEnabled(hasProductionProduct);
+    m_plannedQuantity->setEnabled(hasProductionProduct);
+    m_lines->setProductionUsageMode(hasProductionProduct);
     m_lines->setMaterialCategoryFilter(QString());
     m_heading->setText(QStringLiteral("新建%1单")
                            .arg(m_issueTypeCombo->currentText().section(QStringLiteral("（"), 0, 0)));
     m_usageHint->setText(
         production
-            ? QStringLiteral("领料明细默认保持为空。可点击“添加物料”逐项选择，也可点击“一键导入BOM用料”主动带出当前成品的全部末级用料；库存批次由用户指定。")
+            ? (hasProductionProduct
+                ? QStringLiteral("已填写生产信息：可逐项添加物料，也可点击“一键导入BOM用料”；总用量按生产台数计算。")
+                : QStringLiteral("生产信息可以不填。当前为直接领料模式，可逐项添加物料并手工填写领用数量；选择成品后可导入BOM并按台数计算。"))
             : QStringLiteral("点击“添加物料”逐项选择本次领用的物料、仓库、库位、批次和数量。"));
-    m_submitButton->setEnabled(
-        m_session.canPostProduction() && (!production || m_productCombo->count() > 0));
+    m_submitButton->setEnabled(m_session.canPostProduction());
 }
 
 void ProductionIssuePage::refreshReferenceData()
@@ -196,6 +205,7 @@ void ProductionIssuePage::refreshReferenceData()
     const QVariant selected = m_productCombo->currentData();
     const QSignalBlocker productBlocker(m_productCombo);
     m_productCombo->clear();
+    m_productCombo->addItem(QStringLiteral("不填写生产信息（直接领料）"), qlonglong(0));
     QSqlQuery products(m_database);
     products.exec(QStringLiteral(
         "SELECT m.id,m.code,m.name,m.specification FROM materials m "
@@ -208,7 +218,7 @@ void ProductionIssuePage::refreshReferenceData()
                                 products.value(0));
     }
     const int selectedIndex = m_productCombo->findData(selected);
-    if (selectedIndex >= 0) m_productCombo->setCurrentIndex(selectedIndex);
+    m_productCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
     m_lines->refreshReferenceData();
     updateIssueType();
     refreshRecentDocuments();
@@ -297,12 +307,17 @@ void ProductionIssuePage::refreshRecentDocuments()
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
         "SELECT d.id,d.document_no,CASE d.document_type "
-        "WHEN 'SCLL' THEN '生产领料' WHEN 'WXLY' THEN '售后领料' "
-        "WHEN 'YPLY' THEN '研发领料' ELSE '其他领料' END,d.document_date,"
+        "WHEN 'SCLL' THEN '生产领料' WHEN 'SHLL' THEN '售后领料' "
+        "WHEN 'YFLL' THEN '研发领料' WHEN 'QTLL' THEN '其他领料' "
+        "WHEN 'WXLY' THEN '售后领料（历史）' WHEN 'YPLY' THEN '研发领料（历史）' "
+        "ELSE '其他领料（历史）' END,d.document_date,"
         "COALESCE(p.batch_no,''),COALESCE(p.product_name,''),COUNT(i.id) "
         "FROM business_documents d LEFT JOIN production_runs p ON p.id=d.production_run_id "
         "LEFT JOIN business_document_items i ON i.document_id=d.id "
-        "WHERE d.document_type IN ('SCLL','WXLY','YPLY','QTCK') "
+        "WHERE d.status<>'REVERSED' AND ("
+        "d.document_type IN ('SCLL','SHLL','YFLL','QTLL') OR "
+        "(d.document_type IN ('WXLY','YPLY','QTCK') AND (d.purpose LIKE '%领料%' OR EXISTS("
+        "SELECT 1 FROM document_forms f WHERE f.document_id=d.id AND f.form_kind='productionIssue')))) "
         "GROUP BY d.id ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
@@ -321,14 +336,17 @@ void ProductionIssuePage::submit()
     const QString issueType = m_issueTypeCombo->currentData().toString();
     const bool production = issueType == QStringLiteral("SCLL");
     const QString issueName = m_issueTypeCombo->currentText().section(QStringLiteral("（"), 0, 0);
-    if (production
-        && (m_productCombo->currentIndex() < 0 || m_batchEdit->text().trimmed().isEmpty())) {
+    const qlonglong productId = m_productCombo->currentData().toLongLong();
+    const bool hasProduct = productId > 0;
+    const bool hasBatch = !m_batchEdit->text().trimmed().isEmpty();
+    const bool hasProductionContext = production && hasProduct && hasBatch;
+    if (production && hasProduct != hasBatch) {
         QMessageBox::warning(this, QStringLiteral("资料不完整"),
-                             QStringLiteral("请选择成品并填写生产批次。"));
+                             QStringLiteral("生产信息可以全部不填；如需填写，请同时选择成品并填写生产批次。"));
         return;
     }
     QString error;
-    const QList<StockMovementRequest> movementLines = m_lines->lines(&error);
+    QList<StockMovementRequest> movementLines = m_lines->lines(&error);
     if (movementLines.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("领料明细有误"), error);
         return;
@@ -341,12 +359,14 @@ void ProductionIssuePage::submit()
     issueForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
     issueForm.fields.insert(QStringLiteral("notes"), m_notesEdit->toPlainText().trimmed());
     issueForm.fields.insert(QStringLiteral("issueType"), issueType);
+    issueForm.fields.insert(QStringLiteral("hasProductionContext"),
+                            hasProductionContext ? QStringLiteral("1") : QStringLiteral("0"));
     issueForm.fields.insert(QStringLiteral("receivingDepartment"),
                             issueType == QStringLiteral("SCLL") ? QStringLiteral("生产部")
-                            : issueType == QStringLiteral("WXLY") ? QStringLiteral("售后部")
-                            : issueType == QStringLiteral("YPLY") ? QStringLiteral("研发部")
+                            : issueType == QStringLiteral("SHLL") ? QStringLiteral("售后部")
+                            : issueType == QStringLiteral("YFLL") ? QStringLiteral("研发部")
                                                                    : QStringLiteral("其他"));
-    if (production) {
+    if (hasProductionContext) {
         issueForm.fields.insert(QStringLiteral("productionBatch"), m_batchEdit->text().trimmed());
         issueForm.fields.insert(QStringLiteral("plannedQuantity"),
                                 QString::number(m_plannedQuantity->value(), 'g', 12));
@@ -363,15 +383,24 @@ void ProductionIssuePage::submit()
         QMessageBox::warning(this, QStringLiteral("无法填写领料单模板"), error);
         return;
     }
-    if (production) {
-        for (OfficeTemplateLine &line : issueForm.lines)
-            line.unitUsage = line.quantity / m_plannedQuantity->value();
-    }
     DocumentTemplateDialog issueDialog(issueForm, this);
     if (issueDialog.exec() != QDialog::Accepted) return;
     issueForm = issueDialog.document();
+    const int synchronizedLineCount = qMin(static_cast<int>(movementLines.size()),
+                                           static_cast<int>(issueForm.lines.size()));
+    for (int index = 0; index < synchronizedLineCount; ++index) {
+        const OfficeTemplateLine &formLine = issueForm.lines.at(index);
+        StockMovementRequest &movement = movementLines[index];
+        // 领料明细、确认表单和最终 Excel 始终使用同一份逐行单台用量。
+        movement.unitUsage = formLine.unitUsage;
+        movement.externalDispatch = formLine.externalQuantity > 0.0;
+        movement.secondaryDispatch = formLine.reworkQuantity > 0.0;
+        movement.lossMarked = formLine.lossQuantity > 0.0;
+        movement.returnToStock = formLine.returnQuantity > 0.0;
+        movement.notes = formLine.notes;
+    }
 
-    const QString confirmation = production
+    const QString confirmation = hasProductionContext
         ? QStringLiteral("确认按 %1 台提交 %2 条生产领料明细？库存将整单扣减并生成库存流水。")
               .arg(m_plannedQuantity->value(), 0, 'f', 0)
               .arg(movementLines.size())
@@ -396,10 +425,10 @@ void ProductionIssuePage::submit()
     PostedDocument posted;
     qlonglong runId = 0;
     bool ok = false;
-    if (production) {
+    if (hasProductionContext) {
         ProductionRunRequest run;
         run.batchNo = m_batchEdit->text().trimmed();
-        run.productMaterialId = m_productCombo->currentData().toLongLong();
+        run.productMaterialId = productId;
         run.plannedQuantity = m_plannedQuantity->value();
         ok = service.postProductionIssue(run, document, &posted, &runId, &error);
     } else {
@@ -428,7 +457,10 @@ void ProductionIssuePage::submit()
     }
     resetSubmissionToken();
     m_notesEdit->clear();
-    if (production) m_batchEdit->clear();
+    if (production) {
+        m_batchEdit->clear();
+        m_productCombo->setCurrentIndex(0);
+    }
     m_lines->clearLines();
     emit stockChanged();
     refreshReferenceData();

@@ -325,7 +325,7 @@ void FinishedGoodsInPage::refreshRecentDocuments()
         "SELECT d.id,d.document_no,d.document_date,p.batch_no,p.product_name,i.quantity "
         "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
         "JOIN business_document_items i ON i.document_id=d.id "
-        "WHERE d.document_type='CPRK' ORDER BY d.id DESC")
+        "WHERE d.document_type='CPRK' AND d.status<>'REVERSED' ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();

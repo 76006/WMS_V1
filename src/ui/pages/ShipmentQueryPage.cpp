@@ -306,7 +306,7 @@ void ShipmentQueryPage::loadShipments()
         "LEFT JOIN attachments ra ON ra.id=s.receipt_attachment_id AND ra.is_deleted=0 "
         "LEFT JOIN users ru ON ru.id=s.receipt_confirmed_by "
         "LEFT JOIN business_document_items i ON i.document_id=d.id "
-        "WHERE d.document_type='XSCK' "
+        "WHERE d.document_type='XSCK' AND d.status<>'REVERSED' "
         "AND (COALESCE(s.sales_order_no,'') LIKE ? OR d.document_no LIKE ?) "
         "AND (COALESCE(?,'')='' OR COALESCE(s.customer_company,'') LIKE ?) "
         "AND (COALESCE(?,'')='' OR EXISTS(SELECT 1 FROM business_document_items pi "

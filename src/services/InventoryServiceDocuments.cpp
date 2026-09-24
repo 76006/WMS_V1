@@ -111,13 +111,18 @@ bool loadAndValidateInspectionNotice(QSqlDatabase database,
         noticeQuantities[key] += items.value(2).toDouble();
     }
     QMap<QString, double> inboundQuantities;
+    QMap<QString, double> inboundReconciledQuantities;
     for (const StockMovementRequest &line : requestLines) {
         if (line.materialId <= 0 || !std::isfinite(line.quantity)
             || line.quantity <= DocumentQuantityTolerance) {
             setDocumentError(errorMessage, QStringLiteral("入库明细包含无效物料或数量。"));
             return false;
         }
-        inboundQuantities[inspectionLineKey(line.materialId, line.batchNo)] += line.quantity;
+        const QString key = inspectionLineKey(line.materialId, line.batchNo);
+        inboundQuantities[key] += line.quantity;
+        // 供应商赠送品进入实物库存，但不参与采购对账。送检通知既可能按实际到货量
+        // 填写，也可能按采购对账量填写，因此两种数量都允许与送检明细匹配。
+        inboundReconciledQuantities[key] += line.quantity - qMax(0.0, line.giftQuantity);
     }
     if (noticeQuantities.size() != inboundQuantities.size()) {
         setDocumentError(errorMessage, QStringLiteral("入库物料或批号与所选送检通知不一致。"));
@@ -125,9 +130,16 @@ bool loadAndValidateInspectionNotice(QSqlDatabase database,
     }
     for (auto it = noticeQuantities.cbegin(); it != noticeQuantities.cend(); ++it) {
         const auto inbound = inboundQuantities.constFind(it.key());
-        if (inbound == inboundQuantities.cend()
-            || std::abs(inbound.value() - it.value()) > DocumentQuantityTolerance) {
-            setDocumentError(errorMessage, QStringLiteral("入库物料、批号或数量与所选送检通知不一致。"));
+        const auto reconciled = inboundReconciledQuantities.constFind(it.key());
+        const bool matchesPhysical = inbound != inboundQuantities.cend()
+            && std::abs(inbound.value() - it.value()) <= DocumentQuantityTolerance;
+        const bool matchesReconciled = reconciled != inboundReconciledQuantities.cend()
+            && std::abs(reconciled.value() - it.value()) <= DocumentQuantityTolerance;
+        if (!matchesPhysical && !matchesReconciled) {
+            setDocumentError(
+                errorMessage,
+                QStringLiteral("入库物料、批号或数量与所选送检通知不一致；存在赠送品时，"
+                               "送检数量应等于实际入库数量或扣除赠送后的对账数量。"));
             return false;
         }
     }
@@ -234,7 +246,11 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         return false;
     }
 
-    const QString number = nextDocumentNumber(type, request.documentDate, errorMessage);
+    const QString numberRuleType = QStringList{
+        QStringLiteral("SCLL"), QStringLiteral("SHLL"),
+        QStringLiteral("YFLL"), QStringLiteral("QTLL")}.contains(type)
+        ? QStringLiteral("SCLL") : type;
+    const QString number = nextDocumentNumber(numberRuleType, request.documentDate, errorMessage);
     const qlonglong documentId = number.isEmpty()
         ? 0
         : createDocument(number, type, inbound ? QStringLiteral("IN") : QStringLiteral("OUT"),

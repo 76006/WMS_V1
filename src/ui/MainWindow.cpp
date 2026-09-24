@@ -6,6 +6,7 @@
 #include "ui/pages/BatchTracePage.h"
 #include "ui/pages/ExcelImportPage.h"
 #include "ui/pages/FinishedGoodsInPage.h"
+#include "ui/pages/FormManagementPage.h"
 #include "ui/pages/InventoryPage.h"
 #include "ui/pages/InventoryReportPage.h"
 #include "ui/pages/InventoryCountPage.h"
@@ -162,6 +163,7 @@ void MainWindow::buildUi()
     m_batchTracePage = new BatchTracePage(m_database, m_stack);
     m_serialTracePage = new SerialTracePage(m_database, m_stack);
     m_attachmentPage = new AttachmentPage(m_database, m_session, m_stack);
+    m_formManagementPage = new FormManagementPage(m_database, m_session, m_stack);
     m_auditLogPage = new AuditLogPage(m_database, m_stack);
     m_userManagementPage = new UserManagementPage(m_database, m_session, m_stack);
     m_systemSettingsPage = new SystemSettingsPage(m_database, m_session,
@@ -186,6 +188,7 @@ void MainWindow::buildUi()
     add(QStringLiteral("批次查询"), m_batchTracePage, m_session.canViewInventory());
     add(QStringLiteral("SN查询"), m_serialTracePage, m_session.canViewInventory());
     add(QStringLiteral("附件管理"), m_attachmentPage);
+    add(QStringLiteral("表单管理"), m_formManagementPage);
     add(QStringLiteral("操作日志"), m_auditLogPage, m_session.canViewAudit());
     add(QStringLiteral("用户管理"), m_userManagementPage, m_session.canManageUsers());
     add(QStringLiteral("系统设置"), m_systemSettingsPage);
@@ -259,6 +262,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_batchTracePage) m_batchTracePage->refresh();
     else if (page == m_serialTracePage) m_serialTracePage->refresh();
     else if (page == m_attachmentPage) m_attachmentPage->refresh();
+    else if (page == m_formManagementPage) m_formManagementPage->refresh();
     else if (page == m_auditLogPage) m_auditLogPage->refresh();
     else if (page == m_userManagementPage) m_userManagementPage->refresh();
 }
@@ -280,6 +284,7 @@ void MainWindow::refreshInventoryViews()
     m_batchTracePage->refresh();
     m_serialTracePage->refresh();
     m_attachmentPage->refresh();
+    m_formManagementPage->refresh();
     m_productionIssuePage->refreshReferenceData();
     m_productionReturnPage->refreshReferenceData();
     m_finishedGoodsInPage->refreshReferenceData();

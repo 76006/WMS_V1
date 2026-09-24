@@ -29,12 +29,18 @@ QList<FieldDefinition> fieldDefinitions(const OfficeTemplateDocument &document)
     case OfficeFormKind::FinishedGoodsInbound:
         return {};
     case OfficeFormKind::ProductionIssue: {
-        const bool production = document.fields.value(QStringLiteral("issueType"),
-                                                       QStringLiteral("SCLL"))
-                                    == QStringLiteral("SCLL");
+        const QString issueType = document.fields.value(QStringLiteral("issueType"),
+                                                        QStringLiteral("SCLL"));
+        const bool productionType = issueType == QStringLiteral("SCLL")
+            || issueType == QStringLiteral("SCTL");
+        const bool production = productionType
+            && (document.fields.value(QStringLiteral("hasProductionContext"))
+                        == QStringLiteral("1")
+                    || !document.fields.value(QStringLiteral("productionBatch"))
+                            .trimmed().isEmpty());
         QList<FieldDefinition> fields = {
             {QStringLiteral("receivingDepartment"), QStringLiteral("领用部门"),
-             production ? QStringLiteral("生产部") : QString(), true}
+             productionType ? QStringLiteral("生产部") : QString(), true}
         };
         if (production) {
             fields.append(FieldDefinition{QStringLiteral("productName"),
@@ -158,10 +164,18 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
                    QStringLiteral("生产批号"), QStringLiteral("序列号"), QStringLiteral("备注")};
         break;
     case OfficeFormKind::ProductionIssue:
-        headers = {QStringLiteral("序号"), QStringLiteral("物料编码"), QStringLiteral("物料名称"),
-                   QStringLiteral("单台用量"), QStringLiteral("批号"), QStringLiteral("领用数量"),
-                   QStringLiteral("外协数量"), QStringLiteral("返工数量"), QStringLiteral("损耗数量"),
-                   QStringLiteral("退料数量"), QStringLiteral("备注")};
+        if (!m_document.fields.value(QStringLiteral("originalIssueNumber")).trimmed().isEmpty()) {
+            headers = {QStringLiteral("序号"), QStringLiteral("物料编码"), QStringLiteral("物料名称"),
+                       QStringLiteral("单台用量"), QStringLiteral("批号"), QStringLiteral("原领用数量"),
+                       QStringLiteral("外发数量"), QStringLiteral("二次外发数量"),
+                       QStringLiteral("损耗数量"), QStringLiteral("本次退料数量"),
+                       QStringLiteral("备注")};
+        } else {
+            headers = {QStringLiteral("序号"), QStringLiteral("物料编码"), QStringLiteral("物料名称"),
+                       QStringLiteral("单台用量"), QStringLiteral("批号"), QStringLiteral("领用数量"),
+                       QStringLiteral("外发"), QStringLiteral("二次外发"), QStringLiteral("损耗"),
+                       QStringLiteral("退库"), QStringLiteral("逐行备注")};
+        }
         break;
     case OfficeFormKind::RawMaterialInbound:
     case OfficeFormKind::FinishedGoodsInbound:
@@ -172,7 +186,15 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     }
     m_lineTable = new QTableWidget(0, headers.size(), this);
     m_lineTable->setHorizontalHeaderLabels(headers);
-    m_lineTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    const bool editableIssueLines = m_document.kind == OfficeFormKind::ProductionIssue
+        && m_document.fields.value(QStringLiteral("originalIssueNumber")).trimmed().isEmpty();
+    if (editableIssueLines) {
+        m_lineTable->setEditTriggers(QAbstractItemView::DoubleClicked
+                                     | QAbstractItemView::SelectedClicked
+                                     | QAbstractItemView::EditKeyPressed);
+    } else {
+        m_lineTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    }
     m_lineTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_lineTable->verticalHeader()->hide();
     m_lineTable->horizontalHeader()->setStretchLastSection(true);
@@ -239,12 +261,33 @@ void DocumentTemplateDialog::populateLines()
                       line.specification, line.unit, quantityText(line.quantity), line.batchNo,
                       line.serialNumbers, line.notes};
             break;
-        case OfficeFormKind::ProductionIssue:
+        case OfficeFormKind::ProductionIssue: {
+            if (!m_document.fields.value(QStringLiteral("originalIssueNumber")).trimmed().isEmpty()) {
+                values = {QString::number(row + 1), line.materialCode, line.materialName,
+                          quantityText(line.unitUsage), line.batchNo, quantityText(line.quantity),
+                          quantityText(line.externalQuantity), quantityText(line.reworkQuantity),
+                          quantityText(line.lossQuantity), quantityText(line.returnQuantity), line.notes};
+                break;
+            }
             values = {QString::number(row + 1), line.materialCode, line.materialName,
-                      quantityText(line.unitUsage), line.batchNo, quantityText(line.quantity),
-                      quantityText(line.externalQuantity), quantityText(line.reworkQuantity),
-                      quantityText(line.lossQuantity), quantityText(line.returnQuantity), line.notes};
-            break;
+                      quantityText(line.unitUsage), line.batchNo, quantityText(line.quantity)};
+            for (int column = 0; column < values.size(); ++column) {
+                auto *item = new QTableWidgetItem(values.at(column));
+                item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+                m_lineTable->setItem(row, column, item);
+            }
+            const QList<double> options = {line.externalQuantity, line.reworkQuantity,
+                                            line.lossQuantity, line.returnQuantity};
+            for (int option = 0; option < static_cast<int>(options.size()); ++option) {
+                auto *item = new QTableWidgetItem;
+                item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
+                item->setCheckState(options.at(option) > 0.0 ? Qt::Checked : Qt::Unchecked);
+                item->setTextAlignment(Qt::AlignCenter);
+                m_lineTable->setItem(row, 6 + option, item);
+            }
+            m_lineTable->setItem(row, 10, new QTableWidgetItem(line.notes));
+            continue;
+        }
         case OfficeFormKind::RawMaterialInbound:
         case OfficeFormKind::FinishedGoodsInbound:
             values = {QString::number(row + 1),
@@ -253,8 +296,11 @@ void DocumentTemplateDialog::populateLines()
                       line.unit, quantityText(line.quantity), line.notes};
             break;
         }
-        for (int column = 0; column < values.size(); ++column)
-            m_lineTable->setItem(row, column, new QTableWidgetItem(values.at(column)));
+        for (int column = 0; column < values.size(); ++column) {
+            auto *item = new QTableWidgetItem(values.at(column));
+            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+            m_lineTable->setItem(row, column, item);
+        }
     }
     m_lineTable->resizeColumnsToContents();
     m_lineTable->setColumnWidth(2, qMax(150, m_lineTable->columnWidth(2)));
@@ -276,6 +322,23 @@ OfficeTemplateDocument DocumentTemplateDialog::document() const
         for (OfficeTemplateLine &line : result.lines) {
             if (line.orderNumber.trimmed().isEmpty()) line.orderNumber = orderNumber;
             if (line.supplier.trimmed().isEmpty()) line.supplier = supplier;
+        }
+    }
+    if (result.kind == OfficeFormKind::ProductionIssue
+        && result.fields.value(QStringLiteral("originalIssueNumber")).trimmed().isEmpty()) {
+        const int count = qMin(static_cast<int>(result.lines.size()), m_lineTable->rowCount());
+        for (int row = 0; row < count; ++row) {
+            OfficeTemplateLine &line = result.lines[row];
+            const auto checked = [this, row](int column) {
+                const QTableWidgetItem *item = m_lineTable->item(row, column);
+                return item && item->checkState() == Qt::Checked;
+            };
+            line.externalQuantity = checked(6) ? line.quantity : 0.0;
+            line.reworkQuantity = checked(7) ? line.quantity : 0.0;
+            line.lossQuantity = checked(8) ? line.quantity : 0.0;
+            line.returnQuantity = checked(9) ? line.quantity : 0.0;
+            const QTableWidgetItem *notes = m_lineTable->item(row, 10);
+            line.notes = notes ? notes->text().trimmed() : QString();
         }
     }
     return result;

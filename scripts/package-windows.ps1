@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$QtRoot = '',
     [string]$BuildDirectory = 'build-release',
     [string]$OutputDirectory = 'dist',

@@ -6,6 +6,7 @@
 #include <QAbstractItemView>
 #include <QAbstractSpinBox>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDateEdit>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -37,6 +38,7 @@ enum Column {
     MaterialColumn,
     EffectColumn,
     QuantityColumn,
+    UnitUsageColumn,
     OrderedColumn,
     GiftColumn,
     BatchColumn,
@@ -44,6 +46,10 @@ enum Column {
     TargetLocationColumn,
     SerialColumn,
     SourceItemColumn,
+    ExternalDispatchColumn,
+    SecondaryDispatchColumn,
+    LossMarkedColumn,
+    ReturnToStockColumn,
     NotesColumn,
     DeleteColumn,
     ColumnCount
@@ -118,12 +124,17 @@ BusinessDocumentEditDialog::BusinessDocumentEditDialog(QSqlDatabase database,
         {QStringLiteral("QTRK"), QStringLiteral("其他入库")},
         {QStringLiteral("QC"), QStringLiteral("期初入库")},
         {QStringLiteral("SCLL"), QStringLiteral("生产领料")},
+        {QStringLiteral("SHLL"), QStringLiteral("售后领料")},
+        {QStringLiteral("YFLL"), QStringLiteral("研发领料")},
+        {QStringLiteral("QTLL"), QStringLiteral("其他领料")},
         {QStringLiteral("SCTL"), QStringLiteral("生产退料")},
         {QStringLiteral("CPRK"), QStringLiteral("成品入库")},
         {QStringLiteral("XSCK"), QStringLiteral("销售出库")},
-        {QStringLiteral("WXLY"), QStringLiteral("售后领料")},
-        {QStringLiteral("YPLY"), QStringLiteral("研发领料")},
-        {QStringLiteral("QTCK"), QStringLiteral("其他领料")},
+        {QStringLiteral("SHCK"), QStringLiteral("售后/维修出库")},
+        {QStringLiteral("YFCK"), QStringLiteral("研发出库")},
+        {QStringLiteral("QTCK"), QStringLiteral("其他出库")},
+        {QStringLiteral("WXLY"), QStringLiteral("历史兼容类型")},
+        {QStringLiteral("YPLY"), QStringLiteral("历史兼容类型")},
         {QStringLiteral("DB"), QStringLiteral("库存调拨")},
         {QStringLiteral("PD"), QStringLiteral("库存盘点")},
         {QStringLiteral("CX"), QStringLiteral("撤销单")}};
@@ -211,9 +222,12 @@ BusinessDocumentEditDialog::BusinessDocumentEditDialog(QSqlDatabase database,
     m_lines = new QTableWidget(0, ColumnCount, body);
     m_lines->setHorizontalHeaderLabels({
         QStringLiteral("序号"), QStringLiteral("物料"), QStringLiteral("库存效果"),
-        QStringLiteral("数量"), QStringLiteral("采购数量"), QStringLiteral("赠送数量"),
+        QStringLiteral("数量"), QStringLiteral("单台用量"), QStringLiteral("采购数量"),
+        QStringLiteral("赠送数量"),
         QStringLiteral("批次"), QStringLiteral("源仓库/库位"), QStringLiteral("目标仓库/库位"),
         QStringLiteral("SN（逗号分隔）"), QStringLiteral("来源明细ID"),
+        QStringLiteral("外发"), QStringLiteral("二次外发"), QStringLiteral("损耗"),
+        QStringLiteral("退库"),
         QStringLiteral("明细备注"), QStringLiteral("操作")});
     m_lines->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_lines->verticalHeader()->hide();
@@ -223,6 +237,10 @@ BusinessDocumentEditDialog::BusinessDocumentEditDialog(QSqlDatabase database,
     m_lines->setColumnWidth(TargetLocationColumn, 190);
     m_lines->setColumnWidth(SerialColumn, 220);
     m_lines->setColumnWidth(SourceItemColumn, 105);
+    m_lines->setColumnWidth(ExternalDispatchColumn, 70);
+    m_lines->setColumnWidth(SecondaryDispatchColumn, 85);
+    m_lines->setColumnWidth(LossMarkedColumn, 70);
+    m_lines->setColumnWidth(ReturnToStockColumn, 70);
     m_lines->setColumnWidth(NotesColumn, 180);
     bodyLayout->addWidget(m_lines, 1);
     scroll->setWidget(body);
@@ -345,6 +363,10 @@ void BusinessDocumentEditDialog::addLine(const PostedDocumentEditLine &line)
     effect->setCurrentIndex(effectIndex >= 0 ? effectIndex : 0);
     m_lines->setCellWidget(row, EffectColumn, effect);
     m_lines->setCellWidget(row, QuantityColumn, quantitySpin(line.quantity, m_lines));
+    auto *unitUsage = quantitySpin(qMax(0.000001, line.unitUsage), m_lines);
+    unitUsage->setMinimum(0.0);
+    unitUsage->setValue(qMax(0.0, line.unitUsage));
+    m_lines->setCellWidget(row, UnitUsageColumn, unitUsage);
     auto *ordered = quantitySpin(qMax(0.000001, line.orderedQuantity), m_lines);
     ordered->setMinimum(0.0);
     ordered->setValue(line.orderedQuantity);
@@ -365,6 +387,16 @@ void BusinessDocumentEditDialog::addLine(const PostedDocumentEditLine &line)
     auto *sourceItem = new QLineEdit(line.sourceItemId > 0
                                          ? QString::number(line.sourceItemId) : QString(), m_lines);
     m_lines->setCellWidget(row, SourceItemColumn, sourceItem);
+    const auto option = [this](bool checked) {
+        auto *box = new QCheckBox(m_lines);
+        box->setChecked(checked);
+        box->setStyleSheet(QStringLiteral("QCheckBox { margin-left: 18px; }"));
+        return box;
+    };
+    m_lines->setCellWidget(row, ExternalDispatchColumn, option(line.externalDispatch));
+    m_lines->setCellWidget(row, SecondaryDispatchColumn, option(line.secondaryDispatch));
+    m_lines->setCellWidget(row, LossMarkedColumn, option(line.lossMarked));
+    m_lines->setCellWidget(row, ReturnToStockColumn, option(line.returnToStock));
     m_lines->setCellWidget(row, NotesColumn, new QLineEdit(line.notes, m_lines));
     auto *remove = new QPushButton(QStringLiteral("删除"), m_lines);
     remove->setProperty("danger", true);
@@ -423,6 +455,8 @@ PostedDocumentEdit BusinessDocumentEditDialog::editedDocument(QString *errorMess
         auto *material = qobject_cast<QComboBox *>(m_lines->cellWidget(row, MaterialColumn));
         auto *effect = qobject_cast<QComboBox *>(m_lines->cellWidget(row, EffectColumn));
         auto *quantity = qobject_cast<QDoubleSpinBox *>(m_lines->cellWidget(row, QuantityColumn));
+        auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
+            m_lines->cellWidget(row, UnitUsageColumn));
         auto *ordered = qobject_cast<QDoubleSpinBox *>(m_lines->cellWidget(row, OrderedColumn));
         auto *gift = qobject_cast<QDoubleSpinBox *>(m_lines->cellWidget(row, GiftColumn));
         auto *batch = qobject_cast<QLineEdit *>(m_lines->cellWidget(row, BatchColumn));
@@ -430,6 +464,13 @@ PostedDocumentEdit BusinessDocumentEditDialog::editedDocument(QString *errorMess
         auto *target = qobject_cast<QComboBox *>(m_lines->cellWidget(row, TargetLocationColumn));
         auto *serials = qobject_cast<QLineEdit *>(m_lines->cellWidget(row, SerialColumn));
         auto *sourceItem = qobject_cast<QLineEdit *>(m_lines->cellWidget(row, SourceItemColumn));
+        auto *externalDispatch = qobject_cast<QCheckBox *>(
+            m_lines->cellWidget(row, ExternalDispatchColumn));
+        auto *secondaryDispatch = qobject_cast<QCheckBox *>(
+            m_lines->cellWidget(row, SecondaryDispatchColumn));
+        auto *lossMarked = qobject_cast<QCheckBox *>(m_lines->cellWidget(row, LossMarkedColumn));
+        auto *returnToStock = qobject_cast<QCheckBox *>(
+            m_lines->cellWidget(row, ReturnToStockColumn));
         auto *notes = qobject_cast<QLineEdit *>(m_lines->cellWidget(row, NotesColumn));
         if (!material || !quantity || !source) {
             if (errorMessage) *errorMessage = QStringLiteral("第 %1 行编辑控件不完整。").arg(row + 1);
@@ -438,6 +479,7 @@ PostedDocumentEdit BusinessDocumentEditDialog::editedDocument(QString *errorMess
         line.materialId = material->currentData().toLongLong();
         line.movementDirection = effect ? effect->currentData().toString() : QStringLiteral("IN");
         line.quantity = quantity->value();
+        line.unitUsage = unitUsage ? unitUsage->value() : 0.0;
         line.orderedQuantity = ordered ? ordered->value() : 0.0;
         line.giftQuantity = gift ? gift->value() : 0.0;
         line.batchNo = batch ? batch->text().trimmed() : QString();
@@ -453,6 +495,10 @@ PostedDocumentEdit BusinessDocumentEditDialog::editedDocument(QString *errorMess
             const qlonglong sourceId = sourceItem->text().trimmed().toLongLong(&sourceOk);
             line.sourceItemId = sourceOk && sourceId > 0 ? sourceId : 0;
         }
+        line.externalDispatch = externalDispatch && externalDispatch->isChecked();
+        line.secondaryDispatch = secondaryDispatch && secondaryDispatch->isChecked();
+        line.lossMarked = lossMarked && lossMarked->isChecked();
+        line.returnToStock = returnToStock && returnToStock->isChecked();
         line.notes = notes ? notes->text().trimmed() : QString();
         result.lines.append(line);
     }
@@ -493,7 +539,7 @@ void BusinessDocumentEditDialog::saveDocument()
     } else {
         QMessageBox::warning(
             this, QStringLiteral("单据已修改，部分表单未同步"),
-            QStringLiteral("单据和库存已成功更新；以下表单可在附件管理中重新生成：\n\n%1")
+            QStringLiteral("单据和库存已成功更新；以下表单可在表单管理中重新生成：\n\n%1")
                 .arg(formErrors.join(QStringLiteral("\n"))));
     }
     accept();

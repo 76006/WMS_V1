@@ -6,6 +6,7 @@
 #include <QAbstractSpinBox>
 #include <QBoxLayout>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -41,8 +42,13 @@ constexpr int UnitUsageColumn = 5;
 constexpr int OrderedColumn = 6;
 constexpr int QuantityColumn = 7;
 constexpr int GiftColumn = 8;
-constexpr int SerialColumn = 9;
-constexpr int ActionColumn = 10;
+constexpr int ExternalDispatchColumn = 9;
+constexpr int SecondaryDispatchColumn = 10;
+constexpr int LossMarkedColumn = 11;
+constexpr int ReturnToStockColumn = 12;
+constexpr int LineNotesColumn = 13;
+constexpr int SerialColumn = 14;
+constexpr int ActionColumn = 15;
 constexpr double QuantityTolerance = 0.0000001;
 constexpr int BatchColumnWidth = 170;
 constexpr auto AutomaticBatchProperty = "automaticBatch";
@@ -94,7 +100,7 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     m_toolbarLayout->addWidget(m_importProductionBomButton);
     root->addLayout(m_toolbarLayout);
 
-    m_table = new QTableWidget(0, 11, this);
+    m_table = new QTableWidget(0, 16, this);
     m_table->setHorizontalHeaderLabels({QStringLiteral("物料"), QStringLiteral("仓库"),
                                         QStringLiteral("库位"), QStringLiteral("批次"),
                                         QStringLiteral("当前库存"),
@@ -103,6 +109,11 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
                                         m_mode == Mode::Inbound ? QStringLiteral("入库数量")
                                                                 : QStringLiteral("出库数量"),
                                         QStringLiteral("其中赠送"),
+                                        QStringLiteral("外发"),
+                                        QStringLiteral("二次外发"),
+                                        QStringLiteral("损耗"),
+                                        QStringLiteral("退库"),
+                                        QStringLiteral("备注"),
                                         QStringLiteral("SN"), QStringLiteral("操作")});
     // 使用垂直表头显示行序号，不占用业务列，避免改变现有列索引和提交逻辑。
     m_table->verticalHeader()->setVisible(true);
@@ -127,6 +138,8 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
         m_mode == Mode::Inbound ? Qt::ScrollBarAlwaysOn : Qt::ScrollBarAsNeeded);
     m_table->setMinimumHeight(m_mode == Mode::Inbound ? 260 : 240);
     m_table->setColumnHidden(UnitUsageColumn, true);
+    for (int column = ExternalDispatchColumn; column <= LineNotesColumn; ++column)
+        m_table->setColumnHidden(column, true);
     if (m_mode == Mode::Outbound) {
         m_table->setColumnHidden(OrderedColumn, true);
         m_table->setColumnHidden(GiftColumn, true);
@@ -251,6 +264,17 @@ void StockLineTable::addLine()
     gift->setRange(0.0, qMax(0.0, quantity->value() - ordered->value()));
     gift->setValue(0.0);
     auto *serialButton = new QPushButton(QStringLiteral("无需选择"), m_table);
+    const auto issueOption = [this] {
+        auto *option = new QCheckBox(m_table);
+        option->setStyleSheet(QStringLiteral("QCheckBox { margin-left: 18px; }"));
+        return option;
+    };
+    auto *externalDispatch = issueOption();
+    auto *secondaryDispatch = issueOption();
+    auto *lossMarked = issueOption();
+    auto *returnToStock = issueOption();
+    auto *lineNotes = new QLineEdit(m_table);
+    lineNotes->setPlaceholderText(QStringLiteral("填写本行备注"));
     auto *removeButton = new QPushButton(QStringLiteral("删除"), m_table);
     removeButton->setProperty("danger", true);
     m_table->setCellWidget(row, MaterialColumn, material);
@@ -262,6 +286,11 @@ void StockLineTable::addLine()
     m_table->setCellWidget(row, OrderedColumn, ordered);
     m_table->setCellWidget(row, QuantityColumn, quantity);
     m_table->setCellWidget(row, GiftColumn, gift);
+    m_table->setCellWidget(row, ExternalDispatchColumn, externalDispatch);
+    m_table->setCellWidget(row, SecondaryDispatchColumn, secondaryDispatch);
+    m_table->setCellWidget(row, LossMarkedColumn, lossMarked);
+    m_table->setCellWidget(row, ReturnToStockColumn, returnToStock);
+    m_table->setCellWidget(row, LineNotesColumn, lineNotes);
     m_table->setCellWidget(row, SerialColumn, serialButton);
     m_table->setCellWidget(row, ActionColumn, removeButton);
 
@@ -461,8 +490,9 @@ void StockLineTable::setProductionUsageMode(bool enabled)
 {
     m_productionUsageMode = m_mode == Mode::Outbound && enabled;
     m_importProductionBomButton->setVisible(m_productionUsageMode);
-    m_keepEmptyWhenNoRows = m_productionUsageMode;
-    m_table->setColumnHidden(UnitUsageColumn, !m_productionUsageMode);
+    m_keepEmptyWhenNoRows = m_productionUsageMode || m_forceKeepEmptyWhenNoRows;
+    m_table->setColumnHidden(UnitUsageColumn,
+                             !m_productionUsageMode && !m_issueOptionsMode);
     m_table->setHorizontalHeaderItem(
         QuantityColumn,
         new QTableWidgetItem(m_productionUsageMode ? QStringLiteral("总用量")
@@ -473,7 +503,7 @@ void StockLineTable::setProductionUsageMode(bool enabled)
         auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
             m_table->cellWidget(row, UnitUsageColumn));
         auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, QuantityColumn));
-        if (unitUsage) unitUsage->setEnabled(m_productionUsageMode);
+        if (unitUsage) unitUsage->setEnabled(m_productionUsageMode || m_issueOptionsMode);
         if (quantity) {
             quantity->setReadOnly(m_productionUsageMode);
             quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
@@ -481,8 +511,43 @@ void StockLineTable::setProductionUsageMode(bool enabled)
         loadUnitUsage(row);
     }
     if (m_productionUsageMode) m_table->setRowCount(0);
-    else if (m_table->rowCount() == 0) addLine();
+    else if (m_table->rowCount() == 0 && !m_keepEmptyWhenNoRows) addLine();
     refreshRowNumbers();
+}
+
+void StockLineTable::setIssueOptionsMode(bool enabled)
+{
+    m_issueOptionsMode = m_mode == Mode::Outbound && enabled;
+    for (int column = ExternalDispatchColumn; column <= LineNotesColumn; ++column)
+        m_table->setColumnHidden(column, !m_issueOptionsMode);
+    m_table->setColumnHidden(UnitUsageColumn,
+                             !m_productionUsageMode && !m_issueOptionsMode);
+    if (m_issueOptionsMode) {
+        m_table->horizontalHeader()->setSectionResizeMode(LineNotesColumn,
+                                                          QHeaderView::Interactive);
+        m_table->setColumnWidth(LineNotesColumn, 220);
+    }
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
+            m_table->cellWidget(row, UnitUsageColumn));
+        if (unitUsage) unitUsage->setEnabled(m_productionUsageMode || m_issueOptionsMode);
+    }
+}
+
+void StockLineTable::setKeepEmptyWhenNoRows(bool enabled)
+{
+    m_forceKeepEmptyWhenNoRows = enabled;
+    m_keepEmptyWhenNoRows = m_productionUsageMode || m_forceKeepEmptyWhenNoRows;
+    if (m_keepEmptyWhenNoRows) {
+        // 调用方在切换模式前会主动清空；这里只去掉构造时自动产生的全空占位行。
+        if (m_table->rowCount() == 1
+            && selectedMaterialId(comboAt(0, MaterialColumn)) <= 0) {
+            m_table->setRowCount(0);
+            refreshRowNumbers();
+        }
+    } else if (m_table->rowCount() == 0) {
+        addLine();
+    }
 }
 
 void StockLineTable::setMaterialCategoryFilter(const QString &categoryCode)
@@ -1020,6 +1085,14 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
             m_table->cellWidget(row, UnitUsageColumn));
         auto *gift = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, GiftColumn));
         auto *serialButton = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
+        auto *externalDispatch = qobject_cast<QCheckBox *>(
+            m_table->cellWidget(row, ExternalDispatchColumn));
+        auto *secondaryDispatch = qobject_cast<QCheckBox *>(
+            m_table->cellWidget(row, SecondaryDispatchColumn));
+        auto *lossMarked = qobject_cast<QCheckBox *>(m_table->cellWidget(row, LossMarkedColumn));
+        auto *returnToStock = qobject_cast<QCheckBox *>(
+            m_table->cellWidget(row, ReturnToStockColumn));
+        auto *lineNotes = qobject_cast<QLineEdit *>(m_table->cellWidget(row, LineNotesColumn));
         if (!material || !warehouse || !location || !batch || !ordered || !quantity || !gift) {
             if (errorMessage) *errorMessage = QStringLiteral("第 %1 行资料不完整。").arg(row + 1);
             return {};
@@ -1033,6 +1106,11 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
             && ordered->value() <= QuantityTolerance
             && gift->value() <= QuantityTolerance
             && serialNumbers.isEmpty()
+            && (!externalDispatch || !externalDispatch->isChecked())
+            && (!secondaryDispatch || !secondaryDispatch->isChecked())
+            && (!lossMarked || !lossMarked->isChecked())
+            && (!returnToStock || !returnToStock->isChecked())
+            && (!lineNotes || lineNotes->text().trimmed().isEmpty())
             && batch->currentText().trimmed().isEmpty();
         if (untouchedRow) continue;
         if (materialId <= 0) {
@@ -1079,6 +1157,14 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
         line.locationId = location->currentData().toLongLong();
         line.supplier = material->property("inspectionSupplier").toString().trimmed();
         line.serialNumbers = serialNumbers;
+        if (m_issueOptionsMode) {
+            line.unitUsage = unitUsage ? unitUsage->value() : 0.0;
+            line.externalDispatch = externalDispatch && externalDispatch->isChecked();
+            line.secondaryDispatch = secondaryDispatch && secondaryDispatch->isChecked();
+            line.lossMarked = lossMarked && lossMarked->isChecked();
+            line.returnToStock = returnToStock && returnToStock->isChecked();
+            line.notes = lineNotes ? lineNotes->text().trimmed() : QString();
+        }
         if (line.giftQuantity < -QuantityTolerance
             || line.giftQuantity > qMax(0.0, line.quantity - line.orderedQuantity)
                                         + QuantityTolerance) {

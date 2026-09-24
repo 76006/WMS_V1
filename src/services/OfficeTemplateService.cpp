@@ -344,10 +344,15 @@ QList<OfficeTemplateLine> OfficeTemplateService::materialLines(
         line.specification = query.value(2).toString();
         line.unit = query.value(3).toString();
         line.unitUsage = query.value(4).toDouble();
+        if (source.unitUsage >= 0.0) line.unitUsage = source.unitUsage;
         line.quantity = source.quantity;
         line.batchNo = source.batchNo;
         line.serialNumbers = source.serialNumbers.join(QStringLiteral("、"));
         line.notes = source.notes;
+        line.externalQuantity = source.externalDispatch ? source.quantity : 0.0;
+        line.reworkQuantity = source.secondaryDispatch ? source.quantity : 0.0;
+        line.lossQuantity = source.lossMarked ? source.quantity : 0.0;
+        line.returnQuantity = source.returnToStock ? source.quantity : 0.0;
         result.append(line);
     }
     return result;
@@ -863,7 +868,7 @@ QString OfficeTemplateService::incompleteFormHint(bool formCompleted)
 {
     return formCompleted
         ? QStringLiteral("业务单据已生效，库存没有变化；表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单”归档文件夹并标记为已完成。")
-        : QStringLiteral("业务单据已生效，库存没有变化；表单记录已保留，可在“附件管理”中选择该单据并点击“重新生成未完成表单”重试。");
+        : QStringLiteral("业务单据已生效，库存没有变化；表单记录已保留，可在“表单管理”中选择该表单并点击“重新生成未完成表单”重试。");
 }
 
 bool OfficeTemplateService::attachToDocument(const OfficeTemplateDocument &document,
@@ -1293,9 +1298,14 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
     QSqlQuery lines(database);
     lines.prepare(QStringLiteral(
         "SELECT m.code,m.name,m.specification,m.unit,m.unit_usage,i.quantity,i.batch_no,i.notes,"
-        "GROUP_CONCAT(DISTINCT sn.serial_no),source.quantity "
+        "GROUP_CONCAT(DISTINCT sn.serial_no),source.quantity,"
+        "COALESCE(o.external_dispatch,0),COALESCE(o.secondary_dispatch,0),"
+        "COALESCE(o.loss_marked,0),COALESCE(o.return_to_stock,0),"
+        "COALESCE(u.unit_usage,-1) "
         "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
         "LEFT JOIN business_document_items source ON source.id=i.source_item_id "
+        "LEFT JOIN issue_line_options o ON o.document_item_id=i.id "
+        "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id "
         "LEFT JOIN inventory_ledger_serials x ON x.ledger_id=l.id "
         "LEFT JOIN serial_numbers sn ON sn.id=x.serial_id WHERE i.document_id=? "
@@ -1317,6 +1327,12 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         line.batchNo = lines.value(6).toString();
         line.notes = lines.value(7).toString();
         line.serialNumbers = lines.value(8).toString().replace(QLatin1Char(','), QStringLiteral("、"));
+        const double specifiedUnitUsage = lines.value(14).toDouble();
+        if (specifiedUnitUsage >= 0.0) line.unitUsage = specifiedUnitUsage;
+        line.externalQuantity = lines.value(10).toBool() ? line.quantity : 0.0;
+        line.reworkQuantity = lines.value(11).toBool() ? line.quantity : 0.0;
+        line.lossQuantity = lines.value(12).toBool() ? line.quantity : 0.0;
+        line.returnQuantity = lines.value(13).toBool() ? line.quantity : 0.0;
         const QString type = header.value(1).toString().trimmed().toUpper();
         if (type == QStringLiteral("SCTL")) {
             if (lines.value(9).isNull()) {
@@ -1327,7 +1343,8 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
             line.returnQuantity = line.quantity;
             line.quantity = lines.value(9).toDouble();
         }
-        if ((type == QStringLiteral("SCLL") || type == QStringLiteral("SCTL"))
+        if (specifiedUnitUsage < 0.0
+            && (type == QStringLiteral("SCLL") || type == QStringLiteral("SCTL"))
             && header.value(18).toDouble() > 0.0)
             line.unitUsage = line.quantity / header.value(18).toDouble();
         materialRows.append(line);
@@ -1351,9 +1368,23 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
     QStringList desiredKinds;
     const QString documentType = header.value(1).toString().trimmed().toUpper();
     bool recognizedDocumentType = true;
+    const auto hasFormKind = [&records](const QString &kind) {
+        for (const auto &record : records) {
+            if (record.first == kind) return true;
+        }
+        return false;
+    };
+    const bool legacyIssue = QStringList{QStringLiteral("WXLY"), QStringLiteral("YPLY"),
+                                         QStringLiteral("QTCK")}.contains(documentType)
+        && (hasFormKind(formCode(OfficeFormKind::ProductionIssue))
+            || header.value(4).toString().contains(QStringLiteral("领料")));
+    const bool legacyOutbound = QStringList{QStringLiteral("WXLY"), QStringLiteral("YPLY")}
+                                    .contains(documentType)
+        && !legacyIssue;
     if (QStringList{QStringLiteral("SCLL"), QStringLiteral("SCTL"),
-                    QStringLiteral("WXLY"), QStringLiteral("YPLY"),
-                    QStringLiteral("QTCK")}.contains(documentType)) {
+                    QStringLiteral("SHLL"), QStringLiteral("YFLL"),
+                    QStringLiteral("QTLL")}.contains(documentType)
+        || legacyIssue) {
         desiredKinds.append(formCode(OfficeFormKind::ProductionIssue));
     } else if (documentType == QStringLiteral("CPRK")
                || documentType == QStringLiteral("SCWG")) {
@@ -1361,9 +1392,13 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
     } else if (QStringList{QStringLiteral("CGRK"), QStringLiteral("TLRK"),
                            QStringLiteral("QTRK"), QStringLiteral("QC")}.contains(documentType)) {
         desiredKinds.append(formCode(OfficeFormKind::RawMaterialInbound));
-    } else if (documentType == QStringLiteral("XSCK")) {
+    } else if (QStringList{QStringLiteral("XSCK"), QStringLiteral("SHCK"),
+                           QStringLiteral("YFCK"), QStringLiteral("QTCK")}
+                   .contains(documentType)
+               || legacyOutbound) {
         desiredKinds.append(formCode(OfficeFormKind::StockOutbound));
-        desiredKinds.append(formCode(OfficeFormKind::DeliveryConfirmation));
+        if (documentType == QStringLiteral("XSCK"))
+            desiredKinds.append(formCode(OfficeFormKind::DeliveryConfirmation));
     } else if (documentType != QStringLiteral("DB") && documentType != QStringLiteral("PD")
                && documentType != QStringLiteral("CX")) {
         recognizedDocumentType = false;
@@ -1450,15 +1485,22 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         document.fields.insert(QStringLiteral("productModel"), header.value(17).toString());
         document.fields.insert(QStringLiteral("plannedQuantity"),
                                QString::number(header.value(18).toDouble(), 'g', 12));
-        if (kind == OfficeFormKind::ProductionIssue)
+        if (kind == OfficeFormKind::ProductionIssue) {
             document.fields.insert(QStringLiteral("issueType"), documentType);
+            document.fields.insert(QStringLiteral("hasProductionContext"),
+                                   header.value(18).toDouble() > 0.0
+                                       && !header.value(15).toString().trimmed().isEmpty()
+                                       ? QStringLiteral("1") : QStringLiteral("0"));
+        }
         if (kind == OfficeFormKind::ProductionIssue
             && document.fields.value(QStringLiteral("receivingDepartment")).trimmed().isEmpty()) {
             const QString department = (documentType == QStringLiteral("SCLL")
                                         || documentType == QStringLiteral("SCTL"))
                 ? QStringLiteral("生产部")
-                : documentType == QStringLiteral("WXLY") ? QStringLiteral("售后部")
-                : documentType == QStringLiteral("YPLY") ? QStringLiteral("研发部")
+                : (documentType == QStringLiteral("SHLL")
+                   || documentType == QStringLiteral("WXLY")) ? QStringLiteral("售后部")
+                : (documentType == QStringLiteral("YFLL")
+                   || documentType == QStringLiteral("YPLY")) ? QStringLiteral("研发部")
                                                            : QStringLiteral("其他");
             document.fields.insert(QStringLiteral("receivingDepartment"), department);
         }

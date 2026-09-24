@@ -62,7 +62,47 @@ qlonglong InventoryService::createDocumentItem(qlonglong documentId,
                            QStringLiteral("创建业务明细失败：%1").arg(query.lastError().text()));
         return 0;
     }
-    return query.lastInsertId().toLongLong();
+    const qlonglong itemId = query.lastInsertId().toLongLong();
+    if (!saveIssueLineOptions(itemId, request, errorMessage)) return 0;
+    return itemId;
+}
+
+bool InventoryService::saveIssueLineOptions(qlonglong documentItemId,
+                                            const StockMovementRequest &request,
+                                            QString *errorMessage)
+{
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "INSERT INTO issue_line_options(document_item_id,external_dispatch,secondary_dispatch,"
+        "loss_marked,return_to_stock) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(document_item_id) DO UPDATE SET "
+        "external_dispatch=excluded.external_dispatch,"
+        "secondary_dispatch=excluded.secondary_dispatch,"
+        "loss_marked=excluded.loss_marked,return_to_stock=excluded.return_to_stock"));
+    query.addBindValue(documentItemId);
+    query.addBindValue(request.externalDispatch ? 1 : 0);
+    query.addBindValue(request.secondaryDispatch ? 1 : 0);
+    query.addBindValue(request.lossMarked ? 1 : 0);
+    query.addBindValue(request.returnToStock ? 1 : 0);
+    if (!query.exec()) {
+        setProductionError(errorMessage,
+                           QStringLiteral("保存领料明细用途失败：%1")
+                               .arg(query.lastError().text()));
+        return false;
+    }
+    QSqlQuery usage(m_database);
+    usage.prepare(QStringLiteral(
+        "INSERT INTO issue_line_usage(document_item_id,unit_usage) VALUES(?,?) "
+        "ON CONFLICT(document_item_id) DO UPDATE SET unit_usage=excluded.unit_usage"));
+    usage.addBindValue(documentItemId);
+    usage.addBindValue(request.unitUsage);
+    if (!usage.exec()) {
+        setProductionError(errorMessage,
+                           QStringLiteral("保存领料明细单台用量失败：%1")
+                               .arg(usage.lastError().text()));
+        return false;
+    }
+    return true;
 }
 
 bool InventoryService::setDocumentProductionContext(qlonglong documentId,
@@ -293,8 +333,7 @@ bool InventoryService::postProductionReturn(const ProductionReturnRequest &reque
         "SELECT production_run_id FROM business_documents WHERE id=? AND document_type='SCLL' "
         "AND status IN ('POSTED','PARTIALLY_REVERSED')"));
     sourceDocument.addBindValue(request.sourceDocumentId);
-    if (!sourceDocument.exec() || !sourceDocument.next()
-        || sourceDocument.value(0).toLongLong() <= 0) {
+    if (!sourceDocument.exec() || !sourceDocument.next()) {
         setProductionError(errorMessage, QStringLiteral("原生产领料单不存在或当前不可退料。"));
         rollback();
         return false;
@@ -306,8 +345,12 @@ bool InventoryService::postProductionReturn(const ProductionReturnRequest &reque
         : createDocument(number, QStringLiteral("SCTL"), QStringLiteral("IN"),
                          request.documentDate, request.handlerName, QString(), request.notes,
                          request.sourceDocumentId, errorMessage);
-    if (documentId <= 0
-        || !setDocumentProductionContext(documentId, runId, request.submissionToken, errorMessage)) {
+    const bool contextSaved = documentId > 0
+        && (runId > 0
+                ? setDocumentProductionContext(documentId, runId, request.submissionToken,
+                                               errorMessage)
+                : setDocumentSubmissionToken(documentId, request.submissionToken, errorMessage));
+    if (!contextSaved) {
         rollback();
         return false;
     }

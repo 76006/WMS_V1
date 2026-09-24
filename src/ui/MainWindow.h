@@ -11,6 +11,7 @@ class AuditLogPage;
 class BatchTracePage;
 class ExcelImportPage;
 class FinishedGoodsInPage;
+class FormManagementPage;
 class InventoryPage;
 class InventoryReportPage;
 class InventoryCountPage;
@@ -67,6 +68,7 @@ private:
     ProductionIssuePage *m_productionIssuePage = nullptr;
     ProductionReturnPage *m_productionReturnPage = nullptr;
     FinishedGoodsInPage *m_finishedGoodsInPage = nullptr;
+    FormManagementPage *m_formManagementPage = nullptr;
     ShipmentQueryPage *m_shipmentQueryPage = nullptr;
     InventoryPage *m_inventoryPage = nullptr;
     InventoryReportPage *m_inventoryReportPage = nullptr;

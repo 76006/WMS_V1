@@ -216,7 +216,8 @@ void StockInPage::refreshRecentDocuments()
         "FROM business_documents d LEFT JOIN business_document_items i ON i.document_id=d.id "
         "LEFT JOIN inbound_inspection_details q ON q.document_id=d.id "
         "LEFT JOIN attachments a ON a.id=q.inspection_attachment_id AND a.is_deleted=0 "
-        "WHERE d.stock_direction='IN' AND d.document_type IN ('CGRK','SCWG','TLRK','QTRK','QC') "
+        "WHERE d.stock_direction='IN' AND d.status<>'REVERSED' "
+        "AND d.document_type IN ('CGRK','SCWG','TLRK','QTRK','QC') "
         "GROUP BY d.id ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {

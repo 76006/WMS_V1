@@ -463,8 +463,14 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
         "SELECT i.id,i.material_id,i.quantity,i.ordered_quantity,i.gift_quantity,i.batch_no,"
         "i.warehouse_id,i.location_id,i.target_warehouse_id,i.target_location_id,i.source_item_id,i.notes,"
         "CASE WHEN SUM(l.quantity_in)>SUM(l.quantity_out) THEN 'IN' "
-        "WHEN SUM(l.quantity_out)>SUM(l.quantity_in) THEN 'OUT' ELSE d.stock_direction END "
+        "WHEN SUM(l.quantity_out)>SUM(l.quantity_in) THEN 'OUT' ELSE d.stock_direction END,"
+        "COALESCE(o.external_dispatch,0),COALESCE(o.secondary_dispatch,0),"
+        "COALESCE(o.loss_marked,0),COALESCE(o.return_to_stock,0),"
+        "CASE WHEN COALESCE(u.unit_usage,-1)>=0 THEN u.unit_usage ELSE m.unit_usage END "
         "FROM business_document_items i JOIN business_documents d ON d.id=i.document_id "
+        "JOIN materials m ON m.id=i.material_id "
+        "LEFT JOIN issue_line_options o ON o.document_item_id=i.id "
+        "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id WHERE i.document_id=? "
         "GROUP BY i.id ORDER BY i.line_number,i.id"));
     lines.addBindValue(documentId);
@@ -487,6 +493,11 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
         line.sourceItemId = lines.value(10).toLongLong();
         line.notes = lines.value(11).toString();
         line.movementDirection = lines.value(12).toString();
+        line.externalDispatch = lines.value(13).toBool();
+        line.secondaryDispatch = lines.value(14).toBool();
+        line.lossMarked = lines.value(15).toBool();
+        line.returnToStock = lines.value(16).toBool();
+        line.unitUsage = lines.value(17).toDouble();
         QSqlQuery serials(m_database);
         serials.prepare(QStringLiteral(
             "SELECT DISTINCT sn.serial_no FROM inventory_ledger l "
@@ -969,7 +980,18 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         if (!insertItem.exec())
             return fail(errorMessage, QStringLiteral("保存第 %1 行明细失败：%2")
                                           .arg(index + 1).arg(insertItem.lastError().text()));
-        const qlonglong itemId = insertItem.lastInsertId().toLongLong();
+        const qlonglong itemId = line.itemId > 0
+            ? line.itemId : insertItem.lastInsertId().toLongLong();
+        StockMovementRequest lineOptions;
+        lineOptions.externalDispatch = line.externalDispatch;
+        lineOptions.secondaryDispatch = line.secondaryDispatch;
+        lineOptions.lossMarked = line.lossMarked;
+        lineOptions.returnToStock = line.returnToStock;
+        lineOptions.unitUsage = line.unitUsage;
+        if (!saveIssueLineOptions(itemId, lineOptions, errorMessage)) {
+            rollback();
+            return false;
+        }
 
         QList<qlonglong> ledgerIdsForLine;
         const QString lineDirection = direction == QStringLiteral("ADJUST")

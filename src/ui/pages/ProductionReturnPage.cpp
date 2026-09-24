@@ -94,7 +94,7 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
     m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_notesEdit = new QTextEdit(panel);
     m_notesEdit->setMaximumHeight(60);
-    form->addRow(QStringLiteral("生产批次 *"), m_runCombo);
+    form->addRow(QStringLiteral("生产批次/直接领料 *"), m_runCombo);
     form->addRow(QStringLiteral("原领料单 *"), m_documentCombo);
     form->addRow(QStringLiteral("退料日期 *"), m_dateEdit);
     form->addRow(QStringLiteral("退料人员"), m_handlerEdit);
@@ -202,6 +202,15 @@ void ProductionReturnPage::refreshReferenceData()
                                      runs.value(2).toString()),
                             runs.value(0));
     }
+    QSqlQuery directIssues(m_database);
+    if (directIssues.exec(QStringLiteral(
+            "SELECT 1 FROM business_documents d JOIN business_document_items i ON i.document_id=d.id "
+            "WHERE d.production_run_id IS NULL AND d.document_type='SCLL' "
+            "AND d.status IN ('POSTED','PARTIALLY_REVERSED') "
+            "AND i.quantity-i.returned_quantity-i.reversed_quantity>0.0000001 LIMIT 1"))
+        && directIssues.next()) {
+        m_runCombo->addItem(QStringLiteral("未填写生产信息的直接领料单"), qlonglong(0));
+    }
     const int index = m_runCombo->findData(selected);
     if (index >= 0) m_runCombo->setCurrentIndex(index);
     m_runCombo->blockSignals(false);
@@ -217,12 +226,16 @@ void ProductionReturnPage::loadDocuments()
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT d.id,d.document_no,d.document_date FROM business_documents d "
-        "WHERE d.production_run_id=? AND d.document_type='SCLL' "
+        "WHERE ((? > 0 AND d.production_run_id=?) OR (? = 0 AND d.production_run_id IS NULL)) "
+        "AND d.document_type='SCLL' "
         "AND d.status IN ('POSTED','PARTIALLY_REVERSED') "
         "AND EXISTS(SELECT 1 FROM business_document_items i WHERE i.document_id=d.id "
         "AND i.quantity-i.returned_quantity-i.reversed_quantity>0.0000001) "
         "ORDER BY d.id DESC"));
-    query.addBindValue(m_runCombo->currentData());
+    const qlonglong runId = m_runCombo->currentData().toLongLong();
+    query.addBindValue(runId);
+    query.addBindValue(runId);
+    query.addBindValue(runId);
     query.exec();
     while (query.next()) {
         m_documentCombo->addItem(QStringLiteral("%1（%2）")
@@ -375,10 +388,10 @@ void ProductionReturnPage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.id,d.document_no,d.document_date,p.batch_no,s.document_no "
-        "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
+        "SELECT d.id,d.document_no,d.document_date,COALESCE(p.batch_no,'未填写生产信息'),s.document_no "
+        "FROM business_documents d LEFT JOIN production_runs p ON p.id=d.production_run_id "
         "JOIN business_documents s ON s.id=d.source_document_id "
-        "WHERE d.document_type='SCTL' ORDER BY d.id DESC")
+        "WHERE d.document_type='SCTL' AND d.status<>'REVERSED' ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();
@@ -423,6 +436,10 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
     document.documentNumber = QStringLiteral("提交后自动生成");
     document.documentDate = request.documentDate;
     document.fields.insert(QStringLiteral("handler"), request.handlerName);
+    document.fields.insert(QStringLiteral("issueType"), QStringLiteral("SCTL"));
+    document.fields.insert(QStringLiteral("receivingDepartment"), QStringLiteral("生产部"));
+    document.fields.insert(QStringLiteral("hasProductionContext"),
+                           plannedQuantity > 0.0 ? QStringLiteral("1") : QStringLiteral("0"));
     document.fields.insert(QStringLiteral("productionBatch"), source.value(1).toString());
     document.fields.insert(QStringLiteral("productName"), source.value(2).toString());
     document.fields.insert(QStringLiteral("productModel"), source.value(3).toString());

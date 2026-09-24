@@ -1053,5 +1053,5 @@ void InspectionPage::refreshNotices()
     populateTable(m_pendingTable, {QStringLiteral("PENDING")});
     populateTable(m_historyTable,
                   {QStringLiteral("QUALIFIED"), QStringLiteral("UNQUALIFIED"),
-                   QStringLiteral("USED"), QStringLiteral("CANCELLED")});
+                   QStringLiteral("USED")});
 }

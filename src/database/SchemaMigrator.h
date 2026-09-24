@@ -23,6 +23,8 @@ private:
     static bool applyInspectionNoticesMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyProductionReturnNumberMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyShipmentReceiptsMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applyIssueOutboundTypesMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applyIssueLineUsageMigration(QSqlDatabase database, QString *errorMessage);
     static bool executeSqlResource(QSqlDatabase database,
                                    const QString &resourcePath,
                                    const QString &operationName,

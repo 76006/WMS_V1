@@ -61,6 +61,9 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     m_typeCombo = new QComboBox(panel);
     m_typeCombo->addItem(QStringLiteral("销售出库"), QStringLiteral("XSCK"));
+    m_typeCombo->addItem(QStringLiteral("售后/维修出库"), QStringLiteral("SHCK"));
+    m_typeCombo->addItem(QStringLiteral("研发出库"), QStringLiteral("YFCK"));
+    m_typeCombo->addItem(QStringLiteral("其他出库"), QStringLiteral("QTCK"));
     m_dateEdit = new QDateEdit(QDate::currentDate(), panel);
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
@@ -127,7 +130,7 @@ StockOutPage::StockOutPage(QSqlDatabase database, Session session, QWidget *pare
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
     recentToolbar->addWidget(new QLabel(
-        QStringLiteral("近期销售出库单（可先出库，发货时再补充销售资料）"), recentPanel));
+        QStringLiteral("近期出库单（仅销售出库可补充发货资料）"), recentPanel));
     recentToolbar->addStretch();
     auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
     editRecentButton->setProperty("primary", true);
@@ -178,8 +181,8 @@ void StockOutPage::updateSalesFieldsVisibility()
     const QString documentType = m_typeCombo->currentData().toString();
     const bool salesOutbound = documentType == QStringLiteral("XSCK");
     m_salesDetailsGroup->setVisible(salesOutbound);
-    m_lines->setMaterialCategoryFilter(
-        salesOutbound ? QStringLiteral("FINISHED") : QString());
+    // 只有销售出库限定为成品；售后/维修、研发及其他出库可选择任意有库存物料。
+    m_lines->setMaterialCategoryFilter(salesOutbound ? QStringLiteral("FINISHED") : QString());
 }
 
 void StockOutPage::resetSubmissionToken()
@@ -199,12 +202,20 @@ void StockOutPage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.id,d.document_no,'销售出库',"
+        "SELECT d.id,d.document_no,CASE d.document_type "
+        "WHEN 'XSCK' THEN '销售出库' WHEN 'SHCK' THEN '售后/维修出库' "
+        "WHEN 'YFCK' THEN '研发出库' WHEN 'QTCK' THEN '其他出库' "
+        "WHEN 'WXLY' THEN '维修出库（历史）' ELSE '研发出库（历史）' END,"
         "COALESCE(NULLIF(s.delivery_date,''),d.document_date),"
         "COALESCE(s.customer_company,''),COALESCE(s.destination,''),COUNT(i.id) "
         "FROM business_documents d LEFT JOIN business_document_items i ON i.document_id=d.id "
         "LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
-        "WHERE d.stock_direction='OUT' AND d.document_type='XSCK' "
+        "WHERE d.stock_direction='OUT' AND d.status<>'REVERSED' AND ("
+        "d.document_type IN ('XSCK','SHCK','YFCK') OR "
+        "(d.document_type IN ('QTCK','WXLY','YPLY') AND ("
+        "EXISTS(SELECT 1 FROM document_forms f WHERE f.document_id=d.id AND f.form_kind='stockOutbound') "
+        "OR (d.purpose NOT LIKE '%领料%' AND NOT EXISTS("
+        "SELECT 1 FROM document_forms f WHERE f.document_id=d.id AND f.form_kind='productionIssue'))))) "
         "GROUP BY d.id ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
@@ -380,7 +391,7 @@ void StockOutPage::editShipmentDetails()
     } else {
         QMessageBox::warning(
             this, QStringLiteral("发货资料已保存，部分表单未同步"),
-            QStringLiteral("销售出库信息已经保存；以下表单可在附件管理中重新生成：\n\n%1")
+            QStringLiteral("销售出库信息已经保存；以下表单可在表单管理中重新生成：\n\n%1")
                 .arg(formErrors.join(QStringLiteral("\n"))));
     }
 }
