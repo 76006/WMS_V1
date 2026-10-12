@@ -73,7 +73,7 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     m_handlerEdit->setProperty("currentUserDefault", true);
     m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_supplierEdit = new QLineEdit(panel);
-    m_supplierEdit->setPlaceholderText(QStringLiteral("采购入库时填写，可用于批次追溯"));
+    m_supplierEdit->setPlaceholderText(QStringLiteral("采购入库时填写，可用于批号追溯"));
     m_purposeEdit = new QLineEdit(panel);
     m_numberLabel = new QLabel(QStringLiteral("提交时自动生成"), panel);
     m_numberLabel->setObjectName(QStringLiteral("mutedText"));
@@ -138,6 +138,14 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
         TableExcelExport::editSelectedBusinessDocument(
             m_recentTable, this, [this] { refreshRecentDocuments(); });
     });
+    connect(m_recentTable, &QTableWidget::cellDoubleClicked, this,
+            [this](int row, int) {
+        m_recentTable->setCurrentCell(row, 0);
+        m_recentTable->selectRow(row);
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, m_recentTable->window(),
+            [this] { refreshRecentDocuments(); }, this->window());
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部在线入库单"), this, [this] { refreshRecentDocuments(); });
@@ -181,10 +189,13 @@ void StockInPage::refreshReferenceData()
         for (const InspectionNotice &notice : std::as_const(notices)) {
             const QString supplier = notice.supplier.trimmed().isEmpty()
                 ? QStringLiteral("未填写供应商") : notice.supplier.trimmed();
+            const double availableQuantity = qMax(
+                0.0, notice.qualifiedQuantity - notice.inboundQuantity);
             m_inspectionCombo->addItem(
-                QStringLiteral("是｜%1｜%2｜%3条")
+                QStringLiteral("是｜%1｜%2｜%3条｜可入库%4")
                     .arg(notice.inspectionNumber, supplier)
-                    .arg(notice.lineCount),
+                    .arg(notice.lineCount)
+                    .arg(availableQuantity, 0, 'g', 12),
                 notice.id);
         }
     }
@@ -237,6 +248,7 @@ void StockInPage::updateInspectionRequirement()
     const qlonglong noticeId = m_inspectionCombo->currentData().toLongLong();
     if (noticeId <= 0) {
         m_loadedInspectionNoticeId = 0;
+        m_lines->setInspectionBatchMode(false);
         m_inspectionStatusLabel->setText(QStringLiteral("无需送检，可直接提交入库"));
         return;
     }
@@ -249,11 +261,11 @@ void StockInPage::updateInspectionRequirement()
         m_inspectionCombo->setCurrentIndex(0);
         return;
     }
-    if (notice.status != QStringLiteral("QUALIFIED")
-        || notice.inspectionResult != QStringLiteral("QUALIFIED")
-        || notice.linkedDocumentId > 0) {
+    if (notice.status == QStringLiteral("CANCELLED")
+        || notice.inspectionAttachmentId <= 0
+        || notice.qualifiedQuantity - notice.inboundQuantity <= 0.0000001) {
         QMessageBox::warning(this, QStringLiteral("送检通知不可用"),
-                             QStringLiteral("该送检通知尚未合格或已经用于其他入库单，请刷新后重新选择。"));
+                             QStringLiteral("该送检通知没有尚未入库的合格数量，请刷新后重新选择。"));
         m_inspectionCombo->setCurrentIndex(0);
         return;
     }
@@ -261,15 +273,19 @@ void StockInPage::updateInspectionRequirement()
     if (m_loadedInspectionNoticeId != noticeId) {
         QList<StockMovementRequest> materials;
         for (const InspectionNoticeLine &source : std::as_const(notice.lines)) {
+            const double availableQuantity = qMax(
+                0.0, source.qualifiedQuantity - source.inboundQuantity);
+            if (availableQuantity <= 0.0000001) continue;
             StockMovementRequest line;
             line.materialId = source.materialId;
-            line.quantity = source.quantity;
-            line.orderedQuantity = source.quantity;
+            line.quantity = availableQuantity;
+            line.orderedQuantity = availableQuantity;
             line.batchNo = source.batchNumber;
             line.supplier = source.supplier;
             materials.append(line);
         }
         if (!m_lines->setInboundMaterials(materials, &error)) {
+            m_lines->setInspectionBatchMode(false);
             QMessageBox::warning(this, QStringLiteral("载入送检物料失败"), error);
             m_inspectionCombo->setCurrentIndex(0);
             return;
@@ -280,7 +296,9 @@ void StockInPage::updateInspectionRequirement()
             m_purposeEdit->setText(notice.purchaseOrderNumber);
     }
     m_inspectionStatusLabel->setText(
-        QStringLiteral("已选择合格送检单 %1").arg(notice.inspectionNumber));
+        QStringLiteral("已选择送检单 %1，可入库合格数量 %2")
+            .arg(notice.inspectionNumber)
+            .arg(qMax(0.0, notice.qualifiedQuantity - notice.inboundQuantity), 0, 'g', 12));
 }
 
 void StockInPage::openInspectionForm()
@@ -288,7 +306,8 @@ void StockInPage::openInspectionForm()
     QMessageBox::information(
         this, QStringLiteral("材料送检说明"),
         QStringLiteral("需要送检时，请先在左侧“材料送检”模块填写通知单并登记检验结果。"
-                       "检验合格且上传附件后，该送检单会自动出现在这里的下拉列表中；"
+                       "录入合格数量并上传附件后，可入库的合格数量会自动出现在这里；"
+                       "不合格数量会继续保留在在检列表；"
                        "不需要送检时选择“否”即可直接入库。"));
 }
 
@@ -396,6 +415,7 @@ void StockInPage::submit()
     m_supplierEdit->clear();
     m_notesEdit->clear();
     m_lines->clearLines();
+    m_lines->setInspectionBatchMode(false);
     m_inspectionCombo->setCurrentIndex(0);
     m_loadedInspectionNoticeId = 0;
     emit stockChanged();

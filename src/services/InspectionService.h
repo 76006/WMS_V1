@@ -20,6 +20,9 @@ struct InspectionNoticeLine
     QString purchaseOrderNumber;
     QString batchNumber;
     QString supplier;
+    double qualifiedQuantity = 0.0;
+    double unqualifiedQuantity = 0.0;
+    double inboundQuantity = 0.0;
 };
 
 struct InspectionNoticeDraft
@@ -34,16 +37,22 @@ struct InspectionNoticeDraft
     QList<InspectionNoticeLine> lines;
 };
 
+struct InspectionNoticeLineResult
+{
+    qlonglong itemId = 0;
+    double qualifiedQuantity = 0.0;
+    double unqualifiedQuantity = 0.0;
+};
+
 struct InspectionNoticeResult
 {
     QDate inspectionDate;
     QString inspectorName;
-    // 仅允许 QUALIFIED 或 UNQUALIFIED。
-    QString result;
     QString conclusion;
     QString attachmentFileName;
     QString attachmentMimeType;
     QByteArray attachmentData;
+    QList<InspectionNoticeLineResult> lines;
 };
 
 struct InspectionTemplateArtifact
@@ -82,6 +91,10 @@ struct InspectionNotice
     QDateTime updatedAt;
     QDateTime completedAt;
     int lineCount = 0;
+    double totalQuantity = 0.0;
+    double qualifiedQuantity = 0.0;
+    double unqualifiedQuantity = 0.0;
+    double inboundQuantity = 0.0;
     QList<InspectionNoticeLine> lines;
 };
 

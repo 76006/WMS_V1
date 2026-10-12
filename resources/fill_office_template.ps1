@@ -160,25 +160,31 @@ function Expand-Table($sheet, [int]$firstRow, [int]$baseRows, [int]$requiredRows
     $extra = $requiredRows - $baseRows
     $insertAt = $firstRow + $baseRows
     $lastInsertRow = $insertAt + $extra - 1
-    $sheet.Range("$insertAt`:$lastInsertRow").EntireRow.Insert() | Out-Null
+    # WPS 的部分 COM 方法会返回 Boolean、Range 等对象。PowerShell 会把函数内
+    # 未接收的返回值一并作为函数结果输出，进而令调用方的 $extra 变成 Object[]。
+    # 所有 COM 操作结果都必须显式丢弃，保证本函数只返回扩展行数这一整数。
+    $null = $sheet.Range("$insertAt`:$lastInsertRow").EntireRow.Insert()
     $source = $sheet.Range($sheet.Cells.Item($insertAt - 1, 1),
                            $sheet.Cells.Item($insertAt - 1, $columnCount))
     $target = $sheet.Range($sheet.Cells.Item($insertAt, 1),
                            $sheet.Cells.Item($insertAt + $extra - 1, $columnCount))
-    $source.Copy()
-    $target.PasteSpecial(-4122) | Out-Null
-    $excel.CutCopyMode = 0
+    $null = $source.Copy()
+    $null = $target.PasteSpecial(-4122)
+    # Excel 的 CutCopyMode 属性不接受整数 0；用 Boolean False 才能兼容
+    # Microsoft Excel。清除复制状态不是生成表单的必要步骤，因此个别 Office
+    # 版本若仍拒绝该设置，也不能让整张表单填写失败。
+    try { $excel.CutCopyMode = $false } catch {}
     for ($row = $insertAt; $row -lt ($insertAt + $extra); $row++) {
         $sheet.Rows.Item($row).RowHeight = $sheet.Rows.Item($insertAt - 1).RowHeight
         if ($mergeIssueCells) {
-            $sheet.Range($sheet.Cells.Item($row, 5), $sheet.Cells.Item($row, 9)).Merge()
+            $null = $sheet.Range($sheet.Cells.Item($row, 5), $sheet.Cells.Item($row, 9)).Merge()
         }
         if ($mergeInspectionCells) {
-            $sheet.Range($sheet.Cells.Item($row, 5), $sheet.Cells.Item($row, 6)).Merge()
-            $sheet.Range($sheet.Cells.Item($row, 7), $sheet.Cells.Item($row, 8)).Merge()
+            $null = $sheet.Range($sheet.Cells.Item($row, 5), $sheet.Cells.Item($row, 6)).Merge()
+            $null = $sheet.Range($sheet.Cells.Item($row, 7), $sheet.Cells.Item($row, 8)).Merge()
         }
     }
-    return $extra
+    return [int]$extra
 }
 
 function Fill-Inspection($sheet, $data) {

@@ -41,6 +41,7 @@ private:
     QSqlDatabase m_database;
     Session m_session;
     QComboBox *m_runCombo = nullptr;
+    QLineEdit *m_batchEdit = nullptr;
     QLabel *m_productLabel = nullptr;
     QLabel *m_progressLabel = nullptr;
     QDateEdit *m_dateEdit = nullptr;
@@ -58,5 +59,7 @@ private:
     double m_plannedQuantity = 0.0;
     double m_receivedQuantity = 0.0;
     bool m_requireSerial = false;
+    bool m_requireBatch = false;
     QString m_productCode;
+    qlonglong m_currentSourceKey = 0;
 };

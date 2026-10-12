@@ -524,10 +524,10 @@ bool InventoryService::postProductionReturn(const ProductionReturnRequest &reque
 }
 
 bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &document,
-                                                 PostedDocument *postedDocument,
-                                                 QString *errorMessage)
+                                                  PostedDocument *postedDocument,
+                                                  QString *errorMessage)
 {
-    if (!m_database.isOpen() || m_operatorId <= 0 || document.productionRunId <= 0
+    if (!m_database.isOpen() || m_operatorId <= 0
         || !document.documentDate.isValid() || document.lines.size() != 1
         || document.submissionToken.trimmed().isEmpty()) {
         setProductionError(errorMessage, QStringLiteral("成品入库单头、明细或当前用户无效。"));
@@ -537,25 +537,43 @@ bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &docu
         return false;
     }
 
-    QSqlQuery run(m_database);
-    run.prepare(QStringLiteral(
-        "SELECT product_material_id, batch_no FROM production_runs WHERE id=?"));
-    run.addBindValue(document.productionRunId);
-    if (!run.exec() || !run.next()) {
-        setProductionError(errorMessage, QStringLiteral("找不到生产批次。"));
-        rollback();
-        return false;
-    }
-    const qlonglong productMaterialId = run.value(0).toLongLong();
-    const QString productionBatch = run.value(1).toString();
     StockMovementRequest movement = document.lines.first();
     movement.documentType = QStringLiteral("CPRK");
     movement.documentDate = document.documentDate;
-    movement.batchNo = productionBatch;
-    if (movement.materialId != productMaterialId) {
-        setProductionError(errorMessage, QStringLiteral("入库成品与生产批次中的成品不一致。"));
-        rollback();
-        return false;
+    QString productionBatch = movement.batchNo.trimmed();
+    if (document.productionRunId > 0) {
+        QSqlQuery run(m_database);
+        run.prepare(QStringLiteral(
+            "SELECT product_material_id, batch_no FROM production_runs WHERE id=?"));
+        run.addBindValue(document.productionRunId);
+        if (!run.exec() || !run.next()) {
+            setProductionError(errorMessage, QStringLiteral("找不到生产批次。"));
+            rollback();
+            return false;
+        }
+        const qlonglong productMaterialId = run.value(0).toLongLong();
+        productionBatch = run.value(1).toString();
+        movement.batchNo = productionBatch;
+        if (movement.materialId != productMaterialId) {
+            setProductionError(errorMessage, QStringLiteral("入库成品与生产批次中的成品不一致。"));
+            rollback();
+            return false;
+        }
+    } else {
+        // 外部生产成品没有本系统的 production_runs 记录，只校验物料档案。
+        // 若物料启用了批次管理，后续 validateMovement 仍会要求填写库存批号。
+        QSqlQuery product(m_database);
+        product.prepare(QStringLiteral(
+            "SELECT 1 FROM materials m JOIN material_categories c ON c.id=m.category_id "
+            "WHERE m.id=? AND m.is_active=1 AND c.code='FINISHED'"));
+        product.addBindValue(movement.materialId);
+        if (!product.exec() || !product.next()) {
+            setProductionError(errorMessage,
+                               QStringLiteral("所选物料不存在、已停用或不属于成品分类。"));
+            rollback();
+            return false;
+        }
+        movement.batchNo = productionBatch;
     }
 
     QString detail;
@@ -573,9 +591,13 @@ bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &docu
         : createDocument(number, QStringLiteral("CPRK"), QStringLiteral("IN"),
                          document.documentDate, document.handlerName, document.purpose,
                          document.notes, QVariant(), errorMessage);
-    if (documentId <= 0
-        || !setDocumentProductionContext(documentId, document.productionRunId,
-                                          document.submissionToken, errorMessage)) {
+    const bool contextSaved = documentId > 0
+        && (document.productionRunId > 0
+                ? setDocumentProductionContext(documentId, document.productionRunId,
+                                               document.submissionToken, errorMessage)
+                : setDocumentSubmissionToken(documentId, document.submissionToken,
+                                             errorMessage));
+    if (!contextSaved) {
         rollback();
         return false;
     }
@@ -600,7 +622,7 @@ bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &docu
         rollback();
         return false;
     }
-    if (!movement.serialNumbers.isEmpty()) {
+    if (document.productionRunId > 0 && !movement.serialNumbers.isEmpty()) {
         QSqlQuery serialBatch(m_database);
         serialBatch.prepare(QStringLiteral(
             "UPDATE serial_numbers SET production_batch=? WHERE last_document_id=?"));
@@ -612,19 +634,26 @@ bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &docu
             return false;
         }
     }
-    QSqlQuery batch(m_database);
-    batch.prepare(QStringLiteral(
-        "INSERT OR IGNORE INTO batches(material_id, batch_no, first_in_at) VALUES(?, ?, ?)"));
-    batch.addBindValue(movement.materialId);
-    batch.addBindValue(productionBatch);
-    batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
-    if (!batch.exec() || !finalizeDocument(documentId, errorMessage)
-        || !refreshProductionRunStatus(document.productionRunId, errorMessage)
+    bool batchSaved = true;
+    QString batchError;
+    if (!productionBatch.isEmpty()) {
+        QSqlQuery batch(m_database);
+        batch.prepare(QStringLiteral(
+            "INSERT OR IGNORE INTO batches(material_id, batch_no, first_in_at) VALUES(?, ?, ?)"));
+        batch.addBindValue(movement.materialId);
+        batch.addBindValue(productionBatch);
+        batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+        batchSaved = batch.exec();
+        if (!batchSaved) batchError = batch.lastError().text();
+    }
+    if (!batchSaved || !finalizeDocument(documentId, errorMessage)
+        || (document.productionRunId > 0
+            && !refreshProductionRunStatus(document.productionRunId, errorMessage))
         || !writeAudit(QStringLiteral("POST"), QStringLiteral("business_document"),
                        documentId, number, errorMessage)
         || !commit(errorMessage)) {
         if (errorMessage && errorMessage->isEmpty()) {
-            *errorMessage = batch.lastError().text();
+            *errorMessage = batchError;
         }
         rollback();
         return false;

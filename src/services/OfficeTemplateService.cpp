@@ -1480,11 +1480,29 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         document.fields.insert(QStringLiteral("salesOrderNumber"), header.value(11).toString());
         document.fields.insert(QStringLiteral("logisticsCompany"), header.value(12).toString());
         document.fields.insert(QStringLiteral("trackingNumber"), header.value(13).toString());
-        document.fields.insert(QStringLiteral("productionBatch"), header.value(15).toString());
-        document.fields.insert(QStringLiteral("productName"), header.value(16).toString());
-        document.fields.insert(QStringLiteral("productModel"), header.value(17).toString());
-        document.fields.insert(QStringLiteral("plannedQuantity"),
-                               QString::number(header.value(18).toDouble(), 'g', 12));
+        const QString productionBatch = header.value(15).toString();
+        const QString productName = header.value(16).toString();
+        const QString productModel = header.value(17).toString();
+        if (!productionBatch.trimmed().isEmpty())
+            document.fields.insert(QStringLiteral("productionBatch"), productionBatch);
+        else
+            document.fields.insert(QStringLiteral("productionBatch"),
+                                   originalFields.value(QStringLiteral("productionBatch")));
+        if (!productName.trimmed().isEmpty())
+            document.fields.insert(QStringLiteral("productName"), productName);
+        else
+            document.fields.insert(QStringLiteral("productName"),
+                                   originalFields.value(QStringLiteral("productName")));
+        if (!productModel.trimmed().isEmpty())
+            document.fields.insert(QStringLiteral("productModel"), productModel);
+        else
+            document.fields.insert(QStringLiteral("productModel"),
+                                   originalFields.value(QStringLiteral("productModel")));
+        document.fields.insert(
+            QStringLiteral("plannedQuantity"),
+            header.value(18).toDouble() > 0.0
+                ? QString::number(header.value(18).toDouble(), 'g', 12)
+                : originalFields.value(QStringLiteral("plannedQuantity")));
         if (kind == OfficeFormKind::ProductionIssue) {
             document.fields.insert(QStringLiteral("issueType"), documentType);
             document.fields.insert(QStringLiteral("hasProductionContext"),

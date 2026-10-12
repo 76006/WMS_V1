@@ -1,6 +1,7 @@
 #include "services/InspectionService.h"
 
 #include <QCryptographicHash>
+#include <QMap>
 #include <QRegularExpression>
 #include <QSet>
 #include <QSqlError>
@@ -70,6 +71,10 @@ void readNoticeColumns(const QSqlQuery &query, InspectionNotice *notice)
     notice->updatedAt = dateTimeValue(query.value(22));
     notice->completedAt = dateTimeValue(query.value(23));
     notice->lineCount = query.value(24).toInt();
+    notice->totalQuantity = query.value(25).toDouble();
+    notice->qualifiedQuantity = query.value(26).toDouble();
+    notice->unqualifiedQuantity = query.value(27).toDouble();
+    notice->inboundQuantity = query.value(28).toDouble();
 }
 
 QString noticeSelectColumns()
@@ -80,7 +85,11 @@ QString noticeSelectColumns()
         "n.inspection_date,n.inspection_result,n.conclusion,n.inspection_attachment_id,"
         "n.template_file_attachment_id,n.template_payload,n.archive_path,n.linked_document_id,"
         "n.created_by,COALESCE(u.display_name,''),n.created_at,n.updated_at,n.completed_at,"
-        "(SELECT COUNT(*) FROM inspection_notice_items i WHERE i.notice_id=n.id) ");
+        "(SELECT COUNT(*) FROM inspection_notice_items i WHERE i.notice_id=n.id),"
+        "COALESCE((SELECT SUM(i.quantity) FROM inspection_notice_items i WHERE i.notice_id=n.id),0),"
+        "COALESCE((SELECT SUM(i.qualified_quantity) FROM inspection_notice_items i WHERE i.notice_id=n.id),0),"
+        "COALESCE((SELECT SUM(i.unqualified_quantity) FROM inspection_notice_items i WHERE i.notice_id=n.id),0),"
+        "COALESCE((SELECT SUM(i.inbound_quantity) FROM inspection_notice_items i WHERE i.notice_id=n.id),0) ");
 }
 }
 
@@ -191,6 +200,32 @@ bool InspectionService::replaceLines(qlonglong noticeId,
                                      const QList<InspectionNoticeLine> &lines,
                                      QString *errorMessage)
 {
+    struct ExistingResult {
+        qlonglong materialId = 0;
+        double quantity = 0.0;
+        QString batchNumber;
+        double qualifiedQuantity = 0.0;
+        double unqualifiedQuantity = 0.0;
+        double inboundQuantity = 0.0;
+    };
+    QMap<qlonglong, ExistingResult> existingResults;
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "SELECT id,material_id,quantity,batch_no,qualified_quantity,unqualified_quantity,"
+        "inbound_quantity FROM inspection_notice_items WHERE notice_id=?"));
+    existing.addBindValue(noticeId);
+    if (!existing.exec()) {
+        setError(errorMessage, QStringLiteral("读取原送检明细失败：%1")
+                                   .arg(existing.lastError().text()));
+        return false;
+    }
+    while (existing.next()) {
+        existingResults.insert(existing.value(0).toLongLong(),
+            {existing.value(1).toLongLong(), existing.value(2).toDouble(),
+             existing.value(3).toString(), existing.value(4).toDouble(),
+             existing.value(5).toDouble(), existing.value(6).toDouble()});
+    }
+
     QSqlQuery remove(m_database);
     remove.prepare(QStringLiteral("DELETE FROM inspection_notice_items WHERE notice_id=?"));
     remove.addBindValue(noticeId);
@@ -201,9 +236,31 @@ bool InspectionService::replaceLines(qlonglong noticeId,
     QSqlQuery insert(m_database);
     insert.prepare(QStringLiteral(
         "INSERT INTO inspection_notice_items(notice_id,line_number,material_id,quantity,"
-        "purchase_order_no,batch_no,supplier) VALUES(?,?,?,?,?,?,?)"));
+        "purchase_order_no,batch_no,supplier,qualified_quantity,unqualified_quantity,"
+        "inbound_quantity) VALUES(?,?,?,?,?,?,?,?,?,?)"));
     for (int index = 0; index < lines.size(); ++index) {
         const InspectionNoticeLine &line = lines.at(index);
+        double qualifiedQuantity = 0.0;
+        double unqualifiedQuantity = 0.0;
+        double inboundQuantity = 0.0;
+        const auto previous = existingResults.constFind(line.id);
+        if (previous != existingResults.cend()) {
+            const bool sameIdentity = previous->materialId == line.materialId
+                && previous->batchNumber.trimmed().compare(
+                    line.batchNumber.trimmed(), Qt::CaseInsensitive) == 0
+                && std::abs(previous->quantity - line.quantity) <= QuantityTolerance;
+            if (!sameIdentity && previous->inboundQuantity > QuantityTolerance) {
+                setError(errorMessage,
+                         QStringLiteral("第 %1 行已有合格品入库，不能改变该行物料、批号或送检数量。")
+                             .arg(index + 1));
+                return false;
+            }
+            if (sameIdentity) {
+                qualifiedQuantity = previous->qualifiedQuantity;
+                unqualifiedQuantity = previous->unqualifiedQuantity;
+                inboundQuantity = previous->inboundQuantity;
+            }
+        }
         insert.bindValue(0, noticeId);
         insert.bindValue(1, index + 1);
         insert.bindValue(2, line.materialId);
@@ -211,6 +268,9 @@ bool InspectionService::replaceLines(qlonglong noticeId,
         insert.bindValue(4, textValue(line.purchaseOrderNumber));
         insert.bindValue(5, textValue(line.batchNumber));
         insert.bindValue(6, textValue(line.supplier));
+        insert.bindValue(7, qualifiedQuantity);
+        insert.bindValue(8, unqualifiedQuantity);
+        insert.bindValue(9, inboundQuantity);
         if (!insert.exec()) {
             setError(errorMessage, QStringLiteral("保存第 %1 行送检明细失败：%2")
                                        .arg(index + 1).arg(insert.lastError().text()));
@@ -355,6 +415,32 @@ bool InspectionService::updateNotice(qlonglong noticeId,
         rollback();
         return false;
     }
+    QSqlQuery refreshResult(m_database);
+    refreshResult.prepare(QStringLiteral(
+        "UPDATE inspection_notices SET status=CASE "
+        "WHEN EXISTS(SELECT 1 FROM inspection_notice_items i WHERE i.notice_id=inspection_notices.id "
+        "AND ABS(i.quantity-i.qualified_quantity-i.unqualified_quantity)>0.0000001) THEN 'PENDING' "
+        "WHEN EXISTS(SELECT 1 FROM inspection_notice_items i WHERE i.notice_id=inspection_notices.id "
+        "AND i.unqualified_quantity>0.0000001) THEN 'PENDING' "
+        "WHEN EXISTS(SELECT 1 FROM inspection_notice_items i WHERE i.notice_id=inspection_notices.id "
+        "AND i.qualified_quantity-i.inbound_quantity>0.0000001) THEN 'QUALIFIED' ELSE 'USED' END,"
+        "inspection_result=CASE "
+        "WHEN EXISTS(SELECT 1 FROM inspection_notice_items i WHERE i.notice_id=inspection_notices.id "
+        "AND ABS(i.quantity-i.qualified_quantity-i.unqualified_quantity)>0.0000001) THEN 'PENDING' "
+        "WHEN EXISTS(SELECT 1 FROM inspection_notice_items i WHERE i.notice_id=inspection_notices.id "
+        "AND i.unqualified_quantity>0.0000001) THEN 'UNQUALIFIED' ELSE 'QUALIFIED' END,"
+        "completed_at=CASE WHEN EXISTS(SELECT 1 FROM inspection_notice_items i "
+        "WHERE i.notice_id=inspection_notices.id "
+        "AND ABS(i.quantity-i.qualified_quantity-i.unqualified_quantity)>0.0000001) "
+        "THEN NULL ELSE COALESCE(completed_at,?) END WHERE id=?"));
+    refreshResult.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    refreshResult.addBindValue(noticeId);
+    if (!refreshResult.exec()) {
+        setError(errorMessage, QStringLiteral("更新送检结果状态失败：%1")
+                                   .arg(refreshResult.lastError().text()));
+        rollback();
+        return false;
+    }
     QSqlQuery syncInbound(m_database);
     syncInbound.prepare(QStringLiteral(
         "UPDATE inbound_inspection_details SET inspection_no=? WHERE inspection_notice_id=?"));
@@ -397,7 +483,8 @@ bool InspectionService::readNotice(qlonglong noticeId,
     QSqlQuery lines(m_database);
     lines.prepare(QStringLiteral(
         "SELECT i.id,i.line_number,i.material_id,m.code,m.name,m.specification,i.quantity,"
-        "i.purchase_order_no,i.batch_no,i.supplier FROM inspection_notice_items i "
+        "i.purchase_order_no,i.batch_no,i.supplier,i.qualified_quantity,"
+        "i.unqualified_quantity,i.inbound_quantity FROM inspection_notice_items i "
         "JOIN materials m ON m.id=i.material_id WHERE i.notice_id=? ORDER BY i.line_number"));
     lines.addBindValue(noticeId);
     if (!lines.exec()) {
@@ -416,6 +503,9 @@ bool InspectionService::readNotice(qlonglong noticeId,
         line.purchaseOrderNumber = lines.value(7).toString();
         line.batchNumber = lines.value(8).toString();
         line.supplier = lines.value(9).toString();
+        line.qualifiedQuantity = lines.value(10).toDouble();
+        line.unqualifiedQuantity = lines.value(11).toDouble();
+        line.inboundQuantity = lines.value(12).toDouble();
         result.lines.append(line);
     }
     *notice = result;
@@ -477,9 +567,14 @@ bool InspectionService::listNotices(const QStringList &statuses,
 bool InspectionService::listQualifiedUnused(QList<InspectionNotice> *notices,
                                             QString *errorMessage) const
 {
-    if (!listNotices({QStringLiteral("QUALIFIED")}, QString(), notices, errorMessage)) return false;
+    if (!listNotices({QStringLiteral("PENDING"), QStringLiteral("QUALIFIED")},
+                     QString(), notices, errorMessage)) return false;
     for (int index = notices->size() - 1; index >= 0; --index) {
-        if (notices->at(index).linkedDocumentId > 0) notices->removeAt(index);
+        const InspectionNotice &notice = notices->at(index);
+        if (notice.inspectionAttachmentId <= 0
+            || notice.qualifiedQuantity - notice.inboundQuantity <= QuantityTolerance) {
+            notices->removeAt(index);
+        }
     }
     return true;
 }
@@ -519,12 +614,9 @@ bool InspectionService::recordResult(qlonglong noticeId,
                                      const InspectionNoticeResult &result,
                                      QString *errorMessage)
 {
-    const QString normalizedResult = result.result.trimmed().toUpper();
     if (noticeId <= 0 || m_operatorId <= 0 || !result.inspectionDate.isValid()
-        || result.inspectorName.trimmed().isEmpty()
-        || (normalizedResult != QStringLiteral("QUALIFIED")
-            && normalizedResult != QStringLiteral("UNQUALIFIED"))) {
-        setError(errorMessage, QStringLiteral("检验日期、检验员或检验结果无效。"));
+        || result.inspectorName.trimmed().isEmpty() || result.lines.isEmpty()) {
+        setError(errorMessage, QStringLiteral("检验日期、检验员或检验数量无效。"));
         return false;
     }
     if (result.attachmentData.size() > MaximumAttachmentBytes) {
@@ -535,10 +627,22 @@ bool InspectionService::recordResult(qlonglong noticeId,
         setError(errorMessage, QStringLiteral("检验附件缺少文件名。"));
         return false;
     }
+    QMap<qlonglong, InspectionNoticeLineResult> enteredLines;
+    for (const InspectionNoticeLineResult &line : result.lines) {
+        if (line.itemId <= 0 || !std::isfinite(line.qualifiedQuantity)
+            || !std::isfinite(line.unqualifiedQuantity)
+            || line.qualifiedQuantity < -QuantityTolerance
+            || line.unqualifiedQuantity < -QuantityTolerance
+            || enteredLines.contains(line.itemId)) {
+            setError(errorMessage, QStringLiteral("检验明细包含无效或重复的合格/不合格数量。"));
+            return false;
+        }
+        enteredLines.insert(line.itemId, line);
+    }
     if (!beginImmediate(errorMessage)) return false;
     QSqlQuery current(m_database);
     current.prepare(QStringLiteral(
-        "SELECT status,linked_document_id,inspection_attachment_id FROM inspection_notices WHERE id=?"));
+        "SELECT status,inspection_attachment_id FROM inspection_notices WHERE id=?"));
     current.addBindValue(noticeId);
     if (!current.exec() || !current.next()) {
         setError(errorMessage, QStringLiteral("送检通知不存在或读取失败：%1").arg(current.lastError().text()));
@@ -546,10 +650,68 @@ bool InspectionService::recordResult(qlonglong noticeId,
         return false;
     }
     const QString status = current.value(0).toString();
-    qlonglong attachmentId = current.value(2).toLongLong();
-    if (normalizedResult == QStringLiteral("QUALIFIED")
+    if (status == QStringLiteral("CANCELLED")) {
+        setError(errorMessage, QStringLiteral("已取消的送检通知不能录入检验结果。"));
+        rollback();
+        return false;
+    }
+
+    double totalQualified = 0.0;
+    double totalUnqualified = 0.0;
+    double totalInbound = 0.0;
+    int storedLineCount = 0;
+    QSqlQuery items(m_database);
+    items.prepare(QStringLiteral(
+        "SELECT id,line_number,quantity,inbound_quantity FROM inspection_notice_items "
+        "WHERE notice_id=? ORDER BY line_number"));
+    items.addBindValue(noticeId);
+    if (!items.exec()) {
+        setError(errorMessage, QStringLiteral("读取送检数量失败：%1").arg(items.lastError().text()));
+        rollback();
+        return false;
+    }
+    while (items.next()) {
+        ++storedLineCount;
+        const qlonglong itemId = items.value(0).toLongLong();
+        const int lineNumber = items.value(1).toInt();
+        const double quantity = items.value(2).toDouble();
+        const double inboundQuantity = items.value(3).toDouble();
+        const auto entered = enteredLines.constFind(itemId);
+        if (entered == enteredLines.cend()) {
+            setError(errorMessage, QStringLiteral("第 %1 行缺少合格或不合格数量。")
+                                       .arg(lineNumber));
+            rollback();
+            return false;
+        }
+        if (std::abs(entered->qualifiedQuantity + entered->unqualifiedQuantity - quantity)
+                > QuantityTolerance) {
+            setError(errorMessage,
+                     QStringLiteral("第 %1 行合格数量与不合格数量之和必须等于送检数量 %2。")
+                         .arg(lineNumber).arg(quantity, 0, 'g', 12));
+            rollback();
+            return false;
+        }
+        if (entered->qualifiedQuantity + QuantityTolerance < inboundQuantity) {
+            setError(errorMessage,
+                     QStringLiteral("第 %1 行已有 %2 个合格品完成入库，合格数量不能低于已入库数量。")
+                         .arg(lineNumber).arg(inboundQuantity, 0, 'g', 12));
+            rollback();
+            return false;
+        }
+        totalQualified += entered->qualifiedQuantity;
+        totalUnqualified += entered->unqualifiedQuantity;
+        totalInbound += inboundQuantity;
+    }
+    if (storedLineCount != enteredLines.size()) {
+        setError(errorMessage, QStringLiteral("检验明细与当前送检通知不一致，请关闭窗口后重新打开。"));
+        rollback();
+        return false;
+    }
+
+    qlonglong attachmentId = current.value(1).toLongLong();
+    if (totalQualified > QuantityTolerance
         && result.attachmentData.isEmpty() && attachmentId <= 0) {
-        setError(errorMessage, QStringLiteral("检验合格必须上传检验附件。"));
+        setError(errorMessage, QStringLiteral("存在合格数量时必须上传检验附件。"));
         rollback();
         return false;
     }
@@ -567,14 +729,37 @@ bool InspectionService::recordResult(qlonglong noticeId,
         }
         attachmentId = replacementId;
     }
+
+    QSqlQuery updateItem(m_database);
+    updateItem.prepare(QStringLiteral(
+        "UPDATE inspection_notice_items SET qualified_quantity=?,unqualified_quantity=? "
+        "WHERE id=? AND notice_id=?"));
+    for (auto entered = enteredLines.cbegin(); entered != enteredLines.cend(); ++entered) {
+        updateItem.bindValue(0, qMax(0.0, entered->qualifiedQuantity));
+        updateItem.bindValue(1, qMax(0.0, entered->unqualifiedQuantity));
+        updateItem.bindValue(2, entered.key());
+        updateItem.bindValue(3, noticeId);
+        if (!updateItem.exec() || updateItem.numRowsAffected() != 1) {
+            setError(errorMessage, QStringLiteral("保存送检明细数量失败：%1")
+                                       .arg(updateItem.lastError().text()));
+            rollback();
+            return false;
+        }
+    }
+
+    const QString normalizedResult = totalUnqualified > QuantityTolerance
+        ? QStringLiteral("UNQUALIFIED") : QStringLiteral("QUALIFIED");
+    const QString nextStatus = totalUnqualified > QuantityTolerance
+        ? QStringLiteral("PENDING")
+        : (totalQualified - totalInbound > QuantityTolerance
+               ? QStringLiteral("QUALIFIED") : QStringLiteral("USED"));
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral(
-        "UPDATE inspection_notices SET status=CASE WHEN linked_document_id IS NOT NULL THEN 'USED' ELSE ? END,"
-        "inspector_name=?,inspection_date=?,"
+        "UPDATE inspection_notices SET status=?,inspector_name=?,inspection_date=?,"
         "inspection_result=?,conclusion=?,inspection_attachment_id=?,updated_by=?,updated_at=?,"
         "completed_at=? WHERE id=?"));
     const QString now = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
-    update.addBindValue(normalizedResult);
+    update.addBindValue(nextStatus);
     update.addBindValue(textValue(result.inspectorName));
     update.addBindValue(result.inspectionDate.toString(Qt::ISODate));
     update.addBindValue(normalizedResult);
@@ -594,16 +779,19 @@ bool InspectionService::recordResult(qlonglong noticeId,
     QSqlQuery syncInbound(m_database);
     syncInbound.prepare(QStringLiteral(
         "UPDATE inbound_inspection_details SET inspection_date=?,inspector_name=?,"
-        "inspection_result=?,conclusion=?,inspection_attachment_id=? WHERE inspection_notice_id=?"));
+        "conclusion=?,inspection_attachment_id=? WHERE inspection_notice_id=?"));
     syncInbound.addBindValue(result.inspectionDate.toString(Qt::ISODate));
     syncInbound.addBindValue(textValue(result.inspectorName));
-    syncInbound.addBindValue(normalizedResult);
     syncInbound.addBindValue(textValue(result.conclusion));
     syncInbound.addBindValue(attachmentId > 0 ? QVariant(attachmentId) : QVariant());
     syncInbound.addBindValue(noticeId);
     if (!syncInbound.exec()
         || !writeAudit(QStringLiteral("INSPECTION_RESULT_RECORD"), noticeId,
-                       QStringLiteral("%1 / %2").arg(status, normalizedResult), errorMessage)
+                       QStringLiteral("%1 -> %2 / 合格%3 / 不合格%4")
+                           .arg(status, nextStatus)
+                           .arg(totalQualified, 0, 'g', 12)
+                           .arg(totalUnqualified, 0, 'g', 12),
+                       errorMessage)
         || !commit(errorMessage)) {
         if (errorMessage && errorMessage->isEmpty()) {
             setError(errorMessage, QStringLiteral("送检通知已被其他操作改变，请刷新后重试。"));

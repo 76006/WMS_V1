@@ -156,6 +156,14 @@ ProductionReturnPage::ProductionReturnPage(QSqlDatabase database,
         TableExcelExport::editSelectedBusinessDocument(
             m_recentTable, this, [this] { refreshRecentDocuments(); });
     });
+    connect(m_recentTable, &QTableWidget::cellDoubleClicked, this,
+            [this](int row, int) {
+        m_recentTable->setCurrentCell(row, 0);
+        m_recentTable->selectRow(row);
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, m_recentTable->window(),
+            [this] { refreshRecentDocuments(); }, this->window());
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部生产退料单"), this, [this] { refreshRecentDocuments(); });

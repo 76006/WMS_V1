@@ -1155,7 +1155,7 @@ bool InventoryService::validateMovement(const StockMovementRequest &request,
         }
         QSet<QString> unique;
         for (const QString &serial : request.serialNumbers) {
-            const QString normalized = serial.trimmed().toUpper();
+            const QString normalized = serial.trimmed().toCaseFolded();
             if (normalized.isEmpty() || unique.contains(normalized)) {
                 setError(errorMessage, QStringLiteral("SN不能为空且不能重复。"));
                 return false;
@@ -1426,7 +1426,8 @@ bool InventoryService::attachSerialsToInbound(const StockMovementRequest &reques
 {
     const QString inboundAt = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     for (const QString &serial : request.serialNumbers) {
-        const QString serialNo = serial.trimmed().toUpper();
+        // serial_no 使用 NOCASE 唯一约束负责不区分大小写的唯一性，实际存储保留用户输入。
+        const QString serialNo = serial.trimmed();
         // 全局SN唯一：普通入库仅允许同物料的已作废SN复用；盘点调整还可将
         // 同物料的已出库SN重新确认为在库，并始终保留原SN主键和历史流水关联。
         QSqlQuery existing(m_database);
@@ -1455,12 +1456,13 @@ bool InventoryService::attachSerialsToInbound(const StockMovementRequest &reques
             }
             QSqlQuery reuse(m_database);
             reuse.prepare(QStringLiteral(
-                "UPDATE serial_numbers SET status='IN_STOCK', batch_no=?, warehouse_id=?, "
+                "UPDATE serial_numbers SET serial_no=?, status='IN_STOCK', batch_no=?, warehouse_id=?, "
                 "location_id=?, production_batch='', inbound_at=?, outbound_at=NULL, "
                 "last_document_id=? WHERE id=? AND material_id=? AND %1")
                               .arg(allowOutboundForCountAdjustment
                                        ? QStringLiteral("status IN ('VOIDED','OUTBOUND')")
                                        : QStringLiteral("status='VOIDED'")));
+            reuse.addBindValue(serialNo);
             reuse.addBindValue(databaseText(request.batchNo));
             reuse.addBindValue(request.warehouseId);
             reuse.addBindValue(request.locationId);
@@ -1512,7 +1514,7 @@ bool InventoryService::attachSerialsToOutbound(const StockMovementRequest &reque
         select.prepare(QStringLiteral(
             "SELECT id FROM serial_numbers WHERE serial_no=? AND material_id=? AND batch_no=? "
             "AND status='IN_STOCK' AND warehouse_id=? AND location_id=?"));
-        select.addBindValue(serial.trimmed().toUpper());
+        select.addBindValue(serial.trimmed());
         select.addBindValue(request.materialId);
         select.addBindValue(databaseText(request.batchNo));
         select.addBindValue(request.warehouseId);

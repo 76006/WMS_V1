@@ -42,6 +42,7 @@ private:
     Session m_session;
     QComboBox *m_issueTypeCombo = nullptr;
     QComboBox *m_productCombo = nullptr;
+    QLineEdit *m_productModelEdit = nullptr;
     QLineEdit *m_batchEdit = nullptr;
     QDoubleSpinBox *m_plannedQuantity = nullptr;
     QDateEdit *m_dateEdit = nullptr;

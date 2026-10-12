@@ -9,6 +9,7 @@
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QModelIndex;
 class QPushButton;
 class QSqlQueryModel;
 class QTableView;
@@ -29,6 +30,7 @@ private slots:
     void loadSelectedShipmentDetails();
     void openSelectedDeliveryForm();
     void editSelectedReceipt();
+    void showSelectedProductDetails(const QModelIndex &index);
 
 private:
     void loadFilterOptions();

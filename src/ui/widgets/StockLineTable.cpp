@@ -82,7 +82,7 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     root->setSpacing(8);
     m_toolbarLayout = new QHBoxLayout;
     auto *hint = new QLabel(m_mode == Mode::Inbound
-                                ? QStringLiteral("逐行选择入库物料、目标库位、批次和数量")
+                                ? QStringLiteral("逐行选择入库物料、目标库位、批号和数量")
                                 : QStringLiteral("逐行选择出库物料、库存批次和数量"), this);
     hint->setObjectName(QStringLiteral("mutedText"));
     auto *addButton = new QPushButton(QStringLiteral("添加物料"), this);
@@ -102,7 +102,9 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
 
     m_table = new QTableWidget(0, 16, this);
     m_table->setHorizontalHeaderLabels({QStringLiteral("物料"), QStringLiteral("仓库"),
-                                        QStringLiteral("库位"), QStringLiteral("批次"),
+                                        QStringLiteral("库位"),
+                                        m_mode == Mode::Inbound ? QStringLiteral("批号")
+                                                                : QStringLiteral("批次"),
                                         QStringLiteral("当前库存"),
                                         QStringLiteral("单台用量"),
                                         QStringLiteral("采购数量"),
@@ -302,6 +304,9 @@ void StockLineTable::addLine()
                 }
                 const int currentRow = rowForWidget(material, MaterialColumn);
                 if (currentRow >= 0) {
+                    if (m_mode == Mode::Inbound && m_inspectionBatchMode) {
+                        setBatchText(comboAt(currentRow, BatchColumn), QString(), false);
+                    }
                     loadUnitUsage(currentRow);
                     loadWarehouses(currentRow);
                 }
@@ -442,6 +447,15 @@ bool StockLineTable::setInboundMaterials(const QList<StockMovementRequest> &mate
         return false;
     }
 
+    m_inspectionBatchMode = true;
+    m_inspectionBatchNumbers.clear();
+    for (const StockMovementRequest &source : materials) {
+        if (source.materialId > 0 && !source.batchNo.trimmed().isEmpty()
+            && !m_inspectionBatchNumbers.contains(source.materialId)) {
+            m_inspectionBatchNumbers.insert(source.materialId, source.batchNo.trimmed());
+        }
+    }
+
     m_table->setUpdatesEnabled(false);
     m_table->setRowCount(0);
     QString missingMaterial;
@@ -457,9 +471,12 @@ bool StockLineTable::setInboundMaterials(const QList<StockMovementRequest> &mate
         material->setCurrentIndex(materialIndex);
         material->setProperty("inspectionSupplier", source.supplier);
 
-        if (QComboBox *batch = comboAt(row, BatchColumn); batch && batch->isEnabled()) {
+        if (QComboBox *batch = comboAt(row, BatchColumn)) {
             setBatchText(batch, source.batchNo.trimmed(), false);
             if (source.batchNo.trimmed().isEmpty()) assignAutomaticBatch(row);
+            // 送检单批号自动带入后仍允许人工修改；提交时服务层会再次校验
+            // 物料及批号是否与所选送检单一致。
+            batch->setEnabled(true);
         }
         auto *ordered = qobject_cast<QDoubleSpinBox *>(
             m_table->cellWidget(row, OrderedColumn));
@@ -484,6 +501,13 @@ bool StockLineTable::setInboundMaterials(const QList<StockMovementRequest> &mate
     if (materials.isEmpty()) addLine();
     refreshRowNumbers();
     return true;
+}
+
+void StockLineTable::setInspectionBatchMode(bool enabled)
+{
+    if (m_mode != Mode::Inbound) return;
+    m_inspectionBatchMode = enabled;
+    if (!enabled) m_inspectionBatchNumbers.clear();
 }
 
 void StockLineTable::setProductionUsageMode(bool enabled)
@@ -803,14 +827,17 @@ void StockLineTable::loadBatches(int row)
     if (m_mode == Mode::Inbound) {
         const bool requiresBatch = selectedMaterialId(material) > 0
             && material->currentData(RequireBatchRole).toBool();
-        batch->setEnabled(requiresBatch);
-        if (!requiresBatch) {
+        if (m_inspectionBatchMode && selectedMaterialId(material) > 0) {
+            batch->setEnabled(true);
+            if (batch->currentText().trimmed().isEmpty()) assignAutomaticBatch(row);
+        } else if (!requiresBatch) {
+            batch->setEnabled(false);
             // 不管理批次的物料不得沿用上一种物料的批次。
             setBatchText(batch, QString(), false);
-        } else if (batch->currentText().trimmed().isEmpty()) {
-            assignAutomaticBatch(row);
         } else {
-            batch->setToolTip(batch->currentText().trimmed());
+            batch->setEnabled(true);
+            if (batch->currentText().trimmed().isEmpty()) assignAutomaticBatch(row);
+            else batch->setToolTip(batch->currentText().trimmed());
         }
     } else {
         batch->setToolTip(batch->currentText().trimmed());
@@ -826,10 +853,23 @@ void StockLineTable::assignAutomaticBatch(int row)
     QComboBox *material = comboAt(row, MaterialColumn);
     QComboBox *batch = comboAt(row, BatchColumn);
     if (!material || !batch || selectedMaterialId(material) <= 0
-        || !material->currentData(RequireBatchRole).toBool()
         || !batch->currentText().trimmed().isEmpty()) {
         return;
     }
+
+    if (m_inspectionBatchMode) {
+        const QString inspectionBatch = m_inspectionBatchNumbers
+                                            .value(selectedMaterialId(material)).trimmed();
+        if (!inspectionBatch.isEmpty()) {
+            setBatchText(batch, inspectionBatch, false);
+            updateAvailable(row);
+        } else {
+            batch->setToolTip(QStringLiteral("所选物料不在当前送检单中，没有可自动带入的批号"));
+        }
+        return;
+    }
+
+    if (!material->currentData(RequireBatchRole).toBool()) return;
 
     const QString generated = nextAutomaticBatchNumber(row);
     if (generated.isEmpty()) {

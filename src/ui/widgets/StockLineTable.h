@@ -3,6 +3,7 @@
 #include "services/InventoryService.h"
 
 #include <QDate>
+#include <QHash>
 #include <QPair>
 #include <QSqlDatabase>
 #include <QWidget>
@@ -41,6 +42,8 @@ public slots:
     void setPurchaseMode(bool enabled);
     void setProductionUsageMode(bool enabled);
     void setIssueOptionsMode(bool enabled);
+    // 选择送检单时使用送检明细中的物料—批号对应关系；关闭后恢复流水批号。
+    void setInspectionBatchMode(bool enabled);
     // 适用于领料页面：删除最后一行后保持空表，由用户主动点击“添加物料”。
     void setKeepEmptyWhenNoRows(bool enabled);
     void setProductionQuantity(double quantity);
@@ -73,6 +76,8 @@ private:
     bool m_purchaseMode = false;
     bool m_productionUsageMode = false;
     bool m_issueOptionsMode = false;
+    bool m_inspectionBatchMode = false;
+    QHash<qlonglong, QString> m_inspectionBatchNumbers;
     bool m_keepEmptyWhenNoRows = false;
     bool m_forceKeepEmptyWhenNoRows = false;
     double m_productionQuantity = 1.0;

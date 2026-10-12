@@ -31,6 +31,11 @@
 
 #include <utility>
 
+namespace {
+constexpr int ProductModelRole = Qt::UserRole + 1;
+constexpr int ProductNameRole = Qt::UserRole + 2;
+}
+
 ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
                                          Session session,
                                          QWidget *parent)
@@ -67,8 +72,12 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_issueTypeCombo->addItem(QStringLiteral("研发领料"), QStringLiteral("YFLL"));
     m_issueTypeCombo->addItem(QStringLiteral("其他领料"), QStringLiteral("QTLL"));
     m_productCombo = new QComboBox(panel);
+    m_productCombo->setMinimumWidth(400); // 最小宽度
     ComboBoxSearch::enableContainsSearch(
-        m_productCombo, QStringLiteral("输入成品编码或名称检索"));
+        m_productCombo, QStringLiteral("输入产品名称检索"));
+    m_productModelEdit = new QLineEdit(panel);
+    m_productModelEdit->setReadOnly(true);
+    m_productModelEdit->setPlaceholderText(QStringLiteral("选择产品名称后自动显示"));
     m_batchEdit = new QLineEdit(panel);
     m_batchEdit->setPlaceholderText(QStringLiteral("例如 PROD-202609-001"));
     m_plannedQuantity = new QDoubleSpinBox(panel);
@@ -89,13 +98,14 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     headerForm->addRow(QStringLiteral("领料日期 *"), m_dateEdit);
     headerForm->addRow(QStringLiteral("领料人员"), m_handlerEdit);
     headerForm->addRow(QStringLiteral("领料单号"), m_numberLabel);
+    headerForm->addRow(QStringLiteral("产品名称"), m_productCombo);
+    headerForm->addRow(QStringLiteral("产品型号"), m_productModelEdit);
     headerForm->addRow(QStringLiteral("备注"), m_notesEdit);
     panelLayout->addLayout(headerForm);
 
-    m_productionFieldsGroup = new QGroupBox(QStringLiteral("生产领料信息（可选）"), panel);
+    m_productionFieldsGroup = new QGroupBox(QStringLiteral("生产批次信息（可选）"), panel);
     auto *productionForm = new QFormLayout(m_productionFieldsGroup);
     productionForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
-    productionForm->addRow(QStringLiteral("成品物料"), m_productCombo);
     productionForm->addRow(QStringLiteral("生产批次"), m_batchEdit);
     productionForm->addRow(QStringLiteral("生产台数"), m_plannedQuantity);
     panelLayout->addWidget(m_productionFieldsGroup);
@@ -149,6 +159,14 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
         TableExcelExport::editSelectedBusinessDocument(
             m_recentTable, this, [this] { refreshRecentDocuments(); });
     });
+    connect(m_recentTable, &QTableWidget::cellDoubleClicked, this,
+            [this](int row, int) {
+        m_recentTable->setCurrentCell(row, 0);
+        m_recentTable->selectRow(row);
+        TableExcelExport::editSelectedBusinessDocument(
+            m_recentTable, m_recentTable->window(),
+            [this] { refreshRecentDocuments(); }, this->window());
+    });
     connect(fullScreenRecentButton, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(
             m_recentTable, QStringLiteral("全部领料单"), this, [this] { refreshRecentDocuments(); });
@@ -165,6 +183,8 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     connect(m_productCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
         m_lines->clearLines();
         if (m_productCombo->currentData().toLongLong() <= 0) m_batchEdit->clear();
+        m_productModelEdit->setText(
+            m_productCombo->currentData(ProductModelRole).toString());
         updateIssueType();
         m_usageHint->setText(
             QStringLiteral("领料明细已清空。可逐项添加物料，或点击“一键导入BOM用料”。"));
@@ -184,6 +204,8 @@ void ProductionIssuePage::updateIssueType()
     const bool production = m_issueTypeCombo->currentData().toString() == QStringLiteral("SCLL");
     const bool hasProductionProduct = production
         && m_productCombo->currentData().toLongLong() > 0;
+    m_productModelEdit->setText(
+        m_productCombo->currentData(ProductModelRole).toString());
     m_productionFieldsGroup->setVisible(production);
     m_batchEdit->setEnabled(hasProductionProduct);
     m_plannedQuantity->setEnabled(hasProductionProduct);
@@ -205,17 +227,25 @@ void ProductionIssuePage::refreshReferenceData()
     const QVariant selected = m_productCombo->currentData();
     const QSignalBlocker productBlocker(m_productCombo);
     m_productCombo->clear();
-    m_productCombo->addItem(QStringLiteral("不填写生产信息（直接领料）"), qlonglong(0));
+    m_productCombo->addItem(QStringLiteral("不选择产品"), qlonglong(0));
+    m_productCombo->setItemData(0, QString(), ProductModelRole);
+    m_productCombo->setItemData(0, QString(), ProductNameRole);
     QSqlQuery products(m_database);
     products.exec(QStringLiteral(
         "SELECT m.id,m.code,m.name,m.specification FROM materials m "
         "JOIN material_categories c ON c.id=m.category_id "
-        "WHERE m.is_active=1 AND c.code='FINISHED' ORDER BY m.code"));
+        "WHERE m.is_active=1 AND c.code='FINISHED' ORDER BY m.name,m.code"));
     while (products.next()) {
-        m_productCombo->addItem(QStringLiteral("%1 - %2（%3）")
-                                    .arg(products.value(1).toString(), products.value(2).toString(),
-                                         products.value(3).toString()),
-                                products.value(0));
+        const int index = m_productCombo->count();
+        m_productCombo->addItem(products.value(2).toString(), products.value(0));
+        m_productCombo->setItemData(index, products.value(3), ProductModelRole);
+        m_productCombo->setItemData(index, products.value(2), ProductNameRole);
+        m_productCombo->setItemData(
+            index,
+            QStringLiteral("%1  |  %2  |  %3")
+                .arg(products.value(2).toString(), products.value(3).toString(),
+                     products.value(1).toString()),
+            Qt::ToolTipRole);
     }
     const int selectedIndex = m_productCombo->findData(selected);
     m_productCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
@@ -366,17 +396,16 @@ void ProductionIssuePage::submit()
                             : issueType == QStringLiteral("SHLL") ? QStringLiteral("售后部")
                             : issueType == QStringLiteral("YFLL") ? QStringLiteral("研发部")
                                                                    : QStringLiteral("其他"));
+    if (hasProduct) {
+        issueForm.fields.insert(QStringLiteral("productName"),
+                                m_productCombo->currentData(ProductNameRole).toString());
+        issueForm.fields.insert(QStringLiteral("productModel"),
+                                m_productModelEdit->text().trimmed());
+    }
     if (hasProductionContext) {
         issueForm.fields.insert(QStringLiteral("productionBatch"), m_batchEdit->text().trimmed());
         issueForm.fields.insert(QStringLiteral("plannedQuantity"),
                                 QString::number(m_plannedQuantity->value(), 'g', 12));
-        QSqlQuery product(m_database);
-        product.prepare(QStringLiteral("SELECT name,specification FROM materials WHERE id=?"));
-        product.addBindValue(m_productCombo->currentData());
-        if (product.exec() && product.next()) {
-            issueForm.fields.insert(QStringLiteral("productName"), product.value(0).toString());
-            issueForm.fields.insert(QStringLiteral("productModel"), product.value(1).toString());
-        }
     }
     issueForm.lines = OfficeTemplateService::materialLines(m_database, movementLines, &error);
     if (issueForm.lines.isEmpty()) {

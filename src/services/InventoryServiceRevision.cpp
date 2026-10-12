@@ -157,34 +157,105 @@ MaterialRule readMaterialRule(QSqlDatabase database, qlonglong materialId)
 bool setNoticeLink(QSqlDatabase database, qlonglong documentId, qlonglong oldNoticeId,
                    qlonglong newNoticeId, qlonglong operatorId, QString *errorMessage)
 {
-    if (oldNoticeId > 0 && oldNoticeId != newNoticeId) {
-        QSqlQuery release(database);
-        release.prepare(QStringLiteral(
-            "UPDATE inspection_notices SET status=inspection_result,linked_document_id=NULL,"
-            "updated_by=?,updated_at=? WHERE id=? AND linked_document_id=?"));
-        release.addBindValue(operatorId);
-        release.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
-        release.addBindValue(oldNoticeId);
-        release.addBindValue(documentId);
-        if (!release.exec()) {
-            setError(errorMessage, QStringLiteral("解除原送检通知关联失败：%1")
-                                       .arg(release.lastError().text()));
+    Q_UNUSED(documentId)
+    Q_UNUSED(oldNoticeId)
+    Q_UNUSED(operatorId)
+    if (newNoticeId <= 0) return true;
+    QSqlQuery notice(database);
+    notice.prepare(QStringLiteral(
+        "SELECT 1 FROM inspection_notices WHERE id=? AND status<>'CANCELLED'"));
+    notice.addBindValue(newNoticeId);
+    if (!notice.exec() || !notice.next()) {
+        setError(errorMessage, QStringLiteral("关联的送检通知不存在或已经取消。"));
+        return false;
+    }
+    return true;
+}
+
+bool rebuildInspectionNoticeUsage(QSqlDatabase database, qlonglong noticeId,
+                                  qlonglong operatorId, QString *errorMessage)
+{
+    if (noticeId <= 0) return true;
+    struct NoticeItemUsage {
+        qlonglong id = 0;
+        QString key;
+        double qualified = 0.0;
+    };
+    QList<NoticeItemUsage> items;
+    QSqlQuery readItems(database);
+    readItems.prepare(QStringLiteral(
+        "SELECT id,material_id,batch_no,qualified_quantity FROM inspection_notice_items "
+        "WHERE notice_id=? ORDER BY line_number,id"));
+    readItems.addBindValue(noticeId);
+    if (!readItems.exec()) {
+        setError(errorMessage, QStringLiteral("读取送检数量失败：%1")
+                                   .arg(readItems.lastError().text()));
+        return false;
+    }
+    while (readItems.next()) {
+        items.append({readItems.value(0).toLongLong(),
+                      QStringLiteral("%1\x1f%2")
+                          .arg(readItems.value(1).toLongLong())
+                          .arg(readItems.value(2).toString().trimmed().toUpper()),
+                      readItems.value(3).toDouble()});
+    }
+
+    QMap<QString, double> usedByKey;
+    QSqlQuery used(database);
+    used.prepare(QStringLiteral(
+        "SELECT i.material_id,i.batch_no,SUM(i.quantity) "
+        "FROM inbound_inspection_details q "
+        "JOIN business_documents d ON d.id=q.document_id "
+        "JOIN business_document_items i ON i.document_id=d.id "
+        "WHERE q.inspection_notice_id=? AND d.stock_direction='IN' "
+        "AND d.status NOT IN ('DRAFT','REVERSED') GROUP BY i.material_id,UPPER(i.batch_no)"));
+    used.addBindValue(noticeId);
+    if (!used.exec()) {
+        setError(errorMessage, QStringLiteral("汇总送检入库数量失败：%1")
+                                   .arg(used.lastError().text()));
+        return false;
+    }
+    while (used.next()) {
+        const QString key = QStringLiteral("%1\x1f%2")
+                                .arg(used.value(0).toLongLong())
+                                .arg(used.value(1).toString().trimmed().toUpper());
+        usedByKey[key] += used.value(2).toDouble();
+    }
+
+    QSqlQuery updateItem(database);
+    updateItem.prepare(QStringLiteral(
+        "UPDATE inspection_notice_items SET inbound_quantity=? WHERE id=?"));
+    for (const NoticeItemUsage &item : std::as_const(items)) {
+        double &remaining = usedByKey[item.key];
+        const double allocated = qBound(0.0, remaining, item.qualified);
+        remaining = qMax(0.0, remaining - allocated);
+        updateItem.bindValue(0, allocated);
+        updateItem.bindValue(1, item.id);
+        if (!updateItem.exec()) {
+            setError(errorMessage, QStringLiteral("重算送检入库数量失败：%1")
+                                       .arg(updateItem.lastError().text()));
             return false;
         }
     }
-    if (newNoticeId <= 0) return true;
-    QSqlQuery claim(database);
-    claim.prepare(QStringLiteral(
-        "UPDATE inspection_notices SET status='USED',linked_document_id=?,updated_by=?,updated_at=? "
-        "WHERE id=? AND (linked_document_id=? "
-        "OR (inspection_result='QUALIFIED' AND linked_document_id IS NULL))"));
-    claim.addBindValue(documentId);
-    claim.addBindValue(operatorId);
-    claim.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
-    claim.addBindValue(newNoticeId);
-    claim.addBindValue(documentId);
-    if (!claim.exec() || claim.numRowsAffected() != 1) {
-        setError(errorMessage, QStringLiteral("关联的送检通知不存在、尚未合格或已被其他入库单使用。"));
+
+    QSqlQuery updateNotice(database);
+    updateNotice.prepare(QStringLiteral(
+        "UPDATE inspection_notices SET linked_document_id=(SELECT MIN(q.document_id) "
+        "FROM inbound_inspection_details q JOIN business_documents d ON d.id=q.document_id "
+        "WHERE q.inspection_notice_id=inspection_notices.id "
+        "AND d.status NOT IN ('DRAFT','REVERSED')),status=CASE "
+        "WHEN inspection_result='PENDING' THEN 'PENDING' "
+        "WHEN EXISTS(SELECT 1 FROM inspection_notice_items i WHERE i.notice_id=inspection_notices.id "
+        "AND i.unqualified_quantity>0.0000001) THEN 'PENDING' "
+        "WHEN EXISTS(SELECT 1 FROM inspection_notice_items i WHERE i.notice_id=inspection_notices.id "
+        "AND i.qualified_quantity-i.inbound_quantity>0.0000001) THEN 'QUALIFIED' "
+        "ELSE 'USED' END,updated_by=?,updated_at=? WHERE id=? AND status<>'CANCELLED'"));
+    updateNotice.addBindValue(operatorId);
+    updateNotice.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    updateNotice.addBindValue(noticeId);
+    if (!updateNotice.exec()) {
+        setError(errorMessage, QStringLiteral("更新送检通知入库状态失败：%1")
+                                   .arg(updateNotice.lastError().text()));
         return false;
     }
     return true;
@@ -1153,6 +1224,18 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
             "AND d.status IN ('POSTED','PARTIALLY_REVERSED')),0)"))) {
         return fail(errorMessage, QStringLiteral("重算撤销/退料数量失败：%1")
                                       .arg(refreshRelatedQuantities.lastError().text()));
+    }
+
+    QSet<qlonglong> affectedInspectionNotices;
+    if (oldNoticeId > 0) affectedInspectionNotices.insert(oldNoticeId);
+    if (document.inspectionNoticeId > 0) {
+        affectedInspectionNotices.insert(document.inspectionNoticeId);
+    }
+    for (qlonglong noticeId : std::as_const(affectedInspectionNotices)) {
+        if (!rebuildInspectionNoticeUsage(m_database, noticeId, m_operatorId, errorMessage)) {
+            rollback();
+            return false;
+        }
     }
 
     if (!rebuildBalances(m_database, errorMessage)

@@ -948,7 +948,8 @@ void MaterialPage::editStock()
     const auto parseSerialNumbers = [](const QString &text) {
         QStringList serials = text.split(
             QRegularExpression(QStringLiteral("[\\s,，;；]+")), Qt::SkipEmptyParts);
-        for (QString &serial : serials) serial = serial.trimmed().toUpper();
+        // SN 是用户定义的标识，保存和显示时保留原始大小写；仅在查重时忽略大小写。
+        for (QString &serial : serials) serial = serial.trimmed();
         return serials;
     };
     refreshCurrentStock = [this, materialId, warehouseCombo, locationCombo, batchCombo,
@@ -987,7 +988,7 @@ void MaterialPage::editStock()
                 serialQuery.addBindValue(selectedBatch());
                 if (serialQuery.exec()) {
                     while (serialQuery.next())
-                        serials.append(serialQuery.value(0).toString().trimmed().toUpper());
+                        serials.append(serialQuery.value(0).toString().trimmed());
                 }
             }
         }
@@ -1015,7 +1016,7 @@ void MaterialPage::editStock()
             } else {
                 serialHint->setText(
                     QStringLiteral("警告：账面库存为%1，但当前有效在库SN为%2个。"
-                                   "存在部分缺失，请先核查历史数据。")
+                                   "请填写调整后的完整SN列表，保存时系统会自动修正两者差异。")
                         .arg(QString::number(quantity, 'g', 12))
                         .arg(serials.size()));
             }
@@ -1165,8 +1166,10 @@ void MaterialPage::editStock()
                     targetSerials = parseSerialNumbers(serialEdit->toPlainText());
                     originalSerials = serialEdit->property("originalSerials").toStringList();
                     QSet<QString> targetSet;
+                    QMap<QString, QString> targetDisplay;
                     for (const QString &serial : std::as_const(targetSerials)) {
-                        if (serial.isEmpty() || targetSet.contains(serial)) {
+                        const QString key = serial.toCaseFolded();
+                        if (serial.isEmpty() || targetSet.contains(key)) {
                             QMessageBox::warning(
                                 &dialog, QStringLiteral("SN列表无效"),
                                 serial.isEmpty()
@@ -1176,18 +1179,25 @@ void MaterialPage::editStock()
                             serialEdit->setFocus();
                             return;
                         }
-                        targetSet.insert(serial);
+                        targetSet.insert(key);
+                        targetDisplay.insert(key, serial);
                     }
                     QSet<QString> originalSet;
-                    for (const QString &serial : std::as_const(originalSerials))
-                        originalSet.insert(serial.trimmed().toUpper());
+                    QMap<QString, QString> originalDisplay;
+                    for (const QString &serial : std::as_const(originalSerials)) {
+                        const QString display = serial.trimmed();
+                        const QString key = display.toCaseFolded();
+                        originalSet.insert(key);
+                        originalDisplay.insert(key, display);
+                    }
                     for (const QString &serial : std::as_const(targetSerials)) {
-                        if (!originalSet.contains(serial)) ++addedSerialCount;
+                        if (!originalSet.contains(serial.toCaseFolded())) ++addedSerialCount;
                     }
                     for (const QString &serial : std::as_const(originalSerials)) {
-                        if (!targetSet.contains(serial.trimmed().toUpper())) ++removedSerialCount;
+                        if (!targetSet.contains(serial.trimmed().toCaseFolded())) ++removedSerialCount;
                     }
-                    serialsChanged = targetSet != originalSet;
+                    // 除新增/移除外，用户只调整了字母大小写也属于有效修改。
+                    serialsChanged = targetDisplay != originalDisplay;
                 }
                 const double targetQuantity = requireSerial
                     ? static_cast<double>(targetSerials.size()) : targetSpin->value();

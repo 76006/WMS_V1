@@ -40,6 +40,9 @@ constexpr int PlannedRole = Qt::UserRole + 5;
 constexpr int DefaultWarehouseRole = Qt::UserRole + 6;
 constexpr int DefaultLocationRole = Qt::UserRole + 7;
 constexpr int RequireSerialRole = Qt::UserRole + 8;
+constexpr int RequireBatchRole = Qt::UserRole + 9;
+constexpr int ProductionBatchRole = Qt::UserRole + 10;
+constexpr int ExternalProductionRole = Qt::UserRole + 11;
 }
 
 FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
@@ -75,7 +78,10 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     m_runCombo = new QComboBox(panel);
     ComboBoxSearch::enableContainsSearch(
-        m_runCombo, QStringLiteral("输入生产批次、物料编码或名称检索"));
+        m_runCombo, QStringLiteral("输入生产批次、成品编码或名称检索"));
+    m_batchEdit = new QLineEdit(panel);
+    m_batchEdit->setPlaceholderText(
+        QStringLiteral("外部生产成品启用批次管理时填写；未启用可留空"));
     m_productLabel = new QLabel(panel);
     m_productLabel->setObjectName(QStringLiteral("mutedText"));
     m_progressLabel = new QLabel(panel);
@@ -103,9 +109,10 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     serialLayout->addWidget(m_generateButton, 0, Qt::AlignLeft);
     m_notesEdit = new QTextEdit(panel);
     m_notesEdit->setMaximumHeight(70);
-    form->addRow(QStringLiteral("生产批次 *"), m_runCombo);
+    form->addRow(QStringLiteral("入库成品/生产批次 *"), m_runCombo);
     form->addRow(QStringLiteral("成品资料"), m_productLabel);
     form->addRow(QStringLiteral("生产进度"), m_progressLabel);
+    form->addRow(QStringLiteral("库存批号"), m_batchEdit);
     form->addRow(QStringLiteral("生产日期 *"), m_dateEdit);
     form->addRow(QStringLiteral("本次入库数量 *"), m_quantitySpin);
     form->addRow(QStringLiteral("仓库 *"), m_warehouseCombo);
@@ -137,7 +144,7 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     m_recentTable = new QTableWidget(0, 5, recentPanel);
     m_recentTable->setProperty("businessDocumentTable", true);
     m_recentTable->setHorizontalHeaderLabels({QStringLiteral("单据号"), QStringLiteral("日期"),
-                                              QStringLiteral("生产批次"), QStringLiteral("成品"),
+                                              QStringLiteral("生产/库存批次"), QStringLiteral("成品"),
                                               QStringLiteral("数量")});
     m_recentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_recentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -180,14 +187,14 @@ void FinishedGoodsInPage::refreshReferenceData()
     QSqlQuery runs(m_database);
     runs.exec(QStringLiteral(
         "SELECT p.id,p.batch_no,m.id,m.code,p.product_name,p.product_model,p.planned_quantity,"
-        "m.default_warehouse_id,m.default_location_id,m.require_serial,p.status "
+        "m.default_warehouse_id,m.default_location_id,m.require_serial,m.require_batch,p.status "
         "FROM production_runs p JOIN materials m ON m.id=p.product_material_id ORDER BY p.id DESC"));
     while (runs.next()) {
         const int index = m_runCombo->count();
         m_runCombo->addItem(QStringLiteral("%1 - %2 - %3（%4）")
                                 .arg(runs.value(1).toString(), runs.value(3).toString(),
                                      runs.value(4).toString(),
-                                     runs.value(10).toString() == QStringLiteral("COMPLETED")
+                                     runs.value(11).toString() == QStringLiteral("COMPLETED")
                                          ? QStringLiteral("已完成") : QStringLiteral("进行中")),
                             runs.value(0));
         m_runCombo->setItemData(index, runs.value(2), ProductMaterialRole);
@@ -198,6 +205,34 @@ void FinishedGoodsInPage::refreshReferenceData()
         m_runCombo->setItemData(index, runs.value(7), DefaultWarehouseRole);
         m_runCombo->setItemData(index, runs.value(8), DefaultLocationRole);
         m_runCombo->setItemData(index, runs.value(9), RequireSerialRole);
+        m_runCombo->setItemData(index, runs.value(10), RequireBatchRole);
+        m_runCombo->setItemData(index, runs.value(1), ProductionBatchRole);
+        m_runCombo->setItemData(index, false, ExternalProductionRole);
+    }
+    QSqlQuery externalProducts(m_database);
+    externalProducts.exec(QStringLiteral(
+        "SELECT m.id,m.code,m.name,m.specification,m.default_warehouse_id,"
+        "m.default_location_id,m.require_serial,m.require_batch "
+        "FROM materials m JOIN material_categories c ON c.id=m.category_id "
+        "WHERE m.is_active=1 AND c.code='FINISHED' ORDER BY m.code"));
+    while (externalProducts.next()) {
+        const qlonglong materialId = externalProducts.value(0).toLongLong();
+        const int index = m_runCombo->count();
+        m_runCombo->addItem(
+            QStringLiteral("外部生产（无内部生产批次） - %1 - %2")
+                .arg(externalProducts.value(1).toString(), externalProducts.value(2).toString()),
+            -materialId);
+        m_runCombo->setItemData(index, materialId, ProductMaterialRole);
+        m_runCombo->setItemData(index, externalProducts.value(1), ProductCodeRole);
+        m_runCombo->setItemData(index, externalProducts.value(2), ProductNameRole);
+        m_runCombo->setItemData(index, externalProducts.value(3), ProductModelRole);
+        m_runCombo->setItemData(index, 0.0, PlannedRole);
+        m_runCombo->setItemData(index, externalProducts.value(4), DefaultWarehouseRole);
+        m_runCombo->setItemData(index, externalProducts.value(5), DefaultLocationRole);
+        m_runCombo->setItemData(index, externalProducts.value(6), RequireSerialRole);
+        m_runCombo->setItemData(index, externalProducts.value(7), RequireBatchRole);
+        m_runCombo->setItemData(index, QString(), ProductionBatchRole);
+        m_runCombo->setItemData(index, true, ExternalProductionRole);
     }
     const int selectedIndex = m_runCombo->findData(selectedRun);
     if (selectedIndex >= 0) m_runCombo->setCurrentIndex(selectedIndex);
@@ -227,29 +262,56 @@ void FinishedGoodsInPage::loadRunDetails()
     const int index = m_runCombo->currentIndex();
     if (index < 0) {
         m_productMaterialId = 0;
+        m_currentSourceKey = 0;
         m_serialEdit->clear();
-        m_productLabel->setText(QStringLiteral("请先在领料管理中通过生产领料创建生产批次。"));
+        m_batchEdit->clear();
+        m_productLabel->setText(QStringLiteral("请选择内部生产批次或外部生产成品。"));
         m_progressLabel->clear();
         m_submitButton->setEnabled(false);
         return;
     }
+    const qlonglong sourceKey = m_runCombo->currentData().toLongLong();
     const qlonglong productMaterialId = m_runCombo->itemData(index, ProductMaterialRole).toLongLong();
-    if (m_productMaterialId != productMaterialId) m_serialEdit->clear();
+    const bool sourceChanged = m_currentSourceKey != sourceKey;
+    if (sourceChanged) {
+        m_serialEdit->clear();
+        m_batchEdit->clear();
+    }
+    m_currentSourceKey = sourceKey;
     m_productMaterialId = productMaterialId;
     m_productCode = m_runCombo->itemData(index, ProductCodeRole).toString();
     m_plannedQuantity = m_runCombo->itemData(index, PlannedRole).toDouble();
     m_requireSerial = m_runCombo->itemData(index, RequireSerialRole).toBool();
-    InventoryService service(m_database, m_session.userId);
-    QString error;
-    m_receivedQuantity = service.productionRunReceivedQuantity(m_runCombo->currentData().toLongLong(), &error);
-    if (m_receivedQuantity < 0.0) m_receivedQuantity = 0.0;
+    m_requireBatch = m_runCombo->itemData(index, RequireBatchRole).toBool();
+    const bool externalProduction = m_runCombo->itemData(index, ExternalProductionRole).toBool();
+    if (externalProduction) {
+        m_receivedQuantity = 0.0;
+    } else {
+        InventoryService service(m_database, m_session.userId);
+        QString error;
+        m_receivedQuantity = service.productionRunReceivedQuantity(sourceKey, &error);
+        if (m_receivedQuantity < 0.0) m_receivedQuantity = 0.0;
+    }
     m_productLabel->setText(QStringLiteral("%1    型号：%2")
                                 .arg(m_runCombo->itemData(index, ProductNameRole).toString(),
                                      m_runCombo->itemData(index, ProductModelRole).toString()));
-    m_progressLabel->setText(QStringLiteral("计划 %1 / 已入库 %2 / 剩余 %3")
-                                 .arg(m_plannedQuantity, 0, 'g', 12)
-                                 .arg(m_receivedQuantity, 0, 'g', 12)
-                                 .arg(qMax(0.0, m_plannedQuantity - m_receivedQuantity), 0, 'g', 12));
+    if (externalProduction) {
+        m_progressLabel->setText(QStringLiteral("外部生产成品：不关联内部生产计划和生产批次"));
+        m_batchEdit->setReadOnly(false);
+        m_batchEdit->setEnabled(m_requireBatch);
+        m_batchEdit->setPlaceholderText(
+            m_requireBatch ? QStringLiteral("该成品启用了批次管理，请填写库存批号")
+                           : QStringLiteral("该成品未启用批次管理，无需填写"));
+    } else {
+        m_progressLabel->setText(QStringLiteral("计划 %1 / 已入库 %2 / 剩余 %3")
+                                     .arg(m_plannedQuantity, 0, 'g', 12)
+                                     .arg(m_receivedQuantity, 0, 'g', 12)
+                                     .arg(qMax(0.0, m_plannedQuantity - m_receivedQuantity), 0, 'g', 12));
+        m_batchEdit->setEnabled(true);
+        m_batchEdit->setReadOnly(true);
+        m_batchEdit->setText(m_runCombo->itemData(index, ProductionBatchRole).toString());
+        m_batchEdit->setPlaceholderText(QString());
+    }
     const qlonglong defaultWarehouse = m_runCombo->itemData(index, DefaultWarehouseRole).toLongLong();
     const int warehouseIndex = m_warehouseCombo->findData(defaultWarehouse);
     if (warehouseIndex >= 0) m_warehouseCombo->setCurrentIndex(warehouseIndex);
@@ -288,7 +350,7 @@ QStringList FinishedGoodsInPage::enteredSerialNumbers() const
 {
     QStringList values = m_serialEdit->toPlainText().split(
         QRegularExpression(QStringLiteral("[,;\\r\\n]+")), Qt::SkipEmptyParts);
-    for (QString &value : values) value = value.trimmed().toUpper();
+    for (QString &value : values) value = value.trimmed();
     return values;
 }
 
@@ -322,9 +384,13 @@ void FinishedGoodsInPage::refreshRecentDocuments()
     m_recentTable->setRowCount(0);
     QSqlQuery query(m_database);
     query.exec(QStringLiteral(
-        "SELECT d.id,d.document_no,d.document_date,p.batch_no,p.product_name,i.quantity "
-        "FROM business_documents d JOIN production_runs p ON p.id=d.production_run_id "
+        "SELECT d.id,d.document_no,d.document_date,"
+        "COALESCE(NULLIF(p.batch_no,''),NULLIF(i.batch_no,''),'无生产批次'),"
+        "COALESCE(NULLIF(p.product_name,''),m.name),i.quantity "
+        "FROM business_documents d "
         "JOIN business_document_items i ON i.document_id=d.id "
+        "JOIN materials m ON m.id=i.material_id "
+        "LEFT JOIN production_runs p ON p.id=d.production_run_id "
         "WHERE d.document_type='CPRK' AND d.status<>'REVERSED' ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
@@ -340,11 +406,20 @@ void FinishedGoodsInPage::refreshRecentDocuments()
 
 void FinishedGoodsInPage::submit()
 {
-    if (m_runCombo->currentIndex() < 0 || m_locationCombo->currentIndex() < 0) {
+    if (m_runCombo->currentIndex() < 0 || m_productMaterialId <= 0
+        || m_locationCombo->currentIndex() < 0) {
         QMessageBox::warning(this, QStringLiteral("资料不完整"),
-                             QStringLiteral("请选择生产批次、仓库和库位。"));
+                             QStringLiteral("请选择入库成品、仓库和库位。"));
         return;
     }
+    if (m_requireBatch && m_batchEdit->text().trimmed().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("资料不完整"),
+                             QStringLiteral("该成品启用了批次管理，请填写库存批号。"));
+        m_batchEdit->setFocus();
+        return;
+    }
+    const bool externalProduction =
+        m_runCombo->itemData(m_runCombo->currentIndex(), ExternalProductionRole).toBool();
     const QStringList serials = enteredSerialNumbers();
     if (m_requireSerial
         && (std::abs(m_quantitySpin->value() - std::round(m_quantitySpin->value())) > 0.0000001
@@ -356,7 +431,7 @@ void FinishedGoodsInPage::submit()
     StockMovementRequest line;
     line.materialId = m_productMaterialId;
     line.quantity = m_quantitySpin->value();
-    line.batchNo = m_runCombo->currentText().section(QStringLiteral(" - "), 0, 0).trimmed();
+    line.batchNo = m_batchEdit->text().trimmed();
     line.warehouseId = m_warehouseCombo->currentData().toLongLong();
     line.locationId = m_locationCombo->currentData().toLongLong();
     line.serialNumbers = serials;
@@ -381,7 +456,7 @@ void FinishedGoodsInPage::submit()
     const double afterReceipt = m_receivedQuantity + m_quantitySpin->value();
     QString confirmation = QStringLiteral("确认本次成品入库 %1？库存将立即增加并生成流水。")
                                .arg(m_quantitySpin->value(), 0, 'g', 12);
-    if (afterReceipt > m_plannedQuantity + 0.0000001) {
+    if (!externalProduction && afterReceipt > m_plannedQuantity + 0.0000001) {
         confirmation += QStringLiteral("\n本次提交后将超过计划数量 %1。")
                             .arg(afterReceipt - m_plannedQuantity, 0, 'g', 12);
     }
@@ -396,7 +471,7 @@ void FinishedGoodsInPage::submit()
     document.handlerName = m_handlerEdit->text().trimmed();
     document.notes = m_notesEdit->toPlainText().trimmed();
     document.submissionToken = m_submissionToken;
-    document.productionRunId = m_runCombo->currentData().toLongLong();
+    document.productionRunId = qMax<qlonglong>(0, m_runCombo->currentData().toLongLong());
     document.lines = {line};
 
     m_submitButton->setEnabled(false);
@@ -424,6 +499,7 @@ void FinishedGoodsInPage::submit()
                 .arg(posted.documentNumber, formError));
     }
     resetSubmissionToken();
+    m_currentSourceKey = 0;
     m_serialEdit->clear();
     m_notesEdit->clear();
     emit stockChanged();

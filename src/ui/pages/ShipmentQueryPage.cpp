@@ -186,6 +186,8 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, Session session, QWi
     m_detailModel = new QSqlQueryModel(this);
     m_detailTable->setModel(m_detailModel);
     configureTable(m_detailTable);
+    connect(m_detailTable, &QTableView::doubleClicked,
+            this, &ShipmentQueryPage::showSelectedProductDetails);
     detailLayout->addWidget(m_detailTable);
     root->addWidget(detailPanel, 1);
 
@@ -196,8 +198,14 @@ ShipmentQueryPage::ShipmentQueryPage(QSqlDatabase database, Session session, QWi
             this, &ShipmentQueryPage::openSelectedDeliveryForm);
     connect(m_shipmentTable->selectionModel(), &QItemSelectionModel::currentRowChanged,
             this, [this] { loadSelectedShipmentDetails(); });
-    connect(m_shipmentTable, &QTableView::doubleClicked,
-            this, &ShipmentQueryPage::editSelectedReceipt);
+    connect(m_shipmentTable, &QTableView::doubleClicked, this,
+            [this](const QModelIndex &index) {
+        if (!index.isValid()) return;
+        m_shipmentTable->setCurrentIndex(index);
+        m_shipmentTable->selectRow(index.row());
+        loadSelectedShipmentDetails();
+        editSelectedReceipt();
+    });
 
     refresh();
 }
@@ -590,7 +598,7 @@ void ShipmentQueryPage::loadShipmentDetails(qlonglong documentId)
     const QString projectCode = projectFilter();
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT i.line_number,m.code,m.name,m.specification,%1,COALESCE(c.name,''),"
+        "SELECT m.id,i.line_number,m.code,m.name,m.specification,%1,COALESCE(c.name,''),"
         "m.brand,m.unit,i.quantity,i.reversed_quantity,(i.quantity-i.reversed_quantity),"
         "i.batch_no,COALESCE(w.name,''),COALESCE(l.code,''),m.processing_method,"
         "m.unit_usage,m.notes,i.notes "
@@ -617,7 +625,7 @@ void ShipmentQueryPage::loadShipmentDetails(qlonglong documentId)
     m_detailModel->setQuery(std::move(query));
 
     const QStringList headers = {
-        QStringLiteral("行号"), QStringLiteral("物料编码"), QStringLiteral("产品名称"),
+        QStringLiteral("物料ID"), QStringLiteral("行号"), QStringLiteral("物料编码"), QStringLiteral("产品名称"),
         QStringLiteral("规格型号"), QStringLiteral("项目"), QStringLiteral("物料类别"),
         QStringLiteral("品牌"), QStringLiteral("单位"), QStringLiteral("发货数量"),
         QStringLiteral("已退数量"), QStringLiteral("实发数量"), QStringLiteral("批次"),
@@ -626,7 +634,138 @@ void ShipmentQueryPage::loadShipmentDetails(qlonglong documentId)
     for (int column = 0; column < headers.size(); ++column) {
         m_detailModel->setHeaderData(column, Qt::Horizontal, headers.at(column));
     }
+    m_detailTable->hideColumn(0);
     m_detailTable->resizeColumnsToContents();
-    m_detailTable->setColumnWidth(2, qMax(m_detailTable->columnWidth(2), 150));
     m_detailTable->setColumnWidth(3, qMax(m_detailTable->columnWidth(3), 150));
+    m_detailTable->setColumnWidth(4, qMax(m_detailTable->columnWidth(4), 150));
+}
+
+void ShipmentQueryPage::showSelectedProductDetails(const QModelIndex &index)
+{
+    if (!index.isValid() || !m_detailModel) return;
+    const qlonglong materialId = m_detailModel->index(index.row(), 0).data().toLongLong();
+    if (materialId <= 0) return;
+
+    QSqlQuery material(m_database);
+    material.prepare(QStringLiteral(
+        "SELECT m.code,m.name,m.specification,COALESCE(c.name,''),m.brand,m.unit,"
+        "m.unit_usage,m.processing_method,m.minimum_stock,m.require_batch,m.require_serial,"
+        "m.is_active,m.notes,COALESCE(w.code,''),COALESCE(w.name,''),"
+        "COALESCE(l.code,''),COALESCE(l.name,''),"
+        "COALESCE((SELECT SUM(s.quantity) FROM stock_balances s WHERE s.material_id=m.id),0) "
+        "FROM materials m LEFT JOIN material_categories c ON c.id=m.category_id "
+        "LEFT JOIN warehouses w ON w.id=m.default_warehouse_id "
+        "LEFT JOIN locations l ON l.id=m.default_location_id WHERE m.id=?"));
+    material.addBindValue(materialId);
+    if (!material.exec() || !material.next()) {
+        QMessageBox::warning(this, QStringLiteral("读取产品信息失败"),
+                             material.lastError().text().isEmpty()
+                                 ? QStringLiteral("该物料档案已经不存在。")
+                                 : material.lastError().text());
+        return;
+    }
+
+    const auto displayValue = [](const QString &value) {
+        return value.trimmed().isEmpty() ? QStringLiteral("未设置") : value.trimmed();
+    };
+    const auto codeAndName = [&displayValue](const QString &code, const QString &name) {
+        if (code.trimmed().isEmpty()) return QStringLiteral("未设置");
+        return name.trimmed().isEmpty() ? code.trimmed()
+                                        : QStringLiteral("%1 - %2").arg(code.trimmed(), name.trimmed());
+    };
+    const auto rowValue = [this, &index](int column) {
+        return m_detailModel->index(index.row(), column).data().toString();
+    };
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("产品详情 - %1").arg(material.value(0).toString()));
+    dialog.setWindowFlag(Qt::WindowMaximizeButtonHint, true);
+    dialog.resize(980, 700);
+    auto *root = new QVBoxLayout(&dialog);
+    auto *heading = new QLabel(
+        QStringLiteral("%1 - %2").arg(material.value(0).toString(), material.value(1).toString()),
+        &dialog);
+    heading->setStyleSheet(QStringLiteral("font-size:18px;font-weight:600;"));
+    heading->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    root->addWidget(heading);
+
+    auto *profile = new QFormLayout;
+    const auto addField = [profile, &dialog](const QString &caption, const QString &value) {
+        auto *label = new QLabel(value, &dialog);
+        label->setWordWrap(true);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        profile->addRow(caption, label);
+    };
+    addField(QStringLiteral("规格型号"), displayValue(material.value(2).toString()));
+    addField(QStringLiteral("物料类别"), displayValue(material.value(3).toString()));
+    addField(QStringLiteral("品牌/供应商"), displayValue(material.value(4).toString()));
+    addField(QStringLiteral("单位"), displayValue(material.value(5).toString()));
+    addField(QStringLiteral("单台用量"), QString::number(material.value(6).toDouble(), 'g', 12));
+    addField(QStringLiteral("加工方式"), displayValue(material.value(7).toString()));
+    addField(QStringLiteral("当前总库存"), QString::number(material.value(17).toDouble(), 'g', 12));
+    addField(QStringLiteral("最低库存"), QString::number(material.value(8).toDouble(), 'g', 12));
+    addField(QStringLiteral("批次/SN管理"),
+             QStringLiteral("批次：%1　SN：%2")
+                 .arg(material.value(9).toBool() ? QStringLiteral("是") : QStringLiteral("否"),
+                      material.value(10).toBool() ? QStringLiteral("是") : QStringLiteral("否")));
+    addField(QStringLiteral("默认仓库"),
+             codeAndName(material.value(13).toString(), material.value(14).toString()));
+    addField(QStringLiteral("默认库位"),
+             codeAndName(material.value(15).toString(), material.value(16).toString()));
+    addField(QStringLiteral("物料状态"),
+             material.value(11).toBool() ? QStringLiteral("正常") : QStringLiteral("停用"));
+    addField(QStringLiteral("物料备注"), displayValue(material.value(12).toString()));
+    root->addLayout(profile);
+
+    auto *shipmentTitle = new QLabel(QStringLiteral("本次发货信息"), &dialog);
+    shipmentTitle->setStyleSheet(QStringLiteral("font-size:15px;font-weight:600;"));
+    root->addWidget(shipmentTitle);
+    auto *shipment = new QFormLayout;
+    const auto addShipmentField = [shipment, &dialog](const QString &caption, const QString &value) {
+        auto *label = new QLabel(value, &dialog);
+        label->setWordWrap(true);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        shipment->addRow(caption, label);
+    };
+    addShipmentField(QStringLiteral("实发数量"), rowValue(11));
+    addShipmentField(QStringLiteral("发货批次"), displayValue(rowValue(12)));
+    addShipmentField(QStringLiteral("发货位置"),
+                     QStringLiteral("%1 / %2").arg(displayValue(rowValue(13)),
+                                                    displayValue(rowValue(14))));
+    addShipmentField(QStringLiteral("发货备注"), displayValue(rowValue(18)));
+    root->addLayout(shipment);
+
+    auto *stockTitle = new QLabel(QStringLiteral("当前分仓、分库位、分批次库存"), &dialog);
+    stockTitle->setStyleSheet(QStringLiteral("font-size:15px;font-weight:600;"));
+    root->addWidget(stockTitle);
+    auto *stockTable = new QTableView(&dialog);
+    auto *stockModel = new QSqlQueryModel(stockTable);
+    QSqlQuery stock(m_database);
+    stock.prepare(QStringLiteral(
+        "SELECT w.code || CASE WHEN w.name='' THEN '' ELSE ' - ' || w.name END,"
+        "l.code || CASE WHEN l.name='' THEN '' ELSE ' - ' || l.name END,"
+        "CASE WHEN s.batch_no='' THEN '无批次' ELSE s.batch_no END,"
+        "COALESCE(b.supplier,''),s.quantity,s.updated_at "
+        "FROM stock_balances s JOIN warehouses w ON w.id=s.warehouse_id "
+        "JOIN locations l ON l.id=s.location_id "
+        "LEFT JOIN batches b ON b.material_id=s.material_id AND b.batch_no=s.batch_no "
+        "WHERE s.material_id=? ORDER BY w.code,l.code,s.batch_no"));
+    stock.addBindValue(materialId);
+    if (stock.exec()) stockModel->setQuery(std::move(stock));
+    stockModel->setHeaderData(0, Qt::Horizontal, QStringLiteral("仓库"));
+    stockModel->setHeaderData(1, Qt::Horizontal, QStringLiteral("库位"));
+    stockModel->setHeaderData(2, Qt::Horizontal, QStringLiteral("批次"));
+    stockModel->setHeaderData(3, Qt::Horizontal, QStringLiteral("供应商"));
+    stockModel->setHeaderData(4, Qt::Horizontal, QStringLiteral("库存数量"));
+    stockModel->setHeaderData(5, Qt::Horizontal, QStringLiteral("更新时间"));
+    stockTable->setModel(stockModel);
+    configureTable(stockTable);
+    stockTable->resizeColumnsToContents();
+    root->addWidget(stockTable, 1);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    root->addWidget(buttons);
+    dialog.exec();
 }

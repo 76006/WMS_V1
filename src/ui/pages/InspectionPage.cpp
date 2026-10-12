@@ -31,6 +31,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QSqlQuery>
 #include <QStandardPaths>
 #include <QTableWidget>
@@ -55,6 +56,7 @@ enum NoticeColumn {
 };
 
 constexpr auto AutomaticBatchProperty = "automaticBatch";
+constexpr auto NoticeItemIdProperty = "noticeItemId";
 constexpr int MaterialSupplierRole = Qt::UserRole + 2;
 
 QString statusText(const QString &status)
@@ -65,6 +67,22 @@ QString statusText(const QString &status)
     if (status == QStringLiteral("USED")) return QStringLiteral("已入库");
     if (status == QStringLiteral("CANCELLED")) return QStringLiteral("已取消");
     return status;
+}
+
+QString quantityText(double value)
+{
+    return QString::number(value, 'g', 12);
+}
+
+QString inspectionResultText(const InspectionNotice &notice)
+{
+    if (notice.inspectionResult == QStringLiteral("PENDING")
+        && !notice.inspectionDate.isValid()) {
+        return QStringLiteral("待检验");
+    }
+    return QStringLiteral("合格%1个 不合格%2个")
+        .arg(quantityText(notice.qualifiedQuantity),
+             quantityText(notice.unqualifiedQuantity));
 }
 
 OfficeTemplateDocument noticeTemplate(const InspectionNotice &notice)
@@ -235,6 +253,7 @@ private:
         m_lines->insertRow(row);
         m_lines->setItem(row, NoticeRowColumn, new QTableWidgetItem(QString::number(row + 1)));
         auto *material = materialCombo(line.materialId);
+        material->setProperty(NoticeItemIdProperty, line.id);
         m_lines->setCellWidget(row, NoticeMaterialColumn, material);
         auto *specification = new QTableWidgetItem(line.specification);
         specification->setFlags(specification->flags() & ~Qt::ItemIsEditable);
@@ -413,6 +432,7 @@ private:
                 return {};
             }
             InspectionNoticeLine line;
+            line.id = material->property(NoticeItemIdProperty).toLongLong();
             line.lineNumber = row + 1;
             line.materialId = material->currentData().toLongLong();
             line.materialCode = material->currentText().section(QStringLiteral(" - "), 0, 0);
@@ -558,7 +578,7 @@ public:
           m_noticeId(noticeId)
     {
         setWindowTitle(QStringLiteral("录入/修改检验结果"));
-        resize(680, 430);
+        resize(980, 620);
         auto *root = new QVBoxLayout(this);
         auto *form = new QFormLayout;
         m_date = new QDateEdit(QDate::currentDate(), this);
@@ -568,9 +588,6 @@ public:
             UserService::displayNameForUser(m_database, m_session.userId,
                                             m_session.displayName),
             this);
-        m_result = new QComboBox(this);
-        m_result->addItem(QStringLiteral("合格"), QStringLiteral("QUALIFIED"));
-        m_result->addItem(QStringLiteral("不合格"), QStringLiteral("UNQUALIFIED"));
         m_conclusion = new QTextEdit(this);
         m_attachment = new QLabel(QStringLiteral("尚未选择新附件"), this);
         auto *choose = new QPushButton(QStringLiteral("选择检验附件"), this);
@@ -581,12 +598,29 @@ public:
         attachmentLayout->addWidget(m_attachment, 1);
         form->addRow(QStringLiteral("检验日期 *"), m_date);
         form->addRow(QStringLiteral("检验员 *"), m_inspector);
-        form->addRow(QStringLiteral("检验结果 *"), m_result);
         form->addRow(QStringLiteral("检验说明"), m_conclusion);
         form->addRow(QStringLiteral("检验附件"), attachmentRow);
         root->addLayout(form);
+        auto *quantityTitle = new QLabel(QStringLiteral("按物料填写检验数量"), this);
+        quantityTitle->setStyleSheet(QStringLiteral("font-weight:600;"));
+        root->addWidget(quantityTitle);
+        m_results = new QTableWidget(0, 7, this);
+        m_results->setHorizontalHeaderLabels({
+            QStringLiteral("序号"), QStringLiteral("物料"), QStringLiteral("规格型号"),
+            QStringLiteral("送检数量"), QStringLiteral("已入库"),
+            QStringLiteral("合格数量"), QStringLiteral("不合格数量")});
+        m_results->verticalHeader()->hide();
+        m_results->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_results->horizontalHeader()->setStretchLastSection(false);
+        m_results->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        m_results->setColumnWidth(2, 180);
+        m_results->setColumnWidth(3, 120);
+        m_results->setColumnWidth(4, 110);
+        m_results->setColumnWidth(5, 150);
+        m_results->setColumnWidth(6, 150);
+        root->addWidget(m_results, 1);
         auto *hint = new QLabel(
-            QStringLiteral("检验结果只保存在系统和检验附件中，不写入材料检验通知单。合格时必须已有或重新上传附件。"), this);
+            QStringLiteral("每行合格数量与不合格数量之和必须等于送检数量。存在合格数量时必须已有或重新上传检验附件；合格数量可入库，不合格数量继续保留在在检列表。"), this);
         hint->setWordWrap(true);
         hint->setObjectName(QStringLiteral("mutedText"));
         root->addWidget(hint);
@@ -620,27 +654,78 @@ public:
         if (service.readNotice(m_noticeId, &notice, &error)) {
             if (notice.inspectionDate.isValid()) m_date->setDate(notice.inspectionDate);
             if (!notice.inspectorName.isEmpty()) m_inspector->setText(notice.inspectorName);
-            const int index = m_result->findData(notice.inspectionResult);
-            if (index >= 0) m_result->setCurrentIndex(index);
             m_conclusion->setPlainText(notice.conclusion);
             if (notice.inspectionAttachmentId > 0)
                 m_attachment->setText(QStringLiteral("已存在检验附件；不选择新文件则保留原附件"));
+            for (const InspectionNoticeLine &line : std::as_const(notice.lines)) {
+                const int row = m_results->rowCount();
+                m_results->insertRow(row);
+                auto *number = new QTableWidgetItem(QString::number(row + 1));
+                number->setData(Qt::UserRole, line.id);
+                m_results->setItem(row, 0, number);
+                m_results->setItem(row, 1, new QTableWidgetItem(
+                    QStringLiteral("%1 - %2").arg(line.materialCode, line.materialName)));
+                m_results->setItem(row, 2, new QTableWidgetItem(line.specification));
+                m_results->setItem(row, 3, new QTableWidgetItem(
+                    QString::number(line.quantity, 'g', 12)));
+                m_results->setItem(row, 4, new QTableWidgetItem(
+                    QString::number(line.inboundQuantity, 'g', 12)));
+                auto *qualified = quantitySpin(line.quantity, line.inboundQuantity);
+                auto *unqualified = quantitySpin(line.quantity - line.inboundQuantity, 0.0);
+                const bool hasRecordedQuantity = line.qualifiedQuantity > 0.0000001
+                    || line.unqualifiedQuantity > 0.0000001;
+                qualified->setValue(hasRecordedQuantity ? line.qualifiedQuantity : line.quantity);
+                unqualified->setValue(hasRecordedQuantity ? line.unqualifiedQuantity : 0.0);
+                m_results->setCellWidget(row, 5, qualified);
+                m_results->setCellWidget(row, 6, unqualified);
+                connect(qualified, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                        [unqualified, total = line.quantity](double value) {
+                    QSignalBlocker blocker(unqualified);
+                    unqualified->setValue(qMax(0.0, total - value));
+                });
+                connect(unqualified, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                        [qualified, total = line.quantity](double value) {
+                    QSignalBlocker blocker(qualified);
+                    qualified->setValue(qMax(0.0, total - value));
+                });
+            }
+        } else {
+            QMessageBox::warning(this, QStringLiteral("读取送检通知失败"), error);
         }
     }
 
     bool saved() const { return m_saved; }
 
 private:
+    QDoubleSpinBox *quantitySpin(double maximum, double minimum)
+    {
+        auto *spin = new QDoubleSpinBox(m_results);
+        spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        spin->setDecimals(6);
+        spin->setRange(qMax(0.0, minimum), qMax(minimum, maximum));
+        spin->setAlignment(Qt::AlignRight);
+        return spin;
+    }
+
     void save()
     {
         InspectionNoticeResult value;
         value.inspectionDate = m_date->date();
         value.inspectorName = m_inspector->text().trimmed();
-        value.result = m_result->currentData().toString();
         value.conclusion = m_conclusion->toPlainText().trimmed();
         value.attachmentFileName = m_fileName;
         value.attachmentMimeType = m_mimeType;
         value.attachmentData = m_data;
+        for (int row = 0; row < m_results->rowCount(); ++row) {
+            auto *qualified = qobject_cast<QDoubleSpinBox *>(m_results->cellWidget(row, 5));
+            auto *unqualified = qobject_cast<QDoubleSpinBox *>(m_results->cellWidget(row, 6));
+            if (!m_results->item(row, 0) || !qualified || !unqualified) continue;
+            InspectionNoticeLineResult line;
+            line.itemId = m_results->item(row, 0)->data(Qt::UserRole).toLongLong();
+            line.qualifiedQuantity = qualified->value();
+            line.unqualifiedQuantity = unqualified->value();
+            value.lines.append(line);
+        }
         InspectionService service(m_database, m_session.userId);
         QString error;
         if (!service.recordResult(m_noticeId, value, &error)) {
@@ -657,7 +742,7 @@ private:
     bool m_saved = false;
     QDateEdit *m_date = nullptr;
     QLineEdit *m_inspector = nullptr;
-    QComboBox *m_result = nullptr;
+    QTableWidget *m_results = nullptr;
     QTextEdit *m_conclusion = nullptr;
     QLabel *m_attachment = nullptr;
     QString m_fileName;
@@ -707,12 +792,13 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     pendingToolbar->addWidget(cancelPendingNotice);
     pendingToolbar->addWidget(fullScreenPending);
     layout->addLayout(pendingToolbar);
-    m_pendingTable = new QTableWidget(0, 9, panel);
+    m_pendingTable = new QTableWidget(0, 12, panel);
     m_pendingTable->setProperty("excelExportTitle", QStringLiteral("在检列表"));
     m_pendingTable->setHorizontalHeaderLabels({
         QStringLiteral("序号"), QStringLiteral("通知单号"), QStringLiteral("通知日期"),
         QStringLiteral("到货日期"), QStringLiteral("委托人员"), QStringLiteral("通知单位"),
-        QStringLiteral("供应商"), QStringLiteral("明细数"), QStringLiteral("状态")});
+        QStringLiteral("供应商"), QStringLiteral("明细数"), QStringLiteral("送检数量"),
+        QStringLiteral("合格数量"), QStringLiteral("不合格数量"), QStringLiteral("检验进度")});
     m_pendingTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_pendingTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_pendingTable->horizontalHeader()->setStretchLastSection(true);
@@ -1021,20 +1107,29 @@ void InspectionPage::populateTable(QTableWidget *table, const QStringList &statu
     const bool pending = table == m_pendingTable;
     for (int index = 0; index < notices.size(); ++index) {
         const InspectionNotice &notice = notices.at(index);
+        if (!pending && notice.status == QStringLiteral("PENDING")
+            && notice.inspectionResult == QStringLiteral("PENDING")
+            && !notice.inspectionDate.isValid()) {
+            continue;
+        }
         const int row = table->rowCount();
         table->insertRow(row);
         QStringList values;
         if (pending) {
-            values = {QString::number(index + 1), notice.inspectionNumber,
+            values = {QString::number(row + 1), notice.inspectionNumber,
                       notice.notificationDate.toString(Qt::ISODate),
                       notice.arrivalDate.toString(Qt::ISODate), notice.entrustedBy,
                       notice.notificationDepartment, notice.supplier,
-                      QString::number(notice.lineCount), statusText(notice.status)};
+                      QString::number(notice.lineCount), quantityText(notice.totalQuantity),
+                      quantityText(notice.qualifiedQuantity),
+                      quantityText(notice.unqualifiedQuantity),
+                      notice.inspectionResult == QStringLiteral("PENDING")
+                          ? statusText(notice.status) : inspectionResultText(notice)};
         } else {
-            values = {QString::number(index + 1), notice.inspectionNumber,
+            values = {QString::number(row + 1), notice.inspectionNumber,
                       notice.notificationDate.toString(Qt::ISODate), notice.purchaseOrderNumber,
                       notice.supplier, notice.inspectionDate.toString(Qt::ISODate),
-                      notice.inspectorName, statusText(notice.inspectionResult),
+                      notice.inspectorName, inspectionResultText(notice),
                       notice.linkedDocumentId > 0 ? QString::number(notice.linkedDocumentId) : QString(),
                       QString::number(notice.lineCount)};
         }
@@ -1052,6 +1147,6 @@ void InspectionPage::refreshNotices()
 {
     populateTable(m_pendingTable, {QStringLiteral("PENDING")});
     populateTable(m_historyTable,
-                  {QStringLiteral("QUALIFIED"), QStringLiteral("UNQUALIFIED"),
+                  {QStringLiteral("PENDING"), QStringLiteral("QUALIFIED"), QStringLiteral("UNQUALIFIED"),
                    QStringLiteral("USED")});
 }
