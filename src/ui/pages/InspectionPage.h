@@ -37,8 +37,10 @@ private slots:
 private:
     QWidget *activeDialogParent();
     qlonglong selectedNoticeId(QTableWidget *table) const;
+    qlonglong selectedResultId(QTableWidget *table) const;
     bool editNotice(qlonglong noticeId = 0);
     void populateTable(QTableWidget *table, const QStringList &statuses);
+    void populateResultHistory();
 
     QSqlDatabase m_database;
     Session m_session;

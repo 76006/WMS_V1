@@ -573,11 +573,13 @@ private:
 class ResultDialog final : public QDialog
 {
 public:
-    ResultDialog(QSqlDatabase database, Session session, qlonglong noticeId, QWidget *parent = nullptr)
+    ResultDialog(QSqlDatabase database, Session session, qlonglong noticeId,
+                 qlonglong resultId = 0, QWidget *parent = nullptr)
         : QDialog(parent), m_database(std::move(database)), m_session(std::move(session)),
-          m_noticeId(noticeId)
+          m_noticeId(noticeId), m_resultId(resultId)
     {
-        setWindowTitle(QStringLiteral("录入/修改检验结果"));
+        setWindowTitle(resultId > 0 ? QStringLiteral("修改本次检验记录")
+                                    : QStringLiteral("录入本次检验结果"));
         resize(980, 620);
         auto *root = new QVBoxLayout(this);
         auto *form = new QFormLayout;
@@ -607,7 +609,7 @@ public:
         m_results = new QTableWidget(0, 7, this);
         m_results->setHorizontalHeaderLabels({
             QStringLiteral("序号"), QStringLiteral("物料"), QStringLiteral("规格型号"),
-            QStringLiteral("送检数量"), QStringLiteral("已入库"),
+            QStringLiteral("批号"), QStringLiteral("本次检验数量"),
             QStringLiteral("合格数量"), QStringLiteral("不合格数量")});
         m_results->verticalHeader()->hide();
         m_results->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -620,7 +622,7 @@ public:
         m_results->setColumnWidth(6, 150);
         root->addWidget(m_results, 1);
         auto *hint = new QLabel(
-            QStringLiteral("每行合格数量与不合格数量之和必须等于送检数量。存在合格数量时必须已有或重新上传检验附件；合格数量可入库，不合格数量继续保留在在检列表。"), this);
+            QStringLiteral("当前窗口只保存本次检验。每行合格数量与不合格数量之和必须等于本次检验数量；本次记录会独立保留，不会覆盖以前的检验表。存在合格数量时必须上传本次检验附件。"), this);
         hint->setWordWrap(true);
         hint->setObjectName(QStringLiteral("mutedText"));
         root->addWidget(hint);
@@ -649,15 +651,38 @@ public:
             m_attachment->setText(QStringLiteral("已选择：%1").arg(m_fileName));
         });
         InspectionService service(m_database, m_session.userId);
-        InspectionNotice notice;
         QString error;
-        if (service.readNotice(m_noticeId, &notice, &error)) {
-            if (notice.inspectionDate.isValid()) m_date->setDate(notice.inspectionDate);
-            if (!notice.inspectorName.isEmpty()) m_inspector->setText(notice.inspectorName);
-            m_conclusion->setPlainText(notice.conclusion);
-            if (notice.inspectionAttachmentId > 0)
-                m_attachment->setText(QStringLiteral("已存在检验附件；不选择新文件则保留原附件"));
-            for (const InspectionNoticeLine &line : std::as_const(notice.lines)) {
+        QList<InspectionNoticeLine> displayLines;
+        if (m_resultId > 0) {
+            InspectionResultRecord record;
+            if (!service.readResult(m_resultId, &record, &error)) {
+                QMessageBox::warning(this, QStringLiteral("读取本次检验记录失败"), error);
+                return;
+            }
+            m_noticeId = record.noticeId;
+            m_date->setDate(record.inspectionDate);
+            m_inspector->setText(record.inspectorName);
+            m_conclusion->setPlainText(record.conclusion);
+            if (record.attachmentId > 0)
+                m_attachment->setText(QStringLiteral("本次检验已有附件；不选择新文件则保留"));
+            displayLines = record.lines;
+        } else {
+            InspectionNotice notice;
+            if (!service.readNotice(m_noticeId, &notice, &error)) {
+                QMessageBox::warning(this, QStringLiteral("读取送检通知失败"), error);
+                return;
+            }
+            for (InspectionNoticeLine line : std::as_const(notice.lines)) {
+                const bool inspected = line.qualifiedQuantity > 0.0000001
+                    || line.unqualifiedQuantity > 0.0000001;
+                line.quantity = inspected ? line.unqualifiedQuantity : line.quantity;
+                if (line.quantity <= 0.0000001) continue;
+                line.qualifiedQuantity = line.quantity;
+                line.unqualifiedQuantity = 0.0;
+                displayLines.append(line);
+            }
+        }
+        for (const InspectionNoticeLine &line : std::as_const(displayLines)) {
                 const int row = m_results->rowCount();
                 m_results->insertRow(row);
                 auto *number = new QTableWidgetItem(QString::number(row + 1));
@@ -667,15 +692,13 @@ public:
                     QStringLiteral("%1 - %2").arg(line.materialCode, line.materialName)));
                 m_results->setItem(row, 2, new QTableWidgetItem(line.specification));
                 m_results->setItem(row, 3, new QTableWidgetItem(
-                    QString::number(line.quantity, 'g', 12)));
+                    line.batchNumber));
                 m_results->setItem(row, 4, new QTableWidgetItem(
-                    QString::number(line.inboundQuantity, 'g', 12)));
-                auto *qualified = quantitySpin(line.quantity, line.inboundQuantity);
-                auto *unqualified = quantitySpin(line.quantity - line.inboundQuantity, 0.0);
-                const bool hasRecordedQuantity = line.qualifiedQuantity > 0.0000001
-                    || line.unqualifiedQuantity > 0.0000001;
-                qualified->setValue(hasRecordedQuantity ? line.qualifiedQuantity : line.quantity);
-                unqualified->setValue(hasRecordedQuantity ? line.unqualifiedQuantity : 0.0);
+                    QString::number(line.quantity, 'g', 12)));
+                auto *qualified = quantitySpin(line.quantity, 0.0);
+                auto *unqualified = quantitySpin(line.quantity, 0.0);
+                qualified->setValue(line.qualifiedQuantity);
+                unqualified->setValue(line.unqualifiedQuantity);
                 m_results->setCellWidget(row, 5, qualified);
                 m_results->setCellWidget(row, 6, unqualified);
                 connect(qualified, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
@@ -688,9 +711,6 @@ public:
                     QSignalBlocker blocker(qualified);
                     qualified->setValue(qMax(0.0, total - value));
                 });
-            }
-        } else {
-            QMessageBox::warning(this, QStringLiteral("读取送检通知失败"), error);
         }
     }
 
@@ -728,7 +748,10 @@ private:
         }
         InspectionService service(m_database, m_session.userId);
         QString error;
-        if (!service.recordResult(m_noticeId, value, &error)) {
+        const bool ok = m_resultId > 0
+            ? service.updateResult(m_resultId, value, &error)
+            : service.recordResult(m_noticeId, value, &error);
+        if (!ok) {
             QMessageBox::warning(this, QStringLiteral("保存检验结果失败"), error);
             return;
         }
@@ -739,6 +762,7 @@ private:
     QSqlDatabase m_database;
     Session m_session;
     qlonglong m_noticeId = 0;
+    qlonglong m_resultId = 0;
     bool m_saved = false;
     QDateEdit *m_date = nullptr;
     QLineEdit *m_inspector = nullptr;
@@ -780,7 +804,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     pendingToolbar->addWidget(new QLabel(QStringLiteral("在检列表"), panel));
     pendingToolbar->addStretch();
     m_editPendingButton = new QPushButton(QStringLiteral("修改通知单"), panel);
-    m_recordResultButton = new QPushButton(QStringLiteral("录入/修改检验结果"), panel);
+    m_recordResultButton = new QPushButton(QStringLiteral("录入本次检验结果"), panel);
     auto *openPendingNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
     auto *cancelPendingNotice = new QPushButton(QStringLiteral("撤销通知单"), panel);
     cancelPendingNotice->setProperty("danger", true);
@@ -805,10 +829,10 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     layout->addWidget(m_pendingTable, 1);
 
     auto *historyToolbar = new QHBoxLayout;
-    historyToolbar->addWidget(new QLabel(QStringLiteral("已检及历史通知单"), panel));
+    historyToolbar->addWidget(new QLabel(QStringLiteral("分次检验记录"), panel));
     historyToolbar->addStretch();
     m_viewHistoryButton = new QPushButton(QStringLiteral("查看/修改通知单"), panel);
-    auto *historyResult = new QPushButton(QStringLiteral("修改检验结果"), panel);
+    auto *historyResult = new QPushButton(QStringLiteral("修改本次检验"), panel);
     auto *openHistoryNotice = new QPushButton(QStringLiteral("打开通知单Excel"), panel);
     auto *openInspectionAttachment = new QPushButton(QStringLiteral("打开检验附件"), panel);
     auto *cancelHistoryNotice = new QPushButton(QStringLiteral("撤销通知单"), panel);
@@ -823,13 +847,13 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
     historyToolbar->addWidget(cancelHistoryNotice);
     historyToolbar->addWidget(fullScreenHistory);
     layout->addLayout(historyToolbar);
-    m_historyTable = new QTableWidget(0, 10, panel);
-    m_historyTable->setProperty("excelExportTitle", QStringLiteral("已检及历史通知单"));
+    m_historyTable = new QTableWidget(0, 11, panel);
+    m_historyTable->setProperty("excelExportTitle", QStringLiteral("分次检验记录"));
     m_historyTable->setHorizontalHeaderLabels({
-        QStringLiteral("序号"), QStringLiteral("通知单号"), QStringLiteral("通知日期"),
-        QStringLiteral("采购单号"), QStringLiteral("供应商"), QStringLiteral("检验日期"),
-        QStringLiteral("检验员"), QStringLiteral("检验结果"), QStringLiteral("关联入库单ID"),
-        QStringLiteral("明细数")});
+        QStringLiteral("序号"), QStringLiteral("通知单号"), QStringLiteral("检验次数"),
+        QStringLiteral("通知日期"), QStringLiteral("采购单号"), QStringLiteral("供应商"),
+        QStringLiteral("检验日期"), QStringLiteral("检验员"), QStringLiteral("本次检验结果"),
+        QStringLiteral("检验说明"), QStringLiteral("明细数")});
     m_historyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_historyTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_historyTable->horizontalHeader()->setStretchLastSection(true);
@@ -886,35 +910,68 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
         file.close();
         OfficeTemplateService::openFileWithApplicationChoice(path, activeDialogParent());
     };
+    const auto openResultAttachment = [this] {
+        const qlonglong resultId = selectedResultId(m_historyTable);
+        if (resultId <= 0) {
+            QMessageBox::information(activeDialogParent(), QStringLiteral("请选择检验记录"),
+                                     QStringLiteral("请先选择一次具体的检验记录。"));
+            return;
+        }
+        QSqlQuery query(m_database);
+        query.prepare(QStringLiteral(
+            "SELECT a.original_file_name,a.file_data FROM inspection_results r "
+            "JOIN attachments a ON a.id=r.attachment_id "
+            "WHERE r.id=? AND a.is_deleted=0"));
+        query.addBindValue(resultId);
+        if (!query.exec() || !query.next()) {
+            QMessageBox::information(activeDialogParent(), QStringLiteral("没有可打开的文件"),
+                                     QStringLiteral("该次检验没有上传附件。"));
+            return;
+        }
+        const QString name = QFileInfo(query.value(0).toString()).fileName();
+        const QByteArray data = query.value(1).toByteArray();
+        const QString directory = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                      .filePath(QStringLiteral("IceBeautyWms/inspection-files"));
+        QDir().mkpath(directory);
+        const QString path = QDir(directory).filePath(
+            QStringLiteral("%1_%2").arg(QUuid::createUuid().toString(QUuid::WithoutBraces), name));
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size()) {
+            QMessageBox::warning(activeDialogParent(), QStringLiteral("打开失败"), file.errorString());
+            return;
+        }
+        file.close();
+        OfficeTemplateService::openFileWithApplicationChoice(path, activeDialogParent());
+    };
     connect(openPendingNotice, &QPushButton::clicked, this,
             [openNoticeFile, this] { openNoticeFile(m_pendingTable, true); });
     connect(openHistoryNotice, &QPushButton::clicked, this,
             [openNoticeFile, this] { openNoticeFile(m_historyTable, true); });
     connect(openInspectionAttachment, &QPushButton::clicked, this,
-            [openNoticeFile, this] { openNoticeFile(m_historyTable, false); });
+            openResultAttachment);
     connect(fullScreenPending, &QPushButton::clicked, this, [this, openNoticeFile] {
         TableExcelExport::fullScreenTable(m_pendingTable, QStringLiteral("全部在检通知单"), this,
             [this] { refreshNotices(); }, {
                 {QStringLiteral("修改通知单"), [this] { editPendingNotice(); }},
-                {QStringLiteral("录入/修改检验结果"), [this] { recordInspectionResult(); }},
+                {QStringLiteral("录入本次检验结果"), [this] { recordInspectionResult(); }},
                 {QStringLiteral("撤销通知单"), [this] { cancelSelectedNotice(m_pendingTable); }, true},
                 {QStringLiteral("打开通知单Excel"), [this, openNoticeFile] { openNoticeFile(m_pendingTable, true); }}
             });
     });
-    connect(fullScreenHistory, &QPushButton::clicked, this, [this, openNoticeFile] {
-        TableExcelExport::fullScreenTable(m_historyTable, QStringLiteral("全部已检及历史通知单"), this,
+    connect(fullScreenHistory, &QPushButton::clicked, this, [this, openNoticeFile, openResultAttachment] {
+        TableExcelExport::fullScreenTable(m_historyTable, QStringLiteral("全部分次检验记录"), this,
             [this] { refreshNotices(); }, {
                 {QStringLiteral("查看/修改通知单"), [this] { viewHistoryNotice(); }},
-                {QStringLiteral("修改检验结果"), [this] { editHistoryResult(); }},
+                {QStringLiteral("修改本次检验"), [this] { editHistoryResult(); }},
                 {QStringLiteral("撤销通知单"), [this] { cancelSelectedNotice(m_historyTable); }, true},
                 {QStringLiteral("打开通知单Excel"), [this, openNoticeFile] { openNoticeFile(m_historyTable, true); }},
-                {QStringLiteral("打开检验附件"), [this, openNoticeFile] { openNoticeFile(m_historyTable, false); }}
+                {QStringLiteral("打开本次检验附件"), openResultAttachment}
             });
     });
     connect(m_pendingTable, &QTableWidget::cellDoubleClicked, this,
             [this](int, int) { editPendingNotice(); });
     connect(m_historyTable, &QTableWidget::cellDoubleClicked, this,
-            [this](int, int) { viewHistoryNotice(); });
+            [this](int, int) { editHistoryResult(); });
     refreshNotices();
 }
 
@@ -928,6 +985,13 @@ qlonglong InspectionPage::selectedNoticeId(QTableWidget *table) const
     if (!table || table->currentRow() < 0 || !table->item(table->currentRow(), 0)) return 0;
     if (table->isRowHidden(table->currentRow()) || table->selectedItems().isEmpty()) return 0;
     return table->item(table->currentRow(), 0)->data(Qt::UserRole).toLongLong();
+}
+
+qlonglong InspectionPage::selectedResultId(QTableWidget *table) const
+{
+    if (!table || table->currentRow() < 0 || !table->item(table->currentRow(), 0)) return 0;
+    if (table->isRowHidden(table->currentRow()) || table->selectedItems().isEmpty()) return 0;
+    return table->item(table->currentRow(), 0)->data(Qt::UserRole + 1).toLongLong();
 }
 
 QWidget *InspectionPage::activeDialogParent()
@@ -980,7 +1044,7 @@ void InspectionPage::recordInspectionResult()
         QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"), QStringLiteral("请先选择一条在检通知单。"));
         return;
     }
-    ResultDialog dialog(m_database, m_session, id, activeDialogParent());
+    ResultDialog dialog(m_database, m_session, id, 0, activeDialogParent());
     dialog.exec();
     if (dialog.saved()) {
         refreshNotices();
@@ -990,13 +1054,14 @@ void InspectionPage::recordInspectionResult()
 
 void InspectionPage::editHistoryResult()
 {
-    const qlonglong id = selectedNoticeId(m_historyTable);
-    if (id <= 0) {
-        QMessageBox::information(activeDialogParent(), QStringLiteral("请选择通知单"),
-                                 QStringLiteral("请先选择一条历史通知单。"));
+    const qlonglong noticeId = selectedNoticeId(m_historyTable);
+    const qlonglong resultId = selectedResultId(m_historyTable);
+    if (noticeId <= 0 || resultId <= 0) {
+        QMessageBox::information(activeDialogParent(), QStringLiteral("请选择检验记录"),
+                                 QStringLiteral("请先选择一次具体的检验记录。"));
         return;
     }
-    ResultDialog dialog(m_database, m_session, id, activeDialogParent());
+    ResultDialog dialog(m_database, m_session, noticeId, resultId, activeDialogParent());
     dialog.exec();
     if (dialog.saved()) {
         refreshNotices();
@@ -1143,10 +1208,44 @@ void InspectionPage::populateTable(QTableWidget *table, const QStringList &statu
     if (table->rowCount() > 0) table->selectRow(0);
 }
 
+void InspectionPage::populateResultHistory()
+{
+    m_historyTable->setRowCount(0);
+    InspectionService service(m_database, m_session.userId);
+    QList<InspectionResultRecord> records;
+    QString error;
+    const QString keyword = m_historyTable->property("tableFullScreenActive").toBool()
+        ? QString() : m_searchEdit->text();
+    if (!service.listResults(keyword, &records, &error)) {
+        QMessageBox::warning(activeDialogParent(), QStringLiteral("查询分次检验记录失败"), error);
+        return;
+    }
+    for (const InspectionResultRecord &record : std::as_const(records)) {
+        const int row = m_historyTable->rowCount();
+        m_historyTable->insertRow(row);
+        const QStringList values = {
+            QString::number(row + 1), record.inspectionNumber,
+            QStringLiteral("第%1次").arg(record.sequenceNumber),
+            record.notificationDate.toString(Qt::ISODate), record.purchaseOrderNumber,
+            record.supplier, record.inspectionDate.toString(Qt::ISODate),
+            record.inspectorName,
+            QStringLiteral("合格%1个 不合格%2个")
+                .arg(quantityText(record.qualifiedQuantity),
+                     quantityText(record.unqualifiedQuantity)),
+            record.conclusion, QString::number(record.lineCount)};
+        for (int column = 0; column < values.size(); ++column) {
+            auto *item = new QTableWidgetItem(values.at(column));
+            item->setData(Qt::UserRole, record.noticeId);
+            item->setData(Qt::UserRole + 1, record.id);
+            m_historyTable->setItem(row, column, item);
+        }
+    }
+    m_historyTable->resizeColumnsToContents();
+    if (m_historyTable->rowCount() > 0) m_historyTable->selectRow(0);
+}
+
 void InspectionPage::refreshNotices()
 {
     populateTable(m_pendingTable, {QStringLiteral("PENDING")});
-    populateTable(m_historyTable,
-                  {QStringLiteral("PENDING"), QStringLiteral("QUALIFIED"), QStringLiteral("UNQUALIFIED"),
-                   QStringLiteral("USED")});
+    populateResultHistory();
 }

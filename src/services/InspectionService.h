@@ -55,6 +55,26 @@ struct InspectionNoticeResult
     QList<InspectionNoticeLineResult> lines;
 };
 
+struct InspectionResultRecord
+{
+    qlonglong id = 0;
+    qlonglong noticeId = 0;
+    QString inspectionNumber;
+    int sequenceNumber = 0;
+    QDate notificationDate;
+    QString purchaseOrderNumber;
+    QString supplier;
+    QDate inspectionDate;
+    QString inspectorName;
+    QString conclusion;
+    qlonglong attachmentId = 0;
+    QDateTime createdAt;
+    int lineCount = 0;
+    double qualifiedQuantity = 0.0;
+    double unqualifiedQuantity = 0.0;
+    QList<InspectionNoticeLine> lines;
+};
+
 struct InspectionTemplateArtifact
 {
     QString payload;
@@ -130,6 +150,15 @@ public:
     bool recordResult(qlonglong noticeId,
                       const InspectionNoticeResult &result,
                       QString *errorMessage = nullptr);
+    bool updateResult(qlonglong resultId,
+                      const InspectionNoticeResult &result,
+                      QString *errorMessage = nullptr);
+    bool readResult(qlonglong resultId,
+                    InspectionResultRecord *record,
+                    QString *errorMessage = nullptr) const;
+    bool listResults(const QString &keyword,
+                     QList<InspectionResultRecord> *records,
+                     QString *errorMessage = nullptr) const;
     // UI生成通知单Excel后回写载荷、归档路径及可选的数据库文件附件。
     bool recordTemplateArtifact(qlonglong noticeId,
                                 const InspectionTemplateArtifact &artifact,
@@ -149,6 +178,12 @@ private:
                               const QString &mimeType,
                               const QByteArray &data,
                               QString *errorMessage);
+    qlonglong storeResultAttachment(qlonglong resultId,
+                                    const QString &fileName,
+                                    const QString &mimeType,
+                                    const QByteArray &data,
+                                    QString *errorMessage);
+    bool refreshNoticeResultSummary(qlonglong noticeId, QString *errorMessage);
     bool markAttachmentDeleted(qlonglong attachmentId, QString *errorMessage);
     bool writeAudit(const QString &action,
                     qlonglong noticeId,

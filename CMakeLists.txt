@@ -134,6 +134,7 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/016_issue_outbound_types.sql
         database/migrations/017_issue_line_usage.sql
         database/migrations/018_inspection_quantities.sql
+        database/migrations/019_inspection_result_records.sql
         resources/PdfPreview.qml
         resources/fill_office_template.ps1
         resources/styles.qss

@@ -9,6 +9,7 @@
 #include <QVariant>
 
 #include <cmath>
+#include <numeric>
 #include <utility>
 
 namespace {
@@ -610,6 +611,38 @@ qlonglong InspectionService::storeAttachment(qlonglong noticeId,
     return query.lastInsertId().toLongLong();
 }
 
+qlonglong InspectionService::storeResultAttachment(qlonglong resultId,
+                                                    const QString &fileName,
+                                                    const QString &mimeType,
+                                                    const QByteArray &data,
+                                                    QString *errorMessage)
+{
+    if (data.isEmpty() || fileName.trimmed().isEmpty() || data.size() > MaximumAttachmentBytes) {
+        setError(errorMessage, data.size() > MaximumAttachmentBytes
+                                   ? QStringLiteral("检验附件不能超过50 MB。")
+                                   : QStringLiteral("检验附件文件名或内容为空。"));
+        return 0;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "INSERT INTO attachments(business_type,business_id,original_file_name,mime_type,file_size,"
+        "sha256,file_data,uploaded_by) VALUES('inspection_result',?,?,?,?,?,?,?)"));
+    query.addBindValue(resultId);
+    query.addBindValue(textValue(fileName));
+    query.addBindValue(textValue(mimeType));
+    query.addBindValue(data.size());
+    query.addBindValue(QString::fromLatin1(
+        QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex()));
+    query.addBindValue(data);
+    query.addBindValue(m_operatorId);
+    if (!query.exec()) {
+        setError(errorMessage, QStringLiteral("保存本次检验附件失败：%1")
+                                   .arg(query.lastError().text()));
+        return 0;
+    }
+    return query.lastInsertId().toLongLong();
+}
+
 bool InspectionService::recordResult(qlonglong noticeId,
                                      const InspectionNoticeResult &result,
                                      QString *errorMessage)
@@ -641,8 +674,7 @@ bool InspectionService::recordResult(qlonglong noticeId,
     }
     if (!beginImmediate(errorMessage)) return false;
     QSqlQuery current(m_database);
-    current.prepare(QStringLiteral(
-        "SELECT status,inspection_attachment_id FROM inspection_notices WHERE id=?"));
+    current.prepare(QStringLiteral("SELECT status FROM inspection_notices WHERE id=?"));
     current.addBindValue(noticeId);
     if (!current.exec() || !current.next()) {
         setError(errorMessage, QStringLiteral("送检通知不存在或读取失败：%1").arg(current.lastError().text()));
@@ -656,14 +688,24 @@ bool InspectionService::recordResult(qlonglong noticeId,
         return false;
     }
 
-    double totalQualified = 0.0;
-    double totalUnqualified = 0.0;
-    double totalInbound = 0.0;
-    int storedLineCount = 0;
+    struct PendingLine {
+        qlonglong id = 0;
+        int lineNumber = 0;
+        qlonglong materialId = 0;
+        QString materialCode;
+        QString materialName;
+        QString specification;
+        QString batchNumber;
+        double availableQuantity = 0.0;
+    };
+    QList<PendingLine> pendingLines;
+    double resultQualified = 0.0;
     QSqlQuery items(m_database);
     items.prepare(QStringLiteral(
-        "SELECT id,line_number,quantity,inbound_quantity FROM inspection_notice_items "
-        "WHERE notice_id=? ORDER BY line_number"));
+        "SELECT i.id,i.line_number,i.material_id,m.code,m.name,m.specification,i.batch_no,"
+        "i.quantity,i.qualified_quantity,i.unqualified_quantity "
+        "FROM inspection_notice_items i JOIN materials m ON m.id=i.material_id "
+        "WHERE i.notice_id=? ORDER BY i.line_number"));
     items.addBindValue(noticeId);
     if (!items.exec()) {
         setError(errorMessage, QStringLiteral("读取送检数量失败：%1").arg(items.lastError().text()));
@@ -671,126 +713,138 @@ bool InspectionService::recordResult(qlonglong noticeId,
         return false;
     }
     while (items.next()) {
-        ++storedLineCount;
         const qlonglong itemId = items.value(0).toLongLong();
         const int lineNumber = items.value(1).toInt();
-        const double quantity = items.value(2).toDouble();
-        const double inboundQuantity = items.value(3).toDouble();
+        const double quantity = items.value(7).toDouble();
+        const double previousQualified = items.value(8).toDouble();
+        const double previousUnqualified = items.value(9).toDouble();
+        const bool previouslyInspected = previousQualified > QuantityTolerance
+            || previousUnqualified > QuantityTolerance;
+        const double available = previouslyInspected ? previousUnqualified : quantity;
+        if (available <= QuantityTolerance) continue;
         const auto entered = enteredLines.constFind(itemId);
         if (entered == enteredLines.cend()) {
-            setError(errorMessage, QStringLiteral("第 %1 行缺少合格或不合格数量。")
+            setError(errorMessage, QStringLiteral("第 %1 行缺少本次合格或不合格数量。")
                                        .arg(lineNumber));
             rollback();
             return false;
         }
-        if (std::abs(entered->qualifiedQuantity + entered->unqualifiedQuantity - quantity)
+        if (std::abs(entered->qualifiedQuantity + entered->unqualifiedQuantity - available)
                 > QuantityTolerance) {
             setError(errorMessage,
-                     QStringLiteral("第 %1 行合格数量与不合格数量之和必须等于送检数量 %2。")
-                         .arg(lineNumber).arg(quantity, 0, 'g', 12));
+                     QStringLiteral("第 %1 行本次合格数量与不合格数量之和必须等于本次待检数量 %2。")
+                         .arg(lineNumber).arg(available, 0, 'g', 12));
             rollback();
             return false;
         }
-        if (entered->qualifiedQuantity + QuantityTolerance < inboundQuantity) {
-            setError(errorMessage,
-                     QStringLiteral("第 %1 行已有 %2 个合格品完成入库，合格数量不能低于已入库数量。")
-                         .arg(lineNumber).arg(inboundQuantity, 0, 'g', 12));
-            rollback();
-            return false;
-        }
-        totalQualified += entered->qualifiedQuantity;
-        totalUnqualified += entered->unqualifiedQuantity;
-        totalInbound += inboundQuantity;
+        resultQualified += entered->qualifiedQuantity;
+        pendingLines.append({itemId, lineNumber, items.value(2).toLongLong(),
+                             items.value(3).toString(), items.value(4).toString(),
+                             items.value(5).toString(), items.value(6).toString(), available});
     }
-    if (storedLineCount != enteredLines.size()) {
-        setError(errorMessage, QStringLiteral("检验明细与当前送检通知不一致，请关闭窗口后重新打开。"));
+    if (pendingLines.isEmpty()) {
+        setError(errorMessage, QStringLiteral("该送检通知当前没有需要再次检验的数量。"));
+        rollback();
+        return false;
+    }
+    if (pendingLines.size() != enteredLines.size()) {
+        setError(errorMessage, QStringLiteral("本次检验明细与当前待检明细不一致，请关闭窗口后重新打开。"));
+        rollback();
+        return false;
+    }
+    if (resultQualified > QuantityTolerance && result.attachmentData.isEmpty()) {
+        setError(errorMessage, QStringLiteral("本次检验存在合格数量，必须上传本次检验附件。"));
         rollback();
         return false;
     }
 
-    qlonglong attachmentId = current.value(1).toLongLong();
-    if (totalQualified > QuantityTolerance
-        && result.attachmentData.isEmpty() && attachmentId <= 0) {
-        setError(errorMessage, QStringLiteral("存在合格数量时必须上传检验附件。"));
+    QSqlQuery sequence(m_database);
+    sequence.prepare(QStringLiteral(
+        "SELECT COALESCE(MAX(sequence_no),0)+1 FROM inspection_results WHERE notice_id=?"));
+    sequence.addBindValue(noticeId);
+    if (!sequence.exec() || !sequence.next()) {
+        setError(errorMessage, QStringLiteral("生成检验次数失败：%1").arg(sequence.lastError().text()));
         rollback();
         return false;
     }
-    if (!result.attachmentData.isEmpty()) {
-        const qlonglong replacementId = storeAttachment(
-            noticeId, result.attachmentFileName, result.attachmentMimeType,
-            result.attachmentData, errorMessage);
-        if (replacementId <= 0) {
-            rollback();
-            return false;
-        }
-        if (!markAttachmentDeleted(attachmentId, errorMessage)) {
-            rollback();
-            return false;
-        }
-        attachmentId = replacementId;
-    }
-
-    QSqlQuery updateItem(m_database);
-    updateItem.prepare(QStringLiteral(
-        "UPDATE inspection_notice_items SET qualified_quantity=?,unqualified_quantity=? "
-        "WHERE id=? AND notice_id=?"));
-    for (auto entered = enteredLines.cbegin(); entered != enteredLines.cend(); ++entered) {
-        updateItem.bindValue(0, qMax(0.0, entered->qualifiedQuantity));
-        updateItem.bindValue(1, qMax(0.0, entered->unqualifiedQuantity));
-        updateItem.bindValue(2, entered.key());
-        updateItem.bindValue(3, noticeId);
-        if (!updateItem.exec() || updateItem.numRowsAffected() != 1) {
-            setError(errorMessage, QStringLiteral("保存送检明细数量失败：%1")
-                                       .arg(updateItem.lastError().text()));
-            rollback();
-            return false;
-        }
-    }
-
-    const QString normalizedResult = totalUnqualified > QuantityTolerance
-        ? QStringLiteral("UNQUALIFIED") : QStringLiteral("QUALIFIED");
-    const QString nextStatus = totalUnqualified > QuantityTolerance
-        ? QStringLiteral("PENDING")
-        : (totalQualified - totalInbound > QuantityTolerance
-               ? QStringLiteral("QUALIFIED") : QStringLiteral("USED"));
-    QSqlQuery update(m_database);
-    update.prepare(QStringLiteral(
-        "UPDATE inspection_notices SET status=?,inspector_name=?,inspection_date=?,"
-        "inspection_result=?,conclusion=?,inspection_attachment_id=?,updated_by=?,updated_at=?,"
-        "completed_at=? WHERE id=?"));
     const QString now = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
-    update.addBindValue(nextStatus);
-    update.addBindValue(textValue(result.inspectorName));
-    update.addBindValue(result.inspectionDate.toString(Qt::ISODate));
-    update.addBindValue(normalizedResult);
-    update.addBindValue(textValue(result.conclusion));
-    update.addBindValue(attachmentId > 0 ? QVariant(attachmentId) : QVariant());
-    update.addBindValue(m_operatorId);
-    update.addBindValue(now);
-    update.addBindValue(now);
-    update.addBindValue(noticeId);
-    if (!update.exec() || update.numRowsAffected() != 1) {
-        if (errorMessage && errorMessage->isEmpty()) {
-            setError(errorMessage, QStringLiteral("送检通知已被其他操作改变，请刷新后重试。"));
-        }
+    QSqlQuery insertResult(m_database);
+    insertResult.prepare(QStringLiteral(
+        "INSERT INTO inspection_results(notice_id,sequence_no,inspection_date,inspector_name,"
+        "conclusion,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)"));
+    insertResult.addBindValue(noticeId);
+    insertResult.addBindValue(sequence.value(0).toInt());
+    insertResult.addBindValue(result.inspectionDate.toString(Qt::ISODate));
+    insertResult.addBindValue(textValue(result.inspectorName));
+    insertResult.addBindValue(textValue(result.conclusion));
+    insertResult.addBindValue(m_operatorId);
+    insertResult.addBindValue(m_operatorId);
+    insertResult.addBindValue(now);
+    insertResult.addBindValue(now);
+    if (!insertResult.exec()) {
+        setError(errorMessage, QStringLiteral("新增本次检验记录失败：%1")
+                                   .arg(insertResult.lastError().text()));
         rollback();
         return false;
     }
-    QSqlQuery syncInbound(m_database);
-    syncInbound.prepare(QStringLiteral(
-        "UPDATE inbound_inspection_details SET inspection_date=?,inspector_name=?,"
-        "conclusion=?,inspection_attachment_id=? WHERE inspection_notice_id=?"));
-    syncInbound.addBindValue(result.inspectionDate.toString(Qt::ISODate));
-    syncInbound.addBindValue(textValue(result.inspectorName));
-    syncInbound.addBindValue(textValue(result.conclusion));
-    syncInbound.addBindValue(attachmentId > 0 ? QVariant(attachmentId) : QVariant());
-    syncInbound.addBindValue(noticeId);
-    if (!syncInbound.exec()
+    const qlonglong resultId = insertResult.lastInsertId().toLongLong();
+    qlonglong attachmentId = 0;
+    if (!result.attachmentData.isEmpty()) {
+        attachmentId = storeResultAttachment(resultId, result.attachmentFileName,
+                                             result.attachmentMimeType, result.attachmentData,
+                                             errorMessage);
+        if (attachmentId <= 0) {
+            rollback();
+            return false;
+        }
+        QSqlQuery attach(m_database);
+        attach.prepare(QStringLiteral("UPDATE inspection_results SET attachment_id=? WHERE id=?"));
+        attach.addBindValue(attachmentId);
+        attach.addBindValue(resultId);
+        if (!attach.exec()) {
+            setError(errorMessage, QStringLiteral("关联本次检验附件失败：%1")
+                                       .arg(attach.lastError().text()));
+            rollback();
+            return false;
+        }
+    }
+
+    QSqlQuery insertItem(m_database);
+    insertItem.prepare(QStringLiteral(
+        "INSERT INTO inspection_result_items(result_id,notice_item_id,line_number,material_id,"
+        "material_code,material_name,specification,batch_no,inspected_quantity,"
+        "qualified_quantity,unqualified_quantity) VALUES(?,?,?,?,?,?,?,?,?,?,?)"));
+    for (const PendingLine &line : std::as_const(pendingLines)) {
+        const InspectionNoticeLineResult entered = enteredLines.value(line.id);
+        insertItem.bindValue(0, resultId);
+        insertItem.bindValue(1, line.id);
+        insertItem.bindValue(2, line.lineNumber);
+        insertItem.bindValue(3, line.materialId);
+        insertItem.bindValue(4, line.materialCode);
+        insertItem.bindValue(5, line.materialName);
+        insertItem.bindValue(6, line.specification);
+        insertItem.bindValue(7, line.batchNumber);
+        insertItem.bindValue(8, line.availableQuantity);
+        insertItem.bindValue(9, qMax(0.0, entered.qualifiedQuantity));
+        insertItem.bindValue(10, qMax(0.0, entered.unqualifiedQuantity));
+        if (!insertItem.exec()) {
+            setError(errorMessage, QStringLiteral("保存本次检验明细失败：%1")
+                                       .arg(insertItem.lastError().text()));
+            rollback();
+            return false;
+        }
+    }
+
+    if (!refreshNoticeResultSummary(noticeId, errorMessage)
         || !writeAudit(QStringLiteral("INSPECTION_RESULT_RECORD"), noticeId,
-                       QStringLiteral("%1 -> %2 / 合格%3 / 不合格%4")
-                           .arg(status, nextStatus)
-                           .arg(totalQualified, 0, 'g', 12)
-                           .arg(totalUnqualified, 0, 'g', 12),
+                       QStringLiteral("第%1次检验 / 本次合格%2 / 本次不合格%3")
+                           .arg(sequence.value(0).toInt())
+                           .arg(resultQualified, 0, 'g', 12)
+                           .arg(std::accumulate(
+                               enteredLines.cbegin(), enteredLines.cend(), 0.0,
+                               [](double total, const InspectionNoticeLineResult &line) {
+                                   return total + line.unqualifiedQuantity;
+                               }), 0, 'g', 12),
                        errorMessage)
         || !commit(errorMessage)) {
         if (errorMessage && errorMessage->isEmpty()) {
@@ -798,6 +852,445 @@ bool InspectionService::recordResult(qlonglong noticeId,
         }
         rollback();
         return false;
+    }
+    return true;
+}
+
+bool InspectionService::refreshNoticeResultSummary(qlonglong noticeId,
+                                                   QString *errorMessage)
+{
+    struct ItemState {
+        qlonglong id = 0;
+        int lineNumber = 0;
+        qlonglong materialId = 0;
+        QString batchNumber;
+        double quantity = 0.0;
+        double inboundQuantity = 0.0;
+        double qualifiedQuantity = 0.0;
+        double unqualifiedQuantity = 0.0;
+        bool hasResult = false;
+    };
+    QMap<qlonglong, ItemState> states;
+    QMap<QString, qlonglong> identityIndex;
+    QSqlQuery items(m_database);
+    items.prepare(QStringLiteral(
+        "SELECT id,line_number,material_id,batch_no,quantity,inbound_quantity "
+        "FROM inspection_notice_items WHERE notice_id=? ORDER BY line_number"));
+    items.addBindValue(noticeId);
+    if (!items.exec()) {
+        setError(errorMessage, QStringLiteral("读取送检汇总明细失败：%1")
+                                   .arg(items.lastError().text()));
+        return false;
+    }
+    while (items.next()) {
+        ItemState state;
+        state.id = items.value(0).toLongLong();
+        state.lineNumber = items.value(1).toInt();
+        state.materialId = items.value(2).toLongLong();
+        state.batchNumber = items.value(3).toString();
+        state.quantity = items.value(4).toDouble();
+        state.inboundQuantity = items.value(5).toDouble();
+        states.insert(state.id, state);
+        identityIndex.insert(QStringLiteral("%1|%2|%3")
+                                 .arg(state.lineNumber)
+                                 .arg(state.materialId)
+                                 .arg(state.batchNumber.trimmed().toUpper()),
+                             state.id);
+    }
+
+    QSqlQuery resultItems(m_database);
+    resultItems.prepare(QStringLiteral(
+        "SELECT ri.notice_item_id,ri.line_number,ri.material_id,ri.batch_no,"
+        "ri.inspected_quantity,ri.qualified_quantity,ri.unqualified_quantity,r.sequence_no "
+        "FROM inspection_result_items ri JOIN inspection_results r ON r.id=ri.result_id "
+        "WHERE r.notice_id=? ORDER BY r.sequence_no,ri.line_number"));
+    resultItems.addBindValue(noticeId);
+    if (!resultItems.exec()) {
+        setError(errorMessage, QStringLiteral("读取分次检验记录失败：%1")
+                                   .arg(resultItems.lastError().text()));
+        return false;
+    }
+    while (resultItems.next()) {
+        qlonglong itemId = resultItems.value(0).toLongLong();
+        auto state = states.find(itemId);
+        if (state == states.end()) {
+            const QString identity = QStringLiteral("%1|%2|%3")
+                .arg(resultItems.value(1).toInt())
+                .arg(resultItems.value(2).toLongLong())
+                .arg(resultItems.value(3).toString().trimmed().toUpper());
+            state = states.find(identityIndex.value(identity));
+        }
+        if (state == states.end()) continue;
+        const double inspected = resultItems.value(4).toDouble();
+        const double qualified = resultItems.value(5).toDouble();
+        const double unqualified = resultItems.value(6).toDouble();
+        const double available = state->hasResult ? state->unqualifiedQuantity : state->quantity;
+        if (std::abs(qualified + unqualified - inspected) > QuantityTolerance
+            || std::abs(inspected - available) > QuantityTolerance) {
+            setError(errorMessage,
+                     QStringLiteral("第%1次检验的第%2行数量与前一次剩余待检数量不一致，"
+                                    "请先修正该次检验记录。")
+                         .arg(resultItems.value(7).toInt())
+                         .arg(resultItems.value(1).toInt()));
+            return false;
+        }
+        state->qualifiedQuantity += qualified;
+        state->unqualifiedQuantity = unqualified;
+        state->hasResult = true;
+    }
+
+    double totalQualified = 0.0;
+    double totalUnqualified = 0.0;
+    double totalInbound = 0.0;
+    bool hasAnyResult = false;
+    QSqlQuery updateItem(m_database);
+    updateItem.prepare(QStringLiteral(
+        "UPDATE inspection_notice_items SET qualified_quantity=?,unqualified_quantity=? WHERE id=?"));
+    for (auto state = states.cbegin(); state != states.cend(); ++state) {
+        const double qualified = state->hasResult ? state->qualifiedQuantity : 0.0;
+        const double unqualified = state->hasResult ? state->unqualifiedQuantity : 0.0;
+        if (qualified + QuantityTolerance < state->inboundQuantity) {
+            setError(errorMessage,
+                     QStringLiteral("第%1行已有%2个合格品入库，修改后的历次合格数量不能低于已入库数量。")
+                         .arg(state->lineNumber)
+                         .arg(state->inboundQuantity, 0, 'g', 12));
+            return false;
+        }
+        updateItem.bindValue(0, qualified);
+        updateItem.bindValue(1, unqualified);
+        updateItem.bindValue(2, state->id);
+        if (!updateItem.exec()) {
+            setError(errorMessage, QStringLiteral("更新送检汇总数量失败：%1")
+                                       .arg(updateItem.lastError().text()));
+            return false;
+        }
+        totalQualified += qualified;
+        totalUnqualified += unqualified;
+        totalInbound += state->inboundQuantity;
+        hasAnyResult = hasAnyResult || state->hasResult;
+    }
+
+    QSqlQuery latest(m_database);
+    latest.prepare(QStringLiteral(
+        "SELECT r.inspection_date,r.inspector_name,r.conclusion,"
+        "COALESCE(r.attachment_id,(SELECT previous.attachment_id FROM inspection_results previous "
+        "WHERE previous.notice_id=r.notice_id AND previous.attachment_id IS NOT NULL "
+        "ORDER BY previous.sequence_no DESC LIMIT 1)),r.updated_at "
+        "FROM inspection_results r WHERE r.notice_id=? ORDER BY r.sequence_no DESC LIMIT 1"));
+    latest.addBindValue(noticeId);
+    if (!latest.exec()) {
+        setError(errorMessage, QStringLiteral("读取最近一次检验记录失败：%1")
+                                   .arg(latest.lastError().text()));
+        return false;
+    }
+    const bool hasLatest = latest.next();
+    const QString nextStatus = !hasAnyResult || totalUnqualified > QuantityTolerance
+        ? QStringLiteral("PENDING")
+        : (totalQualified - totalInbound > QuantityTolerance
+               ? QStringLiteral("QUALIFIED") : QStringLiteral("USED"));
+    const QString resultStatus = !hasAnyResult
+        ? QStringLiteral("PENDING")
+        : (totalUnqualified > QuantityTolerance
+               ? QStringLiteral("UNQUALIFIED") : QStringLiteral("QUALIFIED"));
+    QSqlQuery updateNotice(m_database);
+    updateNotice.prepare(QStringLiteral(
+        "UPDATE inspection_notices SET status=?,inspection_date=?,inspector_name=?,"
+        "inspection_result=?,conclusion=?,inspection_attachment_id=?,updated_by=?,updated_at=?,"
+        "completed_at=? WHERE id=?"));
+    updateNotice.addBindValue(nextStatus);
+    updateNotice.addBindValue(hasLatest ? latest.value(0) : QVariant());
+    updateNotice.addBindValue(hasLatest ? latest.value(1) : QVariant(QString()));
+    updateNotice.addBindValue(resultStatus);
+    updateNotice.addBindValue(hasLatest ? latest.value(2) : QVariant(QString()));
+    updateNotice.addBindValue(hasLatest && latest.value(3).toLongLong() > 0
+                                  ? latest.value(3) : QVariant());
+    updateNotice.addBindValue(m_operatorId);
+    updateNotice.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    updateNotice.addBindValue(hasLatest ? latest.value(4) : QVariant());
+    updateNotice.addBindValue(noticeId);
+    if (!updateNotice.exec() || updateNotice.numRowsAffected() != 1) {
+        setError(errorMessage, QStringLiteral("更新送检通知汇总失败：%1")
+                                   .arg(updateNotice.lastError().text()));
+        return false;
+    }
+
+    QSqlQuery syncInbound(m_database);
+    syncInbound.prepare(QStringLiteral(
+        "UPDATE inbound_inspection_details SET inspection_date=?,inspector_name=?,"
+        "conclusion=?,inspection_attachment_id=? WHERE inspection_notice_id=?"));
+    syncInbound.addBindValue(hasLatest ? latest.value(0) : QVariant());
+    syncInbound.addBindValue(hasLatest ? latest.value(1) : QVariant(QString()));
+    syncInbound.addBindValue(hasLatest ? latest.value(2) : QVariant(QString()));
+    syncInbound.addBindValue(hasLatest && latest.value(3).toLongLong() > 0
+                                 ? latest.value(3) : QVariant());
+    syncInbound.addBindValue(noticeId);
+    if (!syncInbound.exec()) {
+        setError(errorMessage, QStringLiteral("同步入库检验摘要失败：%1")
+                                   .arg(syncInbound.lastError().text()));
+        return false;
+    }
+    return true;
+}
+
+bool InspectionService::updateResult(qlonglong resultId,
+                                     const InspectionNoticeResult &result,
+                                     QString *errorMessage)
+{
+    if (resultId <= 0 || m_operatorId <= 0 || !result.inspectionDate.isValid()
+        || result.inspectorName.trimmed().isEmpty() || result.lines.isEmpty()) {
+        setError(errorMessage, QStringLiteral("检验日期、检验员或本次检验数量无效。"));
+        return false;
+    }
+    if (result.attachmentData.size() > MaximumAttachmentBytes) {
+        setError(errorMessage, QStringLiteral("检验附件不能超过50 MB。"));
+        return false;
+    }
+    QMap<qlonglong, InspectionNoticeLineResult> enteredLines;
+    for (const InspectionNoticeLineResult &line : result.lines) {
+        if (line.itemId <= 0 || !std::isfinite(line.qualifiedQuantity)
+            || !std::isfinite(line.unqualifiedQuantity)
+            || line.qualifiedQuantity < -QuantityTolerance
+            || line.unqualifiedQuantity < -QuantityTolerance
+            || enteredLines.contains(line.itemId)) {
+            setError(errorMessage, QStringLiteral("本次检验明细包含无效或重复数量。"));
+            return false;
+        }
+        enteredLines.insert(line.itemId, line);
+    }
+    if (!beginImmediate(errorMessage)) return false;
+    QSqlQuery current(m_database);
+    current.prepare(QStringLiteral(
+        "SELECT r.notice_id,r.attachment_id,n.status FROM inspection_results r "
+        "JOIN inspection_notices n ON n.id=r.notice_id WHERE r.id=?"));
+    current.addBindValue(resultId);
+    if (!current.exec() || !current.next()) {
+        setError(errorMessage, QStringLiteral("本次检验记录不存在或读取失败：%1")
+                                   .arg(current.lastError().text()));
+        rollback();
+        return false;
+    }
+    const qlonglong noticeId = current.value(0).toLongLong();
+    qlonglong attachmentId = current.value(1).toLongLong();
+    if (current.value(2).toString() == QStringLiteral("CANCELLED")) {
+        setError(errorMessage, QStringLiteral("已取消的送检通知不能修改检验结果。"));
+        rollback();
+        return false;
+    }
+
+    double totalQualified = 0.0;
+    int storedCount = 0;
+    QSqlQuery stored(m_database);
+    stored.prepare(QStringLiteral(
+        "SELECT notice_item_id,line_number,inspected_quantity FROM inspection_result_items "
+        "WHERE result_id=? ORDER BY line_number"));
+    stored.addBindValue(resultId);
+    if (!stored.exec()) {
+        setError(errorMessage, QStringLiteral("读取本次检验明细失败：%1")
+                                   .arg(stored.lastError().text()));
+        rollback();
+        return false;
+    }
+    while (stored.next()) {
+        ++storedCount;
+        const qlonglong itemId = stored.value(0).toLongLong();
+        const auto entered = enteredLines.constFind(itemId);
+        if (entered == enteredLines.cend()
+            || std::abs(entered->qualifiedQuantity + entered->unqualifiedQuantity
+                        - stored.value(2).toDouble()) > QuantityTolerance) {
+            setError(errorMessage,
+                     QStringLiteral("第%1行合格与不合格数量之和必须等于该次检验数量%2。")
+                         .arg(stored.value(1).toInt())
+                         .arg(stored.value(2).toDouble(), 0, 'g', 12));
+            rollback();
+            return false;
+        }
+        totalQualified += entered->qualifiedQuantity;
+    }
+    if (storedCount != enteredLines.size()) {
+        setError(errorMessage, QStringLiteral("本次检验明细与保存记录不一致，请重新打开。"));
+        rollback();
+        return false;
+    }
+    if (totalQualified > QuantityTolerance
+        && result.attachmentData.isEmpty() && attachmentId <= 0) {
+        setError(errorMessage, QStringLiteral("本次检验存在合格数量，必须上传本次检验附件。"));
+        rollback();
+        return false;
+    }
+    if (!result.attachmentData.isEmpty()) {
+        const qlonglong replacementId = storeResultAttachment(
+            resultId, result.attachmentFileName, result.attachmentMimeType,
+            result.attachmentData, errorMessage);
+        if (replacementId <= 0 || !markAttachmentDeleted(attachmentId, errorMessage)) {
+            rollback();
+            return false;
+        }
+        attachmentId = replacementId;
+    }
+
+    QSqlQuery updateResultQuery(m_database);
+    updateResultQuery.prepare(QStringLiteral(
+        "UPDATE inspection_results SET inspection_date=?,inspector_name=?,conclusion=?,"
+        "attachment_id=?,updated_by=?,updated_at=? WHERE id=?"));
+    updateResultQuery.addBindValue(result.inspectionDate.toString(Qt::ISODate));
+    updateResultQuery.addBindValue(textValue(result.inspectorName));
+    updateResultQuery.addBindValue(textValue(result.conclusion));
+    updateResultQuery.addBindValue(attachmentId > 0 ? QVariant(attachmentId) : QVariant());
+    updateResultQuery.addBindValue(m_operatorId);
+    updateResultQuery.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    updateResultQuery.addBindValue(resultId);
+    if (!updateResultQuery.exec()) {
+        setError(errorMessage, QStringLiteral("修改本次检验记录失败：%1")
+                                   .arg(updateResultQuery.lastError().text()));
+        rollback();
+        return false;
+    }
+    QSqlQuery updateItem(m_database);
+    updateItem.prepare(QStringLiteral(
+        "UPDATE inspection_result_items SET qualified_quantity=?,unqualified_quantity=? "
+        "WHERE result_id=? AND notice_item_id=?"));
+    for (auto entered = enteredLines.cbegin(); entered != enteredLines.cend(); ++entered) {
+        updateItem.bindValue(0, qMax(0.0, entered->qualifiedQuantity));
+        updateItem.bindValue(1, qMax(0.0, entered->unqualifiedQuantity));
+        updateItem.bindValue(2, resultId);
+        updateItem.bindValue(3, entered.key());
+        if (!updateItem.exec() || updateItem.numRowsAffected() != 1) {
+            setError(errorMessage, QStringLiteral("修改本次检验明细失败：%1")
+                                       .arg(updateItem.lastError().text()));
+            rollback();
+            return false;
+        }
+    }
+    if (!refreshNoticeResultSummary(noticeId, errorMessage)
+        || !writeAudit(QStringLiteral("INSPECTION_RESULT_UPDATE"), noticeId,
+                       QStringLiteral("修改独立检验记录ID %1").arg(resultId), errorMessage)
+        || !commit(errorMessage)) {
+        rollback();
+        return false;
+    }
+    return true;
+}
+
+bool InspectionService::readResult(qlonglong resultId,
+                                   InspectionResultRecord *record,
+                                   QString *errorMessage) const
+{
+    if (resultId <= 0 || !record) {
+        setError(errorMessage, QStringLiteral("本次检验记录参数无效。"));
+        return false;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT r.id,r.notice_id,n.inspection_no,r.sequence_no,n.notification_date,"
+        "n.purchase_order_no,n.supplier,r.inspection_date,r.inspector_name,r.conclusion,"
+        "r.attachment_id,r.created_at,COUNT(ri.id),COALESCE(SUM(ri.qualified_quantity),0),"
+        "COALESCE(SUM(ri.unqualified_quantity),0) FROM inspection_results r "
+        "JOIN inspection_notices n ON n.id=r.notice_id "
+        "LEFT JOIN inspection_result_items ri ON ri.result_id=r.id WHERE r.id=? GROUP BY r.id"));
+    query.addBindValue(resultId);
+    if (!query.exec() || !query.next()) {
+        setError(errorMessage, QStringLiteral("读取本次检验记录失败：%1")
+                                   .arg(query.lastError().text()));
+        return false;
+    }
+    InspectionResultRecord value;
+    value.id = query.value(0).toLongLong();
+    value.noticeId = query.value(1).toLongLong();
+    value.inspectionNumber = query.value(2).toString();
+    value.sequenceNumber = query.value(3).toInt();
+    value.notificationDate = QDate::fromString(query.value(4).toString(), Qt::ISODate);
+    value.purchaseOrderNumber = query.value(5).toString();
+    value.supplier = query.value(6).toString();
+    value.inspectionDate = QDate::fromString(query.value(7).toString(), Qt::ISODate);
+    value.inspectorName = query.value(8).toString();
+    value.conclusion = query.value(9).toString();
+    value.attachmentId = query.value(10).toLongLong();
+    value.createdAt = dateTimeValue(query.value(11));
+    value.lineCount = query.value(12).toInt();
+    value.qualifiedQuantity = query.value(13).toDouble();
+    value.unqualifiedQuantity = query.value(14).toDouble();
+
+    QSqlQuery lines(m_database);
+    lines.prepare(QStringLiteral(
+        "SELECT notice_item_id,line_number,material_id,material_code,material_name,specification,"
+        "inspected_quantity,batch_no,qualified_quantity,unqualified_quantity "
+        "FROM inspection_result_items WHERE result_id=? ORDER BY line_number"));
+    lines.addBindValue(resultId);
+    if (!lines.exec()) {
+        setError(errorMessage, QStringLiteral("读取本次检验物料失败：%1")
+                                   .arg(lines.lastError().text()));
+        return false;
+    }
+    while (lines.next()) {
+        InspectionNoticeLine line;
+        line.id = lines.value(0).toLongLong();
+        line.lineNumber = lines.value(1).toInt();
+        line.materialId = lines.value(2).toLongLong();
+        line.materialCode = lines.value(3).toString();
+        line.materialName = lines.value(4).toString();
+        line.specification = lines.value(5).toString();
+        line.quantity = lines.value(6).toDouble();
+        line.batchNumber = lines.value(7).toString();
+        line.qualifiedQuantity = lines.value(8).toDouble();
+        line.unqualifiedQuantity = lines.value(9).toDouble();
+        value.lines.append(line);
+    }
+    *record = value;
+    return true;
+}
+
+bool InspectionService::listResults(const QString &keyword,
+                                    QList<InspectionResultRecord> *records,
+                                    QString *errorMessage) const
+{
+    if (!records) {
+        setError(errorMessage, QStringLiteral("检验历史列表参数无效。"));
+        return false;
+    }
+    records->clear();
+    QString sql = QStringLiteral(
+        "SELECT r.id,r.notice_id,n.inspection_no,r.sequence_no,n.notification_date,"
+        "n.purchase_order_no,n.supplier,r.inspection_date,r.inspector_name,r.conclusion,"
+        "r.attachment_id,r.created_at,COUNT(ri.id),COALESCE(SUM(ri.qualified_quantity),0),"
+        "COALESCE(SUM(ri.unqualified_quantity),0) FROM inspection_results r "
+        "JOIN inspection_notices n ON n.id=r.notice_id "
+        "LEFT JOIN inspection_result_items ri ON ri.result_id=r.id WHERE n.status<>'CANCELLED' ");
+    const QString trimmed = keyword.trimmed();
+    if (!trimmed.isEmpty()) {
+        sql += QStringLiteral(
+            "AND (n.inspection_no LIKE ? OR n.purchase_order_no LIKE ? OR n.supplier LIKE ? "
+            "OR r.inspector_name LIKE ?) ");
+    }
+    sql += QStringLiteral("GROUP BY r.id ORDER BY r.inspection_date DESC,r.id DESC");
+    QSqlQuery query(m_database);
+    query.prepare(sql);
+    if (!trimmed.isEmpty()) {
+        const QString like = QLatin1Char('%') + trimmed + QLatin1Char('%');
+        for (int index = 0; index < 4; ++index) query.addBindValue(like);
+    }
+    if (!query.exec()) {
+        setError(errorMessage, QStringLiteral("查询分次检验历史失败：%1")
+                                   .arg(query.lastError().text()));
+        return false;
+    }
+    while (query.next()) {
+        InspectionResultRecord value;
+        value.id = query.value(0).toLongLong();
+        value.noticeId = query.value(1).toLongLong();
+        value.inspectionNumber = query.value(2).toString();
+        value.sequenceNumber = query.value(3).toInt();
+        value.notificationDate = QDate::fromString(query.value(4).toString(), Qt::ISODate);
+        value.purchaseOrderNumber = query.value(5).toString();
+        value.supplier = query.value(6).toString();
+        value.inspectionDate = QDate::fromString(query.value(7).toString(), Qt::ISODate);
+        value.inspectorName = query.value(8).toString();
+        value.conclusion = query.value(9).toString();
+        value.attachmentId = query.value(10).toLongLong();
+        value.createdAt = dateTimeValue(query.value(11));
+        value.lineCount = query.value(12).toInt();
+        value.qualifiedQuantity = query.value(13).toDouble();
+        value.unqualifiedQuantity = query.value(14).toDouble();
+        records->append(value);
     }
     return true;
 }

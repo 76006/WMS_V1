@@ -71,7 +71,28 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     if (!applyInspectionQuantitiesMigration(database, errorMessage)) {
         return false;
     }
+    if (!applyInspectionResultRecordsMigration(database, errorMessage)) {
+        return false;
+    }
     return ensureDefaultAdministrator(database, errorMessage);
+}
+
+bool SchemaMigrator::applyInspectionResultRecordsMigration(QSqlDatabase database,
+                                                             QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    applied.prepare(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=19"));
+    if (!applied.exec()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("检查数据库版本失败：%1").arg(applied.lastError().text());
+        }
+        return false;
+    }
+    if (applied.next()) return true;
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/019_inspection_result_records.sql"),
+                              QStringLiteral("升级数据库到版本19"),
+                              errorMessage);
 }
 
 bool SchemaMigrator::applyInspectionQuantitiesMigration(QSqlDatabase database,
