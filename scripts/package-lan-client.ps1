@@ -2,7 +2,7 @@
     [Parameter(Mandatory=$true)][string]$ServerAddress,
     [string]$QtRoot='D:\Qt\6.5.3\mingw_64',
     [string]$MingwBin='D:\Qt\Tools\mingw1120_64\bin',
-    [string]$BuildDirectory='build-lan-business'
+    [string]$BuildDirectory='build-lan-client'
 )
 $ErrorActionPreference='Stop'
 $parsedAddress=$null
@@ -10,8 +10,12 @@ if(![Net.IPAddress]::TryParse($ServerAddress,[ref]$parsedAddress) -or
     $parsedAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
     [Net.IPAddress]::IsLoopback($parsedAddress)) { throw 'Specify the host LAN IPv4 address.' }
 $repo=Split-Path -Parent $PSScriptRoot
+$cache=Join-Path $repo "$BuildDirectory/CMakeCache.txt"
+if(!(Test-Path -LiteralPath $cache) -or !(Select-String -LiteralPath $cache -Pattern '^WMS_NETWORK_CLIENT_ONLY:BOOL=ON$' -Quiet)) {
+    throw 'Use a build configured with -DWMS_NETWORK_CLIENT_ONLY=ON.'
+}
 $stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
-$package=Join-Path $repo "outputs/WMS-LAN-Client-$stamp"
+$package=Join-Path $repo "outputs/WMS-LAN-Only-Client-$stamp"
 $zip="$package.zip"
 if(Test-Path -LiteralPath $package) { throw 'Package output already exists.' }
 New-Item -ItemType Directory -Path $package | Out-Null
@@ -19,12 +23,12 @@ $savedPath=$env:PATH
 try {
     $env:PATH="$MingwBin;$QtRoot\bin;$savedPath"
     foreach($app in @('IceBeautyWms','MeiJingLingWms')) {
-        $source=Join-Path $repo "$BuildDirectory/$app.exe"
+        $source=Join-Path $repo "$BuildDirectory/$($app)Lan.exe"
         if(!(Test-Path -LiteralPath $source)) { throw "Missing build: $source" }
-        $target=Join-Path $package "$app.exe"
+        $target=Join-Path $package "$($app)Lan.exe"
         Copy-Item -LiteralPath $source -Destination $target
         # Let Qt inspect the original build before stripping its debug symbols.
-        & (Join-Path $QtRoot 'bin/windeployqt.exe') --compiler-runtime `
+        & (Join-Path $QtRoot 'bin/windeployqt.exe') --compiler-runtime --skip-plugin-types sqldrivers `
             --qtpaths (Join-Path $QtRoot 'bin/qtpaths6.exe') `
             --qmldir (Join-Path $repo 'resources') --dir $package $target
         if($LASTEXITCODE -ne 0) { throw 'Qt dependency deployment failed.' }
@@ -46,7 +50,7 @@ if(![Net.IPAddress]::TryParse($server,[ref]$address) -or $address.AddressFamily 
 }
 $port=if($Product -eq 'IceBeauty'){18080}else{18081}
 Remove-Item Env:WMS_DEMO_LOGIN_PASSWORD -ErrorAction SilentlyContinue
-Start-Process -FilePath (Join-Path $PSScriptRoot "$($Product)Wms.exe") -ArgumentList @('--server',"http://${server}:$port") -WorkingDirectory $PSScriptRoot
+Start-Process -FilePath (Join-Path $PSScriptRoot "$($Product)WmsLan.exe") -ArgumentList @('--server',"http://${server}:$port") -WorkingDirectory $PSScriptRoot
 '@
 Set-Content -LiteralPath (Join-Path $package 'start-client.ps1') -Value $launcher -Encoding UTF8
 foreach($item in @(@('冰美肌','IceBeauty'),@('美鲸灵','MeiJingLing'))) {
@@ -54,14 +58,18 @@ foreach($item in @(@('冰美肌','IceBeauty'),@('美鲸灵','MeiJingLing'))) {
     [IO.File]::WriteAllText((Join-Path $package "启动$($item[0])联网版.cmd"),$cmd,[Text.Encoding]::ASCII)
 }
 $instructions=@"
-第二台电脑使用方法（Windows 64 位）
+第二台电脑使用方法（Windows 64 位，仅联网客户端）
 
-1. 将整个压缩包复制到第二台电脑并全部解压，不能只复制 EXE，也不要在压缩包里直接运行。
+1. 将整个压缩包解压到新文件夹，例如 D:\WMS联网测试，不要覆盖原单机版目录，也不要在压缩包里直接运行。
 2. 两台电脑连接同一公司局域网；主机先开启局域网测试后台并放行端口。
 3. 双击“启动冰美肌联网版.cmd”或“启动美鲸灵联网版.cmd”。
 4. 主机地址已填写为 $ServerAddress，冰美肌端口 18080，美鲸灵端口 18081。
 5. 使用主机软件中创建的业务账号登录。此客户端包不包含密码和数据库。
 6. 一台电脑录入测试入库，另一台点击“刷新”，核对库存及单据是否一致。
+
+本包只有联网入口，拒绝 --local 和 --database 参数，不读取原单机数据库。
+联网配置使用独立名称，自动归档放在“我的文档/冰美肌仓库系统表单（联网版）”或对应美鲸灵目录。
+旧单机版仍使用旧数据库，两边数据不会自动合并。手动导出文件时请选择新的保存位置。
 
 主机 IP 改变后，用记事本修改 server-address.txt。不要填写 127.0.0.1，那表示第二台电脑自己。
 不需要安装 Qt、PostgreSQL 或 Git。生成旧版 .xls 表单仍需 WPS 表格或 Microsoft Excel。

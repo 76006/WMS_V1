@@ -3,8 +3,17 @@
 #include <QDir>
 #include <QStandardPaths>
 
-namespace { QString serverProfile; }
+namespace {
+QString serverProfile;
+#ifdef WMS_NETWORK_CLIENT_ONLY
+bool networkClientMode=true;
+#else
+bool networkClientMode=false;
+#endif
+}
 void SystemProfile::setServerProfile(const QString &profile) { serverProfile=profile; }
+void SystemProfile::setNetworkClientMode(bool enabled) { networkClientMode=enabled; }
+bool SystemProfile::isNetworkClient() { return networkClientMode; }
 
 bool SystemProfile::isMeiJingLing()
 {
@@ -29,7 +38,8 @@ QString SystemProfile::displayName()
 
 QString SystemProfile::windowTitle()
 {
-    return displayName() + QStringLiteral("库存管理");
+    return displayName() + QStringLiteral("库存管理")
+        + (networkClientMode ? QStringLiteral(" · 联网版") : QString());
 }
 
 QString SystemProfile::organizationName()
@@ -39,8 +49,9 @@ QString SystemProfile::organizationName()
 
 QString SystemProfile::applicationName()
 {
-    return isMeiJingLing() ? QStringLiteral("MeiJingLingWms")
-                           : QStringLiteral("IceBeautyWms");
+    return (isMeiJingLing() ? QStringLiteral("MeiJingLingWms")
+                           : QStringLiteral("IceBeautyWms"))
+        + (networkClientMode ? QStringLiteral("Lan") : QString());
 }
 
 QString SystemProfile::databaseFileName()
@@ -65,7 +76,8 @@ QString SystemProfile::templateDirectoryName()
 
 QString SystemProfile::archiveDirectoryName()
 {
-    return displayName() + QStringLiteral("仓库系统表单");
+    return displayName() + QStringLiteral("仓库系统表单")
+        + (networkClientMode ? QStringLiteral("（联网版）") : QString());
 }
 
 QString SystemProfile::inspectionNumberStem()

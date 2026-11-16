@@ -12,6 +12,12 @@
 
 ## 数据位置
 
+第二台电脑使用后续生成的 **WMS-LAN-Only-Client** 专用包，并解压到新的目录，不覆盖旧软件。它的程序名为 `IceBeautyWmsLan.exe` / `MeiJingLingWmsLan.exe`，直接运行也只有联网入口，拒绝 `--local`、`--database` 和单机初始化参数，包中不分发 SQLite 驱动。
+
+联网客户端配置使用独立的应用名称，自动表单归档使用“我的文档/冰美肌仓库系统表单（联网版）”或对应美鲸灵目录，临时文件也独立。撤销送检单时只处理当前联网归档中的文件，不使用服务器记录里来自其他电脑或旧版客户端的绝对路径。手工导出文件仍由用户选择保存位置，请避免覆盖旧导出文件。
+
+原单机版继续使用原数据库，两个模式的数据不会自动合并。早期 WMS-LAN-Client 包包含单机入口且共用自动归档目录，不应用于与旧单机版并存的测试；请改用上述专用包。
+
 | 系统 | PostgreSQL 数据库 | 后台地址 |
 |---|---|---|
 | 冰美肌 | wms_icebeauty_business_demo | http://127.0.0.1:18080 |
@@ -48,6 +54,8 @@ cmake --build build-lan-business --target WmsServer IceBeautyWms MeiJingLingWms 
 客户端免安装测试包可用下面命令生成，输出到 outputs 下的新目录及 ZIP；包内有两个客户端、Qt 运行库和表单模板，不含后台、数据库及密码。
 
 ```powershell
+cmake -S . -B build-lan-client -G 'MinGW Makefiles' -DCMAKE_PREFIX_PATH=D:/Qt/6.5.3/mingw_64 -DCMAKE_BUILD_TYPE=Debug -DWMS_BUILD_SERVER=OFF -DWMS_NETWORK_CLIENT_ONLY=ON
+cmake --build build-lan-client --target IceBeautyWms MeiJingLingWms --parallel 4
 ./scripts/package-lan-client.ps1 -ServerAddress 192.168.0.16
 ```
 
@@ -89,3 +97,5 @@ python tests/lan_integration.py
 测试创建随机命名的独立数据库，结束后删除，不读写正式 SQLite 或人工测试库。覆盖双产品库存和生产流程、送检附件、修改撤销、调拨盘点、BOM、表单记录、权限、重复请求、并发出库和实际桌面 23 个页面。桌面验证也通过原 C++ 服务适配器执行提交、读取、修订和撤销。基础测试覆盖登录会话、产品隔离及单机初始化回归。
 
 服务字段变更后使用 `scripts/generate-business-rpc.py` 更新协议及分派代码。`scripts/generate-postgres-schema.py` 仅用于从全新空 SQLite 基线生成静态结构，不是正式数据迁移工具。
+
+专用客户端隔离验证：`python tests/network_client_isolation.py --package outputs/实际解压目录`。使用新建哨兵 SQLite 文件，检查单机参数被拒绝、联网前后文件内容及时间戳不变，并在没有本机 Qt PATH 的环境中加载完整界面。`tests/profile_isolation.cpp` 只读取路径元数据，验证两产品的配置、数据库默认路径、归档与临时目录分离，以及单机路径保持原值。

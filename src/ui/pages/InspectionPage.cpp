@@ -1126,7 +1126,15 @@ void InspectionPage::cancelSelectedNotice(QTableWidget *table)
 
     QString archivedPath;
     QString fileWarning;
-    const QString sourcePath = notice.archivePath.trimmed();
+    QString sourcePath = notice.archivePath.trimmed();
+    if (SystemProfile::isNetworkClient()) {
+        // A server record may contain a path from another PC or an older client.
+        // Only move this client's own isolated archive when cancelling a notice.
+        OfficeTemplateDocument archivedNotice;
+        archivedNotice.kind = OfficeFormKind::Inspection;
+        archivedNotice.documentNumber = notice.inspectionNumber;
+        sourcePath = OfficeTemplateService::archiveFilePath(archivedNotice);
+    }
     if (!sourcePath.isEmpty() && QFileInfo::exists(sourcePath)) {
         const QFileInfo sourceInfo(sourcePath);
         QDir cancelledDir(sourceInfo.dir().filePath(QStringLiteral("已撤销")));

@@ -165,6 +165,9 @@ int main(int argc, char *argv[])
         return 8;
     }
     bool networkMode = parser.isSet("server");
+#ifdef WMS_NETWORK_CLIENT_ONLY
+    networkMode = true;
+#endif
     if (!networkMode && !headlessCheck && !parser.isSet("local") && !parser.isSet(databaseOption)) {
         QMessageBox choice;
         choice.setWindowTitle(SystemProfile::windowTitle());
@@ -183,6 +186,8 @@ int main(int argc, char *argv[])
             QTextStream(stderr) << "Network and local database options cannot be combined\n";
             return 8;
         }
+        SystemProfile::setNetworkClientMode(true);
+        QCoreApplication::setApplicationName(SystemProfile::applicationName());
         NetworkWindow window(parser.value("server"));
         window.show();
         if (parser.isSet("network-smoke-test")) window.startSmokeCheck();

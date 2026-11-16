@@ -8,6 +8,8 @@ class SystemProfile
 public:
     // Server processes select one immutable product before accepting connections.
     static void setServerProfile(const QString &profile);
+    static void setNetworkClientMode(bool enabled);
+    static bool isNetworkClient();
     static bool isMeiJingLing();
     static QString profileId();
     static QString displayName();

@@ -40,7 +40,8 @@ NetworkWindow::NetworkWindow(const QString &serverUrl, QWidget *parent) : QWidge
     auto *form = new QFormLayout;
     QSettings settings;
     m_address = new QLineEdit(serverUrl.isEmpty()
-        ? settings.value("network/serverUrl", "http://127.0.0.1:18080").toString() : serverUrl, this);
+        ? settings.value("network/serverUrl", SystemProfile::isMeiJingLing()
+            ? "http://127.0.0.1:18081" : "http://127.0.0.1:18080").toString() : serverUrl, this);
     m_address->setPlaceholderText(QStringLiteral("例如 http://192.168.1.100:18080"));
     m_username = new QLineEdit(settings.value("network/username", "admin").toString(), this);
     m_password = new QLineEdit(this);

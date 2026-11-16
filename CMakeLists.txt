@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Sql QuickWidgets WebView PrintSupport Network)
 
 qt_standard_project_setup()
+option(WMS_NETWORK_CLIENT_ONLY "Build desktop clients without a local database entry point" OFF)
 
 set(WMS_SOURCES
     src/main.cpp
@@ -154,6 +155,12 @@ function(add_wms_application target profile_definition)
         FILES ${WMS_RESOURCE_FILES}
     )
     target_compile_definitions(${target} PRIVATE ${profile_definition})
+    if(WMS_NETWORK_CLIENT_ONLY)
+        target_compile_definitions(${target} PRIVATE WMS_NETWORK_CLIENT_ONLY)
+        set_target_properties(${target} PROPERTIES OUTPUT_NAME "${target}Lan")
+        # This package deploys dynamic QML from resources/, not the whole workspace.
+        set_target_properties(${target} PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    endif()
     target_include_directories(${target} PRIVATE src)
     target_link_libraries(${target} PRIVATE
         Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView Qt6::PrintSupport Qt6::Network)
