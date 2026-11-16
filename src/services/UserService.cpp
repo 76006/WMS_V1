@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/UserService.h"
 
 #include "core/PasswordHasher.h"
@@ -59,6 +61,19 @@ bool UserService::createUser(const QString &username, const QString &displayName
                              const QString &roleCode, const QString &password,
                              qlonglong *userId, QString *errorMessage)
 {
+    // RPC UserService.createUser
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("username",BusinessWire::Codec<QString>::put(username));
+        arguments.insert("displayName",BusinessWire::Codec<QString>::put(displayName));
+        arguments.insert("roleCode",BusinessWire::Codec<QString>::put(roleCode));
+        arguments.insert("password",BusinessWire::Codec<QString>::put(password));
+        const auto reply=RemoteBackend::rpc(m_database,"UserService.createUser",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(userId) *userId=BusinessWire::Codec<qlonglong>::get(reply.value("userId"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     static const QRegularExpression pattern(QStringLiteral("^[A-Za-z0-9_.-]{3,32}$"));
     const QString login = username.trimmed();
     if (!requireAdministrator(errorMessage) || !validPassword(password, errorMessage)) return false;
@@ -89,6 +104,18 @@ bool UserService::createUser(const QString &username, const QString &displayName
 bool UserService::updateUser(qlonglong userId, const QString &displayName,
                              const QString &roleCode, bool active, QString *errorMessage)
 {
+    // RPC UserService.updateUser
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("userId",BusinessWire::Codec<qlonglong>::put(userId));
+        arguments.insert("displayName",BusinessWire::Codec<QString>::put(displayName));
+        arguments.insert("roleCode",BusinessWire::Codec<QString>::put(roleCode));
+        arguments.insert("active",BusinessWire::Codec<bool>::put(active));
+        const auto reply=RemoteBackend::rpc(m_database,"UserService.updateUser",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!requireAdministrator(errorMessage)) return false;
     if (userId <= 0 || displayName.trimmed().isEmpty()) {
         setUserError(errorMessage, QStringLiteral("用户或显示名无效。"));
@@ -135,6 +162,16 @@ bool UserService::updateUser(qlonglong userId, const QString &displayName,
 
 bool UserService::resetPassword(qlonglong userId, const QString &newPassword, QString *errorMessage)
 {
+    // RPC UserService.resetPassword
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("userId",BusinessWire::Codec<qlonglong>::put(userId));
+        arguments.insert("newPassword",BusinessWire::Codec<QString>::put(newPassword));
+        const auto reply=RemoteBackend::rpc(m_database,"UserService.resetPassword",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!requireAdministrator(errorMessage) || !validPassword(newPassword, errorMessage)) return false;
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral("UPDATE users SET password_hash=?,updated_at=? WHERE id=?"));
@@ -151,6 +188,16 @@ bool UserService::resetPassword(qlonglong userId, const QString &newPassword, QS
 bool UserService::changeOwnPassword(const QString &currentPassword, const QString &newPassword,
                                     QString *errorMessage)
 {
+    // RPC UserService.changeOwnPassword
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("currentPassword",BusinessWire::Codec<QString>::put(currentPassword));
+        arguments.insert("newPassword",BusinessWire::Codec<QString>::put(newPassword));
+        const auto reply=RemoteBackend::rpc(m_database,"UserService.changeOwnPassword",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!validPassword(newPassword, errorMessage)) return false;
     QSqlQuery user(m_database);
     user.prepare(QStringLiteral(
@@ -162,7 +209,7 @@ bool UserService::changeOwnPassword(const QString &currentPassword, const QStrin
         return false;
     }
     bool allowEmptyDebugAdmin = false;
-#ifndef NDEBUG
+#if !defined(NDEBUG) && !defined(WMS_SERVER_BUILD)
     allowEmptyDebugAdmin = currentPassword.isEmpty() && user.value(2).toString() == QStringLiteral("ADMIN");
 #endif
     if (!allowEmptyDebugAdmin

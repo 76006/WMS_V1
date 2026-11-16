@@ -20,7 +20,7 @@
 
 #include <utility>
 
-AuditLogPage::AuditLogPage(QSqlDatabase database, QWidget *parent)
+AuditLogPage::AuditLogPage(QSqlDatabase database, QWidget *parent, bool loadInitially)
     : QWidget(parent), m_database(std::move(database))
 {
     setObjectName(QStringLiteral("pageRoot"));
@@ -65,7 +65,7 @@ AuditLogPage::AuditLogPage(QSqlDatabase database, QWidget *parent)
     connect(search, &QPushButton::clicked, this, &AuditLogPage::refresh);
     connect(m_keywordEdit, &QLineEdit::returnPressed, this, &AuditLogPage::refresh);
     connect(exportButton, &QPushButton::clicked, this, &AuditLogPage::exportLogs);
-    refresh();
+    if(loadInitially) refresh();
 }
 
 void AuditLogPage::refresh()

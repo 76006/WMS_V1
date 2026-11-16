@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/InventoryService.h"
 
 #include "core/SystemProfile.h"
@@ -66,6 +68,16 @@ bool InventoryService::postInbound(const StockMovementRequest &request,
                                    PostedDocument *postedDocument,
                                    QString *errorMessage)
 {
+    // RPC InventoryService.postInbound
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<StockMovementRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postInbound",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     return postMovement(request, true, postedDocument, errorMessage);
 }
 
@@ -73,6 +85,16 @@ bool InventoryService::postOutbound(const StockMovementRequest &request,
                                     PostedDocument *postedDocument,
                                     QString *errorMessage)
 {
+    // RPC InventoryService.postOutbound
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<StockMovementRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postOutbound",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     return postMovement(request, false, postedDocument, errorMessage);
 }
 
@@ -225,6 +247,16 @@ bool InventoryService::postTransfer(const TransferRequest &request,
                                     PostedDocument *postedDocument,
                                     QString *errorMessage)
 {
+    // RPC InventoryService.postTransfer
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<TransferRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postTransfer",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     StockMovementRequest transferMovement = request;
     transferMovement.documentType = QStringLiteral("DB");
     const MaterialRules rules = materialRules(request.materialId, errorMessage);
@@ -335,6 +367,16 @@ bool InventoryService::reverseTransfer(const ReversalRequest &request,
                                        PostedDocument *postedDocument,
                                        QString *errorMessage)
 {
+    // RPC InventoryService.reverseTransfer
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<ReversalRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.reverseTransfer",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (request.sourceItemId <= 0 || request.quantity <= QuantityTolerance
         || !request.documentDate.isValid()) {
         setError(errorMessage, QStringLiteral("撤销调拨明细、日期或数量无效。"));
@@ -601,6 +643,15 @@ bool InventoryService::reverseTransfer(const ReversalRequest &request,
 QStringList InventoryService::reversibleSerialNumbers(qlonglong sourceItemId,
                                                       QString *errorMessage) const
 {
+    // RPC InventoryService.reversibleSerialNumbers
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("sourceItemId",BusinessWire::Codec<qlonglong>::put(sourceItemId));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.reversibleSerialNumbers",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<QStringList>::get(reply.value("result"));
+    }
+
     if (errorMessage) errorMessage->clear();
     if (sourceItemId <= 0) {
         setError(errorMessage, QStringLiteral("找不到需要撤销的原业务明细。"));
@@ -720,6 +771,16 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
                                    PostedDocument *postedDocument,
                                    QString *errorMessage)
 {
+    // RPC InventoryService.reverseItem
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<ReversalRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.reverseItem",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (request.sourceItemId <= 0 || request.quantity <= QuantityTolerance
         || !request.documentDate.isValid()) {
         setError(errorMessage, QStringLiteral("撤销明细、日期或数量无效。"));
@@ -1036,6 +1097,17 @@ QStringList InventoryService::previewSerialNumbers(qlonglong materialId,
                                                    int count,
                                                    QString *errorMessage) const
 {
+    // RPC InventoryService.previewSerialNumbers
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("materialId",BusinessWire::Codec<qlonglong>::put(materialId));
+        arguments.insert("prefix",BusinessWire::Codec<QString>::put(prefix));
+        arguments.insert("count",BusinessWire::Codec<int>::put(count));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.previewSerialNumbers",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<QStringList>::get(reply.value("result"));
+    }
+
     if (materialId <= 0 || count <= 0 || count > 10000) {
         setError(errorMessage, QStringLiteral("SN生成数量必须在1到10000之间。"));
         return {};

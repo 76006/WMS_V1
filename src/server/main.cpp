@@ -1,5 +1,7 @@
 #include "server/LanDatabase.h"
 #include "server/LanServer.h"
+#include "server/BusinessApi.h"
+#include "core/SystemProfile.h"
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QFile>
@@ -18,6 +20,7 @@ int main(int argc, char **argv)
         {"listen", "Listen address", "address", "127.0.0.1"},
         {"port", "HTTP(S) port", "port", "18080"},
         {"init-demo", "Initialize a new test schema and exit"},
+        {"init-business", "Initialize the complete business schema and exit"},
         {"allow-insecure-lan", "Allow HTTP over a trusted test LAN"},
         {"tls-cert", "PEM server certificate", "path"},
         {"tls-key", "PEM private key", "path"}});
@@ -27,8 +30,15 @@ int main(int argc, char **argv)
         QTextStream(stderr) << "Unknown product\n"; return 1;
     }
     LanDatabase database(product);
+    SystemProfile::setServerProfile(product);
     QString error;
     if (!database.open(&error)) { QTextStream(stderr) << error << '\n'; return 2; }
+    if(parser.isSet("init-business")) {
+        if(!BusinessDatabase::initialize(database.connection(),product,qEnvironmentVariable("WMS_DEMO_ADMIN_PASSWORD"),&error)) {
+            QTextStream(stderr)<<error<<'\n';return 3;
+        }
+        QTextStream(stdout)<<"Initialized full business schema for "<<product<<'\n';return 0;
+    }
     if (parser.isSet("init-demo")) {
         if (!database.initializeDemo(qEnvironmentVariable("WMS_DEMO_ADMIN_PASSWORD"), &error)) {
             QTextStream(stderr) << error << '\n'; return 3;
@@ -41,6 +51,7 @@ int main(int argc, char **argv)
     const QHostAddress address(parser.value("listen"));
     if (!portOk || port < 1 || port > 65535 || address.isNull()) { QTextStream(stderr) << "Invalid listen address/port\n"; return 5; }
     LanServer server(database);
+    BusinessApi business(server.http(),database.connection(),product);
     const bool tls = parser.isSet("tls-cert") || parser.isSet("tls-key");
     if (tls) {
         QFile certFile(parser.value("tls-cert")), keyFile(parser.value("tls-key"));

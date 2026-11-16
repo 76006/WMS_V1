@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/InventoryService.h"
 
 #include <QDateTime>
@@ -209,6 +211,18 @@ bool InventoryService::postProductionIssue(const ProductionRunRequest &run,
                                             qlonglong *productionRunId,
                                             QString *errorMessage)
 {
+    // RPC InventoryService.postProductionIssue
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("run",BusinessWire::Codec<ProductionRunRequest>::put(run));
+        arguments.insert("document",BusinessWire::Codec<StockDocumentRequest>::put(document));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postProductionIssue",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        if(productionRunId) *productionRunId=BusinessWire::Codec<qlonglong>::get(reply.value("productionRunId"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!m_database.isOpen() || m_operatorId <= 0 || !document.documentDate.isValid()
         || document.lines.isEmpty() || document.submissionToken.trimmed().isEmpty()) {
         setProductionError(errorMessage, QStringLiteral("生产领料单头、明细或当前用户无效。"));
@@ -318,6 +332,16 @@ bool InventoryService::postProductionReturn(const ProductionReturnRequest &reque
                                              PostedDocument *postedDocument,
                                              QString *errorMessage)
 {
+    // RPC InventoryService.postProductionReturn
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<ProductionReturnRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postProductionReturn",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!m_database.isOpen() || m_operatorId <= 0 || request.sourceDocumentId <= 0
         || !request.documentDate.isValid() || request.lines.isEmpty()
         || request.submissionToken.trimmed().isEmpty()) {
@@ -527,6 +551,16 @@ bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &docu
                                                   PostedDocument *postedDocument,
                                                   QString *errorMessage)
 {
+    // RPC InventoryService.postFinishedGoodsInbound
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("document",BusinessWire::Codec<StockDocumentRequest>::put(document));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postFinishedGoodsInbound",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!m_database.isOpen() || m_operatorId <= 0
         || !document.documentDate.isValid() || document.lines.size() != 1
         || document.submissionToken.trimmed().isEmpty()) {
@@ -668,6 +702,15 @@ bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &docu
 double InventoryService::productionRunReceivedQuantity(qlonglong productionRunId,
                                                        QString *errorMessage) const
 {
+    // RPC InventoryService.productionRunReceivedQuantity
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("productionRunId",BusinessWire::Codec<qlonglong>::put(productionRunId));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.productionRunReceivedQuantity",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<double>::get(reply.value("result"));
+    }
+
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT COALESCE(SUM(i.quantity-i.reversed_quantity),0) "

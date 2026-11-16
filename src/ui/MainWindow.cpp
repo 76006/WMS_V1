@@ -1,6 +1,8 @@
 #include "ui/MainWindow.h"
 
 #include "core/SystemProfile.h"
+#include "network/RemoteBackend.h"
+#include "network/QueryBridge.h"
 
 #include "ui/pages/DashboardPage.h"
 #include "ui/pages/AttachmentPage.h"
@@ -65,8 +67,16 @@ MainWindow::MainWindow(QSqlDatabase database,
     setWindowTitle(SystemProfile::windowTitle());
     resize(1440, 880);
     setMinimumSize(1120, 700);
+    if(auto *driver=dynamic_cast<QueryBridge *>(m_database.driver());driver && driver->remote())
+        connect(driver,&QueryBridge::networkFailure,this,[this](const QString &message){
+            statusBar()->showMessage(QStringLiteral("联网操作失败，请检查提示后刷新：%1").arg(message.section('\n',0,0)));
+        });
     buildUi();
-    statusBar()->showMessage(QStringLiteral("数据库：%1").arg(QFileInfo(m_databaseFilePath).absoluteFilePath()));
+    statusBar()->showMessage(RemoteBackend::isRemote(m_database)
+        ? QStringLiteral("局域网服务器：%1").arg(m_databaseFilePath)
+        : QStringLiteral("数据库：%1").arg(QFileInfo(m_databaseFilePath).absoluteFilePath()));
+    if(RemoteBackend::isRemote(m_database) && !m_database.driver()->property("networkError").toString().isEmpty())
+        statusBar()->showMessage(QStringLiteral("部分数据未能加载，请检查网络并刷新：%1").arg(m_database.driver()->property("networkError").toString().section('\n',0,0)));
 }
 
 void MainWindow::buildUi()
@@ -166,7 +176,7 @@ void MainWindow::buildUi()
     m_serialTracePage = new SerialTracePage(m_database, m_stack);
     m_attachmentPage = new AttachmentPage(m_database, m_session, m_stack);
     m_formManagementPage = new FormManagementPage(m_database, m_session, m_stack);
-    m_auditLogPage = new AuditLogPage(m_database, m_stack);
+    m_auditLogPage = new AuditLogPage(m_database, m_stack, m_session.canViewAudit());
     m_userManagementPage = new UserManagementPage(m_database, m_session, m_stack);
     m_systemSettingsPage = new SystemSettingsPage(m_database, m_session,
                                                    m_databaseFilePath, m_stack);
@@ -243,6 +253,10 @@ void MainWindow::showPage(int index)
 
 void MainWindow::refreshCurrentPage()
 {
+    if(RemoteBackend::isRemote(m_database)) {
+        m_database.driver()->setProperty("networkError",QString());
+        statusBar()->showMessage(QStringLiteral("局域网服务器：%1").arg(m_databaseFilePath));
+    }
     refreshCurrentUserDisplayName();
     QWidget *page = m_stack->currentWidget();
     if (page == m_dashboardPage) m_dashboardPage->refresh();
@@ -265,7 +279,7 @@ void MainWindow::refreshCurrentPage()
     else if (page == m_serialTracePage) m_serialTracePage->refresh();
     else if (page == m_attachmentPage) m_attachmentPage->refresh();
     else if (page == m_formManagementPage) m_formManagementPage->refresh();
-    else if (page == m_auditLogPage) m_auditLogPage->refresh();
+    else if (page == m_auditLogPage && m_session.canViewAudit()) m_auditLogPage->refresh();
     else if (page == m_userManagementPage) m_userManagementPage->refresh();
 }
 

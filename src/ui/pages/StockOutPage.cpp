@@ -216,7 +216,7 @@ void StockOutPage::refreshRecentDocuments()
         "EXISTS(SELECT 1 FROM document_forms f WHERE f.document_id=d.id AND f.form_kind='stockOutbound') "
         "OR (d.purpose NOT LIKE '%领料%' AND NOT EXISTS("
         "SELECT 1 FROM document_forms f WHERE f.document_id=d.id AND f.form_kind='productionIssue'))))) "
-        "GROUP BY d.id ORDER BY d.id DESC")
+        "GROUP BY d.id,s.document_id ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();

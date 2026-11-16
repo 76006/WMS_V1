@@ -18,7 +18,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "outputs" / "lan-dev"
-BUILD = ROOT / "build-lan"
+BUILD = ROOT / os.environ.get("WMS_TEST_BUILD", "build-lan-business")
 PG_BIN = RUNTIME / "postgres" / "pgsql" / "bin"
 QT_BIN = Path(os.environ.get("WMS_TEST_QT_BIN", "D:/Qt/6.5.3/mingw_64/bin"))
 CREDS = json.loads((RUNTIME / "credentials.json").read_text(encoding="utf-8-sig"))
@@ -82,6 +82,7 @@ def main():
                          "WMS_PG_PASSWORD": CREDS["app"], "WMS_DEMO_ADMIN_PASSWORD": test_password}
             server = BUILD / "WmsServer.exe"
             run([server, "--product", profile, "--init-demo"], env=env)
+            run([server, "--product", profile, "--init-business"], env=env)
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", 0))
                 port = probe.getsockname()[1]

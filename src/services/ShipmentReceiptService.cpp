@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/ShipmentReceiptService.h"
 
 #include "services/AttachmentService.h"
@@ -31,6 +33,20 @@ bool ShipmentReceiptService::confirmSigned(qlonglong documentId,
                                            qlonglong *attachmentId,
                                            QString *errorMessage)
 {
+    // RPC ShipmentReceiptService.confirmSigned
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("documentId",BusinessWire::Codec<qlonglong>::put(documentId));
+        arguments.insert("receiptDate",BusinessWire::Codec<QDate>::put(receiptDate));
+        arguments.insert("fileName",BusinessWire::Codec<QString>::put(fileName));
+        arguments.insert("mimeType",BusinessWire::Codec<QString>::put(mimeType));
+        arguments.insert("fileData",BusinessWire::Codec<QByteArray>::put(fileData));
+        const auto reply=RemoteBackend::rpc(m_database,"ShipmentReceiptService.confirmSigned",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(attachmentId) *attachmentId=BusinessWire::Codec<qlonglong>::get(reply.value("attachmentId"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     const QString cleanName = QFileInfo(fileName.trimmed()).fileName();
     if (!m_database.isOpen() || m_operatorId <= 0 || documentId <= 0) {
         setReceiptError(errorMessage, QStringLiteral("发货单或当前用户无效。"));

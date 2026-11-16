@@ -348,7 +348,7 @@ void ProductionIssuePage::refreshRecentDocuments()
         "d.document_type IN ('SCLL','SHLL','YFLL','QTLL') OR "
         "(d.document_type IN ('WXLY','YPLY','QTCK') AND (d.purpose LIKE '%领料%' OR EXISTS("
         "SELECT 1 FROM document_forms f WHERE f.document_id=d.id AND f.form_kind='productionIssue')))) "
-        "GROUP BY d.id ORDER BY d.id DESC")
+        "GROUP BY d.id,p.id ORDER BY d.id DESC")
         + (m_recentTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 20")));
     while (query.next()) {
         const int row = m_recentTable->rowCount();

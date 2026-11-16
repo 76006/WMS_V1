@@ -14,6 +14,10 @@ set(WMS_SOURCES
     src/main.cpp
     src/network/NetworkWindow.cpp
     src/network/NetworkWindow.h
+    src/network/QueryBridge.cpp
+    src/network/QueryBridge.h
+    src/network/RemoteBackend.cpp
+    src/network/RemoteBackend.h
     src/core/DatabaseConfig.cpp
     src/core/PasswordHasher.cpp
     src/core/SystemProfile.cpp
@@ -172,12 +176,20 @@ install(TARGETS MeiJingLingWms RUNTIME DESTINATION . COMPONENT MeiJingLing)
 
 set(BUILD_TESTING OFF CACHE BOOL "Build project tests" FORCE)
 
-option(WMS_BUILD_SERVER "Build the PostgreSQL LAN query pilot" ON)
+option(WMS_BUILD_SERVER "Build the PostgreSQL LAN business server" ON)
 if(WMS_BUILD_SERVER)
     find_package(Qt6 6.5 REQUIRED COMPONENTS HttpServer)
     qt_add_executable(WmsServer
         src/server/main.cpp src/server/LanDatabase.cpp src/server/LanDatabase.h
-        src/server/LanServer.cpp src/server/LanServer.h src/core/PasswordHasher.cpp)
+        src/server/LanServer.cpp src/server/LanServer.h src/core/PasswordHasher.cpp
+        src/core/SystemProfile.cpp src/server/BusinessDatabase.cpp src/server/BusinessApi.cpp
+        src/server/BusinessRpc.cpp src/network/QueryBridge.cpp src/network/RemoteBackend.cpp
+        src/services/InventoryService.cpp src/services/InventoryServiceDocuments.cpp
+        src/services/InventoryServiceProduction.cpp src/services/InventoryServiceRevision.cpp
+        src/services/InspectionService.cpp src/services/UserService.cpp
+        src/services/AttachmentService.cpp src/services/ShipmentReceiptService.cpp)
+    qt_add_resources(WmsServer "business_schema" PREFIX "/" FILES database/postgresql/business-schema.json)
+    target_compile_definitions(WmsServer PRIVATE WMS_SERVER_BUILD)
     target_include_directories(WmsServer PRIVATE src)
     target_link_libraries(WmsServer PRIVATE Qt6::Core Qt6::Sql Qt6::Network Qt6::HttpServer)
     if(MSVC)

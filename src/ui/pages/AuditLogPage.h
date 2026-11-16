@@ -11,7 +11,7 @@ class AuditLogPage final : public QWidget
 {
     Q_OBJECT
 public:
-    explicit AuditLogPage(QSqlDatabase database, QWidget *parent = nullptr);
+    explicit AuditLogPage(QSqlDatabase database, QWidget *parent = nullptr, bool loadInitially = true);
 
 public slots:
     void refresh();

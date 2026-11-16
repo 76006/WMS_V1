@@ -1,5 +1,12 @@
 #include "network/NetworkWindow.h"
 #include "core/SystemProfile.h"
+#include "network/RemoteBackend.h"
+#include "ui/MainWindow.h"
+#include "services/InventoryService.h"
+#include "services/OfficeTemplateService.h"
+#include <QSqlQuery>
+#include <QUuid>
+#include <QFile>
 
 #include <QApplication>
 #include <QDateTime>
@@ -10,6 +17,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QMessageBox>
+#include <QDebug>
 #include <QLineEdit>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -22,10 +31,10 @@
 
 NetworkWindow::NetworkWindow(const QString &serverUrl, QWidget *parent) : QWidget(parent)
 {
-    setWindowTitle(SystemProfile::windowTitle() + QStringLiteral(" · 联网库存查询"));
-    resize(1180, 720);
+    setWindowTitle(SystemProfile::windowTitle() + QStringLiteral(" · 联网登录"));
+    resize(580, 310);
     auto *layout = new QVBoxLayout(this);
-    auto *intro = new QLabel(QStringLiteral("局域网试用：登录与库存查询。当前连接测试数据库，出入库等业务将在后续版本接入。"), this);
+    auto *intro = new QLabel(QStringLiteral("连接服务器后进入完整仓库管理界面，所有业务数据由服务器统一保存。"), this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
     auto *form = new QFormLayout;
@@ -36,51 +45,22 @@ NetworkWindow::NetworkWindow(const QString &serverUrl, QWidget *parent) : QWidge
     m_username = new QLineEdit(settings.value("network/username", "admin").toString(), this);
     m_password = new QLineEdit(this);
     m_password->setEchoMode(QLineEdit::Password);
+    if(QUrl(m_address->text()).host()=="127.0.0.1")
+        m_password->setText(qEnvironmentVariable("WMS_DEMO_LOGIN_PASSWORD"));
     form->addRow(QStringLiteral("服务器地址"), m_address);
     form->addRow(QStringLiteral("用户名"), m_username);
     form->addRow(QStringLiteral("密码"), m_password);
     layout->addLayout(form);
     auto *buttons = new QHBoxLayout;
     m_login = new QPushButton(QStringLiteral("连接并登录"), this);
-    m_logout = new QPushButton(QStringLiteral("退出登录"), this);
     buttons->addWidget(m_login);
-    buttons->addWidget(m_logout);
     buttons->addStretch();
     layout->addLayout(buttons);
     m_status = new QLabel(QStringLiteral("尚未连接"), this);
     m_status->setWordWrap(true);
     layout->addWidget(m_status);
-    auto *search = new QHBoxLayout;
-    m_search = new QLineEdit(this);
-    m_search->setPlaceholderText(QStringLiteral("物料编码、名称、规格或批次"));
-    m_refresh = new QPushButton(QStringLiteral("查询 / 刷新"), this);
-    m_previous = new QPushButton(QStringLiteral("上一页"), this);
-    m_next = new QPushButton(QStringLiteral("下一页"), this);
-    search->addWidget(m_search, 1);
-    search->addWidget(m_refresh);
-    search->addWidget(m_previous);
-    search->addWidget(m_next);
-    layout->addLayout(search);
-    m_table = new QTableWidget(0, 10, this);
-    m_table->setHorizontalHeaderLabels({QStringLiteral("物料编码"),QStringLiteral("物料名称"),
-        QStringLiteral("规格"),QStringLiteral("单位"),QStringLiteral("仓库"),QStringLiteral("库位"),
-        QStringLiteral("批次"),QStringLiteral("库存数量"),QStringLiteral("最低库存"),QStringLiteral("更新时间（UTC）")});
-    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_table->setAlternatingRowColors(true);
-    m_table->horizontalHeader()->setStretchLastSection(true);
-    layout->addWidget(m_table, 1);
-    m_timer = new QTimer(this);
-    m_timer->setInterval(15000);
-    connect(m_timer, &QTimer::timeout, this, [this] { if (!m_busy) refresh(); });
     connect(m_login, &QPushButton::clicked, this, &NetworkWindow::login);
     connect(m_password, &QLineEdit::returnPressed, this, &NetworkWindow::login);
-    connect(m_logout, &QPushButton::clicked, this, &NetworkWindow::logout);
-    const auto searchNow = [this] { if (!m_busy) { m_offset = 0; refresh(); } };
-    connect(m_refresh, &QPushButton::clicked, this, searchNow);
-    connect(m_search, &QLineEdit::returnPressed, this, searchNow);
-    connect(m_previous, &QPushButton::clicked, this, [this] { m_offset = qMax(0, m_offset-100); refresh(); });
-    connect(m_next, &QPushButton::clicked, this, [this] { m_offset += 100; refresh(); });
     setBusy(false);
 }
 
@@ -90,11 +70,7 @@ void NetworkWindow::setBusy(bool busy)
     const bool loggedIn = !m_token.isEmpty();
     m_login->setEnabled(!busy && !loggedIn);
     for (auto *edit : {m_address,m_username,m_password}) edit->setEnabled(!busy && !loggedIn);
-    m_refresh->setEnabled(!busy && loggedIn);
-    m_search->setEnabled(!busy && loggedIn);
-    m_previous->setEnabled(!busy && loggedIn && m_offset>0);
-    m_next->setEnabled(!busy && loggedIn && m_more);
-    m_logout->setEnabled(!busy && loggedIn);
+
 }
 
 void NetworkWindow::request(const QString &path, const QJsonObject *body,
@@ -147,7 +123,7 @@ void NetworkWindow::login()
     const QJsonObject body{{"username",m_username->text().trimmed()}, {"password",m_password->text()},
         {"product",SystemProfile::profileId()}};
     m_status->setText(QStringLiteral("正在连接服务器…"));
-    request("/api/v1/login", &body, [this](int, const QJsonObject &data, const QString &error) {
+    request("/api/v2/login", &body, [this](int, const QJsonObject &data, const QString &error) {
         m_password->clear();
         if (!error.isEmpty()) {
             m_status->setText(error);
@@ -155,7 +131,7 @@ void NetworkWindow::login()
             return;
         }
         if (data.value("product").toString() != SystemProfile::profileId()
-            || data.value("apiVersion").toInt() != 1 || data.value("token").toString().isEmpty()) {
+            || data.value("apiVersion").toInt() != 2 || data.value("token").toString().isEmpty()) {
             m_status->setText(QStringLiteral("服务器系统或接口版本不匹配"));
             if (m_smoke) QApplication::exit(4);
             return;
@@ -166,69 +142,72 @@ void NetworkWindow::login()
             settings.setValue("network/serverUrl",m_baseUrl.toString());
             settings.setValue("network/username",m_username->text().trimmed());
         }
-        m_offset = 0;
-        m_timer->start();
-        refresh();
-    });
-}
-
-void NetworkWindow::refresh()
-{
-    if (m_busy || m_token.isEmpty()) return;
-    QUrl url("/api/v1/inventory");
-    QUrlQuery query;
-    query.addQueryItem("q",m_search->text().trimmed());
-    query.addQueryItem("limit","100");
-    query.addQueryItem("offset",QString::number(m_offset));
-    url.setQuery(query);
-    m_status->setText(QStringLiteral("正在获取最新库存…"));
-    request(url.toString(QUrl::FullyEncoded), nullptr, [this](int status, const QJsonObject &data, const QString &error) {
-        m_table->setRowCount(0);
-        m_more = false;
-        if (!error.isEmpty()) {
-            if (status == 401) { m_token.clear(); m_timer->stop(); }
-            m_status->setText(QStringLiteral("库存未更新：%1").arg(error));
-            setBusy(false);
-            if (m_smoke) QApplication::exit(5);
-            return;
-        }
-        if (data.value("product").toString() != SystemProfile::profileId() || !data.value("items").isArray()) {
-            m_status->setText(QStringLiteral("库存响应格式或系统身份不匹配"));
-            m_token.clear(); m_timer->stop(); setBusy(false);
-            if (m_smoke) QApplication::exit(6);
-            return;
-        }
-        const auto rows = data.value("items").toArray();
-        const QStringList keys={"code","name","specification","unit","warehouse","location","batch","quantity","minimumStock","updatedAt"};
-        m_table->setRowCount(rows.size());
-        for (int r=0;r<rows.size();++r)
-            for (int c=0;c<keys.size();++c)
-                m_table->setItem(r,c,new QTableWidgetItem(rows[r].toObject().value(keys[c]).toString()));
-        m_table->resizeColumnsToContents();
-        m_more = data.value("hasMore").toBool();
-        m_status->setText(QStringLiteral("已连接 · 第 %1 页，本页 %2 条 · 最后刷新 %3 · 每15秒自动刷新")
-            .arg(m_offset/100+1).arg(rows.size()).arg(QDateTime::currentDateTime().toString("HH:mm:ss")));
-        setBusy(false);
-        if (m_smoke) QApplication::exit(rows.isEmpty() ? 7 : 0);
-    });
-}
-
-void NetworkWindow::logout()
-{
-    if (m_busy) return;
-    m_timer->stop();
-    QJsonObject body;
-    request("/api/v1/logout", &body, [this](int, const QJsonObject &, const QString &) {
-        m_token.clear(); m_table->setRowCount(0); m_more=false;
-        m_status->setText(QStringLiteral("已退出登录")); setBusy(false);
+        Session session;
+        session.userId=data.value("userId").toString().toLongLong();
+        session.username=data.value("username").toString();
+        session.displayName=data.value("displayName").toString();
+        session.roleCode=data.value("roleCode").toString();
+        for(const auto &permission:data.value("permissions").toArray())session.permissions.insert(permission.toString());
+        auto database=RemoteBackend::connect(m_baseUrl,m_token);
+        auto *window=new MainWindow(database,session,m_baseUrl.toString());
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        window->show();hide();
+        const auto connectionName=database.connectionName();
+        connect(window,&QObject::destroyed,this,[this,connectionName] {
+            QTimer::singleShot(0,this,[this,connectionName]{
+                QSqlDatabase::removeDatabase(connectionName);
+                QJsonObject body;
+                request("/api/v2/logout",&body,[this](int,const QJsonObject &,const QString &){
+                    m_token.clear();m_status->setText(QStringLiteral("已退出登录"));setBusy(false);show();
+                });
+            });
+            show();
+        });
+        if(m_smoke)QTimer::singleShot(0,this,[window,database,session]{
+            for(int index=0;index<23;++index)QMetaObject::invokeMethod(window,"showPage",Qt::DirectConnection,Q_ARG(int,index));
+            if(qEnvironmentVariableIsSet("WMS_TEST_UI_WRITE")) {
+                QString error;
+                QSqlQuery lookup(database);
+                lookup.exec("SELECT m.id,w.id,l.id FROM materials m CROSS JOIN warehouses w JOIN locations l ON l.warehouse_id=w.id WHERE m.code='TEST-RAW' AND w.code='TEST-A'");
+                if(lookup.next()) {
+                    StockMovementRequest line;line.materialId=lookup.value(0).toLongLong();line.warehouseId=lookup.value(1).toLongLong();line.locationId=lookup.value(2).toLongLong();line.quantity=1;line.batchNo="UI-SMOKE";
+                    StockDocumentRequest request;request.documentType="QTRK";request.documentDate=QDate::currentDate();request.handlerName="UI integration";request.lines.append(line);request.submissionToken=QUuid::createUuid().toString();
+                    InventoryService service(database,session.userId);PostedDocument posted;PostedDocumentEdit edit;
+                    if(service.postStockDocument(request,true,&posted,&error) && service.loadPostedDocument(posted.documentId,&edit,&error)) {
+                        edit.lines[0].quantity=2;
+                        if(service.revisePostedDocument(edit,&error)) {
+                            OfficeTemplateService::materialLines(database,request.lines,&error);
+                            if(error.isEmpty())service.reversePostedDocument(posted.documentId,"UI integration","UI integration",nullptr,&error);
+                        }
+                    }
+                } else error="Missing UI integration fixtures";
+                if(!error.isEmpty()) {
+                    auto errors=QCoreApplication::instance()->property("networkErrors").toStringList();errors.append(error);QCoreApplication::instance()->setProperty("networkErrors",errors);
+                    QFile log(qEnvironmentVariable("WMS_NETWORK_LOG"));if(log.open(QIODevice::WriteOnly|QIODevice::Append))log.write(error.toUtf8());
+                }
+            }
+            QApplication::exit(QCoreApplication::instance()->property("networkErrors").toStringList().isEmpty()?0:9);
+        });
     });
 }
 
 void NetworkWindow::startSmokeCheck()
 {
     m_smoke = true;
+    auto *dialogs=new QTimer(this);
+    connect(dialogs,&QTimer::timeout,this,[]{
+        for(auto *widget:QApplication::topLevelWidgets()) {
+            if(auto *box=qobject_cast<QMessageBox *>(widget);box && box->isVisible()) {
+                qWarning().noquote()<<box->text();
+                auto errors=QCoreApplication::instance()->property("networkErrors").toStringList();
+                errors.append(box->text());QCoreApplication::instance()->setProperty("networkErrors",errors);
+                box->reject();
+            }
+        }
+    });
+    dialogs->start(100);
     m_username->setText(qEnvironmentVariable("WMS_TEST_USERNAME", "admin"));
     m_password->setText(qEnvironmentVariable("WMS_TEST_PASSWORD"));
-    QTimer::singleShot(30000, this, [] { QApplication::exit(8); });
+    QTimer::singleShot(120000, this, [] { QApplication::exit(8); });
     QTimer::singleShot(0, this, [this] { login(); });
 }

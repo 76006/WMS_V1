@@ -198,7 +198,7 @@ void SerialTracePage::loadHistory()
     }
     QSqlQuery attachments(m_database);
     attachments.prepare(QStringLiteral(
-        "SELECT DISTINCT d.document_no,d.document_type,a.original_file_name,a.uploaded_at "
+        "SELECT DISTINCT d.document_no,d.document_type,a.original_file_name,a.uploaded_at,a.id "
         "FROM business_documents d JOIN attachments a "
         "ON a.business_type='business_document' AND a.business_id=d.id "
         "WHERE a.is_deleted=0 AND ((? > 0 AND d.production_run_id=?) OR EXISTS("

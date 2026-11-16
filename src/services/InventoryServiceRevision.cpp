@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/InventoryService.h"
 
 #include <QDateTime>
@@ -208,7 +210,7 @@ bool rebuildInspectionNoticeUsage(QSqlDatabase database, qlonglong noticeId,
         "JOIN business_documents d ON d.id=q.document_id "
         "JOIN business_document_items i ON i.document_id=d.id "
         "WHERE q.inspection_notice_id=? AND d.stock_direction='IN' "
-        "AND d.status NOT IN ('DRAFT','REVERSED') GROUP BY i.material_id,UPPER(i.batch_no)"));
+        "AND d.status NOT IN ('DRAFT','REVERSED') GROUP BY i.material_id,i.batch_no"));
     used.addBindValue(noticeId);
     if (!used.exec()) {
         setError(errorMessage, QStringLiteral("汇总送检入库数量失败：%1")
@@ -487,6 +489,16 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
                                           PostedDocumentEdit *document,
                                           QString *errorMessage) const
 {
+    // RPC InventoryService.loadPostedDocument
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("documentId",BusinessWire::Codec<qlonglong>::put(documentId));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.loadPostedDocument",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(document) *document=BusinessWire::Codec<PostedDocumentEdit>::get(reply.value("document"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!document || documentId <= 0 || !m_database.isOpen()) {
         setError(errorMessage, QStringLiteral("业务单据参数无效。"));
         return false;
@@ -543,7 +555,7 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
         "LEFT JOIN issue_line_options o ON o.document_item_id=i.id "
         "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id WHERE i.document_id=? "
-        "GROUP BY i.id ORDER BY i.line_number,i.id"));
+        "GROUP BY i.id,d.id,m.id,o.document_item_id,u.document_item_id ORDER BY i.line_number,i.id"));
     lines.addBindValue(documentId);
     if (!lines.exec()) {
         setError(errorMessage, QStringLiteral("读取业务明细失败：%1").arg(lines.lastError().text()));
@@ -590,6 +602,15 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
 bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
                                             QString *errorMessage)
 {
+    // RPC InventoryService.revisePostedDocument
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("document",BusinessWire::Codec<PostedDocumentEdit>::put(document));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.revisePostedDocument",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     static const QSet<QString> directions = {
         QStringLiteral("IN"), QStringLiteral("OUT"), QStringLiteral("TRANSFER"),
         QStringLiteral("ADJUST")};
@@ -717,8 +738,8 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
             "LEFT JOIN stock_balances b ON b.material_id=l.material_id "
             "AND b.warehouse_id=l.warehouse_id AND b.location_id=l.location_id "
             "AND b.batch_no=l.batch_no WHERE l.document_id=? "
-            "GROUP BY l.material_id,l.warehouse_id,l.location_id,l.batch_no "
-            "HAVING after_quantity < -0.0000001 LIMIT 1"));
+            "GROUP BY l.material_id,l.warehouse_id,l.location_id,l.batch_no,m.id,w.id,loc.id,b.id "
+            "HAVING COALESCE(b.quantity,0)-SUM(l.quantity_in-l.quantity_out) < -0.0000001 LIMIT 1"));
         stockCheck.addBindValue(document.documentId);
         if (!stockCheck.exec())
             return fail(errorMessage, QStringLiteral("检查撤销后库存失败：%1")
@@ -1323,6 +1344,18 @@ bool InventoryService::reversePostedDocument(qlonglong documentId,
                                              QString *documentNumber,
                                              QString *errorMessage)
 {
+    // RPC InventoryService.reversePostedDocument
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("documentId",BusinessWire::Codec<qlonglong>::put(documentId));
+        arguments.insert("handlerName",BusinessWire::Codec<QString>::put(handlerName));
+        arguments.insert("reason",BusinessWire::Codec<QString>::put(reason));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.reversePostedDocument",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(documentNumber) *documentNumber=BusinessWire::Codec<QString>::get(reply.value("documentNumber"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (documentId <= 0 || m_operatorId <= 0 || !m_database.isOpen()) {
         setError(errorMessage, QStringLiteral("单据编号或当前操作人无效。"));
         return false;

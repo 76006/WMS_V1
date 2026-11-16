@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/InspectionService.h"
 
 #include "core/SystemProfile.h"
@@ -104,6 +106,15 @@ InspectionService::InspectionService(QSqlDatabase database, qlonglong operatorId
 QString InspectionService::previewNextInspectionNumber(const QDate &date,
                                                         QString *errorMessage) const
 {
+    // RPC InspectionService.previewNextInspectionNumber
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("date",BusinessWire::Codec<QDate>::put(date));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.previewNextInspectionNumber",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<QString>::get(reply.value("result"));
+    }
+
     if (!date.isValid()) {
         setError(errorMessage, QStringLiteral("送检通知日期无效。"));
         return {};
@@ -309,6 +320,17 @@ bool InspectionService::createNotice(const InspectionNoticeDraft &draft,
                                      QString *inspectionNumber,
                                      QString *errorMessage)
 {
+    // RPC InspectionService.createNotice
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("draft",BusinessWire::Codec<InspectionNoticeDraft>::put(draft));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.createNotice",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(noticeId) *noticeId=BusinessWire::Codec<qlonglong>::get(reply.value("noticeId"));
+        if(inspectionNumber) *inspectionNumber=BusinessWire::Codec<QString>::get(reply.value("inspectionNumber"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (noticeId) *noticeId = 0;
     if (inspectionNumber) inspectionNumber->clear();
     if (!validateDraft(draft, errorMessage) || !beginImmediate(errorMessage)) return false;
@@ -372,6 +394,17 @@ bool InspectionService::updateNotice(qlonglong noticeId,
                                      QString *inspectionNumber,
                                      QString *errorMessage)
 {
+    // RPC InspectionService.updateNotice
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("noticeId",BusinessWire::Codec<qlonglong>::put(noticeId));
+        arguments.insert("draft",BusinessWire::Codec<InspectionNoticeDraft>::put(draft));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.updateNotice",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(inspectionNumber) *inspectionNumber=BusinessWire::Codec<QString>::get(reply.value("inspectionNumber"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (inspectionNumber) inspectionNumber->clear();
     if (noticeId <= 0 || !validateDraft(draft, errorMessage)
         || !beginImmediate(errorMessage)) return false;
@@ -468,6 +501,16 @@ bool InspectionService::readNotice(qlonglong noticeId,
                                    InspectionNotice *notice,
                                    QString *errorMessage) const
 {
+    // RPC InspectionService.readNotice
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("noticeId",BusinessWire::Codec<qlonglong>::put(noticeId));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.readNotice",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(notice) *notice=BusinessWire::Codec<InspectionNotice>::get(reply.value("notice"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!notice || noticeId <= 0) {
         setError(errorMessage, QStringLiteral("送检通知参数无效。"));
         return false;
@@ -521,6 +564,17 @@ bool InspectionService::listNotices(const QStringList &statuses,
                                     QList<InspectionNotice> *notices,
                                     QString *errorMessage) const
 {
+    // RPC InspectionService.listNotices
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("statuses",BusinessWire::Codec<QStringList>::put(statuses));
+        arguments.insert("keyword",BusinessWire::Codec<QString>::put(keyword));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.listNotices",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(notices) *notices=BusinessWire::Codec<QList<InspectionNotice>>::get(reply.value("notices"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!notices) {
         setError(errorMessage, QStringLiteral("送检通知列表参数无效。"));
         return false;
@@ -571,6 +625,15 @@ bool InspectionService::listNotices(const QStringList &statuses,
 bool InspectionService::listQualifiedUnused(QList<InspectionNotice> *notices,
                                             QString *errorMessage) const
 {
+    // RPC InspectionService.listQualifiedUnused
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.listQualifiedUnused",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(notices) *notices=BusinessWire::Codec<QList<InspectionNotice>>::get(reply.value("notices"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!listNotices({QStringLiteral("PENDING"), QStringLiteral("QUALIFIED")},
                      QString(), notices, errorMessage)) return false;
     for (int index = notices->size() - 1; index >= 0; --index) {
@@ -650,6 +713,16 @@ bool InspectionService::recordResult(qlonglong noticeId,
                                      const InspectionNoticeResult &result,
                                      QString *errorMessage)
 {
+    // RPC InspectionService.recordResult
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("noticeId",BusinessWire::Codec<qlonglong>::put(noticeId));
+        arguments.insert("result",BusinessWire::Codec<InspectionNoticeResult>::put(result));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.recordResult",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (noticeId <= 0 || m_operatorId <= 0 || !result.inspectionDate.isValid()
         || result.inspectorName.trimmed().isEmpty() || result.lines.isEmpty()) {
         setError(errorMessage, QStringLiteral("检验日期、检验员或检验数量无效。"));
@@ -1039,6 +1112,16 @@ bool InspectionService::updateResult(qlonglong resultId,
                                      const InspectionNoticeResult &result,
                                      QString *errorMessage)
 {
+    // RPC InspectionService.updateResult
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("resultId",BusinessWire::Codec<qlonglong>::put(resultId));
+        arguments.insert("result",BusinessWire::Codec<InspectionNoticeResult>::put(result));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.updateResult",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (resultId <= 0 || m_operatorId <= 0 || !result.inspectionDate.isValid()
         || result.inspectorName.trimmed().isEmpty() || result.lines.isEmpty()) {
         setError(errorMessage, QStringLiteral("检验日期、检验员或本次检验数量无效。"));
@@ -1178,6 +1261,16 @@ bool InspectionService::readResult(qlonglong resultId,
                                    InspectionResultRecord *record,
                                    QString *errorMessage) const
 {
+    // RPC InspectionService.readResult
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("resultId",BusinessWire::Codec<qlonglong>::put(resultId));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.readResult",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(record) *record=BusinessWire::Codec<InspectionResultRecord>::get(reply.value("record"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (resultId <= 0 || !record) {
         setError(errorMessage, QStringLiteral("本次检验记录参数无效。"));
         return false;
@@ -1189,7 +1282,7 @@ bool InspectionService::readResult(qlonglong resultId,
         "r.attachment_id,r.created_at,COUNT(ri.id),COALESCE(SUM(ri.qualified_quantity),0),"
         "COALESCE(SUM(ri.unqualified_quantity),0) FROM inspection_results r "
         "JOIN inspection_notices n ON n.id=r.notice_id "
-        "LEFT JOIN inspection_result_items ri ON ri.result_id=r.id WHERE r.id=? GROUP BY r.id"));
+        "LEFT JOIN inspection_result_items ri ON ri.result_id=r.id WHERE r.id=? GROUP BY r.id,n.id"));
     query.addBindValue(resultId);
     if (!query.exec() || !query.next()) {
         setError(errorMessage, QStringLiteral("读取本次检验记录失败：%1")
@@ -1246,6 +1339,16 @@ bool InspectionService::listResults(const QString &keyword,
                                     QList<InspectionResultRecord> *records,
                                     QString *errorMessage) const
 {
+    // RPC InspectionService.listResults
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("keyword",BusinessWire::Codec<QString>::put(keyword));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.listResults",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(records) *records=BusinessWire::Codec<QList<InspectionResultRecord>>::get(reply.value("records"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!records) {
         setError(errorMessage, QStringLiteral("检验历史列表参数无效。"));
         return false;
@@ -1264,7 +1367,7 @@ bool InspectionService::listResults(const QString &keyword,
             "AND (n.inspection_no LIKE ? OR n.purchase_order_no LIKE ? OR n.supplier LIKE ? "
             "OR r.inspector_name LIKE ?) ");
     }
-    sql += QStringLiteral("GROUP BY r.id ORDER BY r.inspection_date DESC,r.id DESC");
+    sql += QStringLiteral("GROUP BY r.id,n.id ORDER BY r.inspection_date DESC,r.id DESC");
     QSqlQuery query(m_database);
     query.prepare(sql);
     if (!trimmed.isEmpty()) {
@@ -1302,6 +1405,16 @@ bool InspectionService::recordTemplateArtifact(qlonglong noticeId,
                                                const InspectionTemplateArtifact &artifact,
                                                QString *errorMessage)
 {
+    // RPC InspectionService.recordTemplateArtifact
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("noticeId",BusinessWire::Codec<qlonglong>::put(noticeId));
+        arguments.insert("artifact",BusinessWire::Codec<InspectionTemplateArtifact>::put(artifact));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.recordTemplateArtifact",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (noticeId <= 0 || m_operatorId <= 0
         || (artifact.payload.trimmed().isEmpty() && artifact.archivePath.trimmed().isEmpty()
             && artifact.data.isEmpty())) {
@@ -1392,6 +1505,16 @@ bool InspectionService::cancelNotice(qlonglong noticeId,
                                      const QString &reason,
                                      QString *errorMessage)
 {
+    // RPC InspectionService.cancelNotice
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("noticeId",BusinessWire::Codec<qlonglong>::put(noticeId));
+        arguments.insert("reason",BusinessWire::Codec<QString>::put(reason));
+        const auto reply=RemoteBackend::rpc(m_database,"InspectionService.cancelNotice",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (noticeId <= 0 || m_operatorId <= 0 || reason.trimmed().isEmpty()) {
         setError(errorMessage, QStringLiteral("送检通知编号或撤销原因无效。"));
         return false;

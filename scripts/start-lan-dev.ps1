@@ -1,8 +1,8 @@
-param(
+﻿param(
     [ValidateSet('IceBeauty','MeiJingLing')][string]$Product = 'IceBeauty',
     [string]$QtRoot = 'D:\Qt\6.5.3\mingw_64',
     [string]$PostgresRoot = '',
-    [string]$BuildDirectory = 'build-lan',
+    [string]$BuildDirectory = 'build-lan-business',
     [switch]$AllowLan
 )
 $ErrorActionPreference = 'Stop'
@@ -44,7 +44,7 @@ if ($LASTEXITCODE -ne 0) {
     if (!$pgStart.WaitForExit(30000)) { throw 'PostgreSQL startup timed out' }
     if ($pgStart.ExitCode -ne 0) { throw 'PostgreSQL start failed; see outputs/lan-dev/postgres.log' }
 }
-$dbName = if ($Product -eq 'IceBeauty') { 'wms_icebeauty_demo' } else { 'wms_meijingling_demo' }
+$dbName = if ($Product -eq 'IceBeauty') { 'wms_icebeauty_business_demo' } else { 'wms_meijingling_business_demo' }
 $profile = if ($Product -eq 'IceBeauty') { 'ICE_BEAUTY' } else { 'MEI_JING_LING' }
 $port = if ($Product -eq 'IceBeauty') { 18080 } else { 18081 }
 $env:PGPASSWORD = $secrets.postgres
@@ -79,6 +79,18 @@ if (!$schema) {
         if ($LASTEXITCODE -ne 0) { throw 'Demo schema initialization failed' }
     } finally { Remove-Item Env:WMS_DEMO_ADMIN_PASSWORD -ErrorAction SilentlyContinue }
 }
+$env:PGPASSWORD = $secrets.app
+try {
+    $businessSchema = & $psql -X -h 127.0.0.1 -p 55432 -U $dbName -d $dbName -t -A -c "SELECT 1 FROM information_schema.schemata WHERE schema_name='wms_business'"
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect business database' }
+} finally { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
+if (!$businessSchema) {
+    $env:WMS_DEMO_ADMIN_PASSWORD = $secrets.admin
+    try {
+        & $serverExe --product $profile --init-business
+        if ($LASTEXITCODE -ne 0) { throw 'Business schema initialization failed' }
+    } finally { Remove-Item Env:WMS_DEMO_ADMIN_PASSWORD -ErrorAction SilentlyContinue }
+}
 $pidFile = Join-Path $runtime "$Product-server.json"
 if (Test-Path -LiteralPath $pidFile) {
     $previous = Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
@@ -109,6 +121,6 @@ for ($attempt=0; $attempt -lt 30; $attempt++) {
 $server.Refresh()
 if ($server.HasExited) { throw "Server exited; see outputs/lan-dev/$Product-server.stderr.log" }
 if (!$health -or $health.product -ne $profile) { throw 'Server health check failed' }
-Write-Output "$Product query pilot ready: http://127.0.0.1:$port"
+Write-Output "$Product full business server ready: http://127.0.0.1:$port"
 Write-Output 'Login: admin. The generated test password is the admin value in outputs/lan-dev/credentials.json.'
 Write-Output 'This development launcher does not install Windows services or open firewall ports.'

@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/AttachmentService.h"
 
 #include <QCryptographicHash>
@@ -27,6 +29,19 @@ bool AttachmentService::uploadDocumentAttachment(qlonglong documentId,
                                                  qlonglong *attachmentId,
                                                  QString *errorMessage)
 {
+    // RPC AttachmentService.uploadDocumentAttachment
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("documentId",BusinessWire::Codec<qlonglong>::put(documentId));
+        arguments.insert("fileName",BusinessWire::Codec<QString>::put(fileName));
+        arguments.insert("mimeType",BusinessWire::Codec<QString>::put(mimeType));
+        arguments.insert("data",BusinessWire::Codec<QByteArray>::put(data));
+        const auto reply=RemoteBackend::rpc(m_database,"AttachmentService.uploadDocumentAttachment",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(attachmentId) *attachmentId=BusinessWire::Codec<qlonglong>::get(reply.value("attachmentId"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     const QString cleanName = fileName.trimmed();
     if (!m_database.isOpen() || m_operatorId <= 0 || documentId <= 0
         || cleanName.isEmpty() || data.isEmpty()) {
@@ -85,6 +100,16 @@ bool AttachmentService::loadAttachment(qlonglong attachmentId,
                                        AttachmentPayload *payload,
                                        QString *errorMessage) const
 {
+    // RPC AttachmentService.loadAttachment
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("attachmentId",BusinessWire::Codec<qlonglong>::put(attachmentId));
+        const auto reply=RemoteBackend::rpc(m_database,"AttachmentService.loadAttachment",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(payload) *payload=BusinessWire::Codec<AttachmentPayload>::get(reply.value("payload"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!payload || attachmentId <= 0) {
         setAttachmentError(errorMessage, QStringLiteral("附件标识无效。"));
         return false;
@@ -109,6 +134,16 @@ bool AttachmentService::setDeleted(qlonglong attachmentId,
                                    bool deleted,
                                    QString *errorMessage)
 {
+    // RPC AttachmentService.setDeleted
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("attachmentId",BusinessWire::Codec<qlonglong>::put(attachmentId));
+        arguments.insert("deleted",BusinessWire::Codec<bool>::put(deleted));
+        const auto reply=RemoteBackend::rpc(m_database,"AttachmentService.setDeleted",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!m_database.isOpen() || m_operatorId <= 0 || attachmentId <= 0) {
         setAttachmentError(errorMessage, QStringLiteral("附件或当前用户无效。"));
         return false;

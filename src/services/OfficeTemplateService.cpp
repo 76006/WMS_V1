@@ -1331,7 +1331,7 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id "
         "LEFT JOIN inventory_ledger_serials x ON x.ledger_id=l.id "
         "LEFT JOIN serial_numbers sn ON sn.id=x.serial_id WHERE i.document_id=? "
-        "GROUP BY i.id ORDER BY i.line_number,i.id"));
+        "GROUP BY i.id,m.id,source.id,o.document_item_id,u.document_item_id ORDER BY i.line_number,i.id"));
     lines.addBindValue(documentId);
     if (!lines.exec()) {
         if (errors) errors->append(QStringLiteral("读取修改后的业务明细失败：%1")

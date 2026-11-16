@@ -3,8 +3,12 @@
 #include <QDir>
 #include <QStandardPaths>
 
+namespace { QString serverProfile; }
+void SystemProfile::setServerProfile(const QString &profile) { serverProfile=profile; }
+
 bool SystemProfile::isMeiJingLing()
 {
+    if(!serverProfile.isEmpty())return serverProfile==QStringLiteral("MEI_JING_LING");
 #if defined(WMS_PROFILE_MEI_JING_LING)
     return true;
 #else

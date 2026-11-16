@@ -6,6 +6,8 @@
 class SystemProfile
 {
 public:
+    // Server processes select one immutable product before accepting connections.
+    static void setServerProfile(const QString &profile);
     static bool isMeiJingLing();
     static QString profileId();
     static QString displayName();

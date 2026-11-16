@@ -154,9 +154,9 @@ int main(int argc, char *argv[])
     parser.addOption(databaseOption);
     parser.addOption(smokeOption);
     parser.addOption(uiSmokeOption);
-    parser.addOption(QCommandLineOption("server", QStringLiteral("使用局域网库存查询模式。"), "url"));
+    parser.addOption(QCommandLineOption("server", QStringLiteral("连接局域网服务器，使用完整业务界面。"), "url"));
     parser.addOption(QCommandLineOption("local", QStringLiteral("直接启动单机版。")));
-    parser.addOption(QCommandLineOption("network-smoke-test", QStringLiteral("联网登录和查询验证后退出，凭据从测试环境变量读取。")));
+    parser.addOption(QCommandLineOption("network-smoke-test", QStringLiteral("联网登录和逐页加载验证后退出，凭据从测试环境变量读取。")));
     parser.process(application);
     const bool headlessCheck = parser.isSet(smokeOption) || parser.isSet(uiSmokeOption);
 
@@ -169,9 +169,9 @@ int main(int argc, char *argv[])
         QMessageBox choice;
         choice.setWindowTitle(SystemProfile::windowTitle());
         choice.setText(QStringLiteral("请选择运行方式"));
-        choice.setInformativeText(QStringLiteral("单机版使用当前电脑的数据；局域网试用版支持连接服务器登录和查询库存。"));
+        choice.setInformativeText(QStringLiteral("单机版使用当前电脑的数据；局域网版连接服务器，共享出入库和生产业务。"));
         auto *local = choice.addButton(QStringLiteral("单机版"), QMessageBox::AcceptRole);
-        auto *network = choice.addButton(QStringLiteral("局域网查询"), QMessageBox::ActionRole);
+        auto *network = choice.addButton(QStringLiteral("局域网版"), QMessageBox::ActionRole);
         choice.addButton(QMessageBox::Cancel);
         choice.setDefaultButton(local);
         choice.exec();

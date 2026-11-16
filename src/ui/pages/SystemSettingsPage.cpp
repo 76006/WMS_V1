@@ -1,5 +1,6 @@
 #include "ui/pages/SystemSettingsPage.h"
 #include "core/SystemProfile.h"
+#include "network/RemoteBackend.h"
 #include "services/UserService.h"
 #include <QCheckBox>
 #include <QDateTime>
@@ -44,7 +45,7 @@ SystemSettingsPage::SystemSettingsPage(QSqlDatabase database, Session session,
     auto *path = new QLabel(databaseFilePath, panel);
     path->setTextInteractionFlags(Qt::TextSelectableByMouse);
     path->setWordWrap(true);
-    info->addRow(QStringLiteral("数据库文件"), path);
+    info->addRow(RemoteBackend::isRemote(m_database) ? QStringLiteral("联网服务器") : QStringLiteral("数据库文件"), path);
     layout->addLayout(info);
     layout->addSpacing(12);
     layout->addWidget(new QLabel(QStringLiteral("修改密码"), panel));
@@ -89,7 +90,7 @@ SystemSettingsPage::SystemSettingsPage(QSqlDatabase database, Session session,
     numberLayout->addWidget(m_numberRulesTable);
     root->addWidget(numberPanel, 1);
 
-    if (m_session.canManageSystem()) {
+    if (m_session.canManageSystem() && !RemoteBackend::isRemote(m_database)) {
         auto *cleanupPanel = new QFrame(this);
         cleanupPanel->setObjectName(QStringLiteral("panel"));
         auto *cleanupLayout = new QVBoxLayout(cleanupPanel);
@@ -118,7 +119,7 @@ SystemSettingsPage::SystemSettingsPage(QSqlDatabase database, Session session,
 
 void SystemSettingsPage::clearBusinessData()
 {
-    if (!m_session.canManageSystem()) return;
+    if (!m_session.canManageSystem() || RemoteBackend::isRemote(m_database)) return;
 
     auto tableCount = [this](const QString &tableName) -> qlonglong {
         QSqlQuery query(m_database);

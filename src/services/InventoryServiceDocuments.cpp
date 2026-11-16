@@ -1,3 +1,5 @@
+#include "network/RemoteBackend.h"
+#include "network/BusinessWire.h"
 #include "services/InventoryService.h"
 
 #include "core/SystemProfile.h"
@@ -205,6 +207,17 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                                          PostedDocument *postedDocument,
                                          QString *errorMessage)
 {
+    // RPC InventoryService.postStockDocument
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<StockDocumentRequest>::put(request));
+        arguments.insert("inbound",BusinessWire::Codec<bool>::put(inbound));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postStockDocument",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!m_database.isOpen() || m_operatorId <= 0 || !request.documentDate.isValid()
         || request.documentType.trimmed().isEmpty() || request.lines.isEmpty()
         || request.submissionToken.trimmed().isEmpty()) {
@@ -541,6 +554,16 @@ bool InventoryService::importInitialInventory(const InitialInventoryRequest &req
                                               PostedDocument *postedDocument,
                                               QString *errorMessage)
 {
+    // RPC InventoryService.importInitialInventory
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<InitialInventoryRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.importInitialInventory",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     return importInitialInventoryInternal(request, postedDocument, true, errorMessage);
 }
 
@@ -549,6 +572,16 @@ bool InventoryService::importInitialInventoryInCurrentTransaction(
     PostedDocument *postedDocument,
     QString *errorMessage)
 {
+    // RPC InventoryService.importInitialInventoryInCurrentTransaction
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<InitialInventoryRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.importInitialInventoryInCurrentTransaction",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     return importInitialInventoryInternal(request, postedDocument, false, errorMessage);
 }
 
@@ -769,6 +802,16 @@ bool InventoryService::postInventoryCount(const InventoryCountRequest &request,
                                           PostedDocument *postedDocument,
                                           QString *errorMessage)
 {
+    // RPC InventoryService.postInventoryCount
+    if (RemoteBackend::isRemote(m_database)) {
+        QJsonObject arguments;
+        arguments.insert("request",BusinessWire::Codec<InventoryCountRequest>::put(request));
+        const auto reply=RemoteBackend::rpc(m_database,"InventoryService.postInventoryCount",arguments,errorMessage);
+        if(reply.contains("error")) return {};
+        if(postedDocument) *postedDocument=BusinessWire::Codec<PostedDocument>::get(reply.value("postedDocument"));
+        return BusinessWire::Codec<bool>::get(reply.value("result"));
+    }
+
     if (!m_database.isOpen() || m_operatorId <= 0 || !request.documentDate.isValid()
         || request.lines.isEmpty() || request.submissionToken.trimmed().isEmpty()) {
         setDocumentError(errorMessage, QStringLiteral("盘点单头、明细或当前用户无效。"));
