@@ -1,5 +1,6 @@
 #include "ui/pages/AttachmentPage.h"
 
+#include "core/SystemProfile.h"
 #include "import/LegacyInventoryImporter.h"
 #include "services/AttachmentService.h"
 #include "services/OfficeTemplateService.h"
@@ -266,8 +267,7 @@ void AttachmentPage::openAttachment()
     }
     QString safeName = payload.fileName;
     safeName.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("_"));
-    const QString directory = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-        + QStringLiteral("/IceBeautyWms/attachments");
+    const QString directory = SystemProfile::temporaryPath(QStringLiteral("attachments"));
     QDir().mkpath(directory);
     const QString digest = QString::fromLatin1(
         QCryptographicHash::hash(payload.data, QCryptographicHash::Sha256).toHex().left(12));

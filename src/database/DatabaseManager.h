@@ -11,6 +11,7 @@ public:
     ~DatabaseManager();
 
     bool open(const DatabaseConfig &config, QString *errorMessage = nullptr);
+    bool configureForUse(QString *errorMessage = nullptr);
     void close();
     bool isOpen() const;
     QSqlDatabase database() const;

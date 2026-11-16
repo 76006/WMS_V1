@@ -1,5 +1,6 @@
 #include "ui/pages/InspectionPage.h"
 
+#include "core/SystemProfile.h"
 #include "services/InspectionService.h"
 #include "services/OfficeTemplateService.h"
 #include "services/UserService.h"
@@ -312,8 +313,9 @@ private:
 
     QString nextAutomaticBatchNumber(int excludedRow) const
     {
-        const QString prefix = QStringLiteral("SM%1").arg(
-            m_notificationDate->date().toString(QStringLiteral("yyyyMMdd")));
+        const QString prefix = QStringLiteral("%1%2")
+            .arg(SystemProfile::batchNumberPrefix(),
+                 m_notificationDate->date().toString(QStringLiteral("yyyyMMdd")));
         const QRegularExpression pattern(
             QStringLiteral("^%1(\\d{3})$").arg(QRegularExpression::escape(prefix)),
             QRegularExpression::CaseInsensitiveOption);
@@ -897,8 +899,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
         }
         const QString name = QFileInfo(query.value(0).toString()).fileName();
         const QByteArray data = query.value(1).toByteArray();
-        const QString directory = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                      .filePath(QStringLiteral("IceBeautyWms/inspection-files"));
+        const QString directory = SystemProfile::temporaryPath(QStringLiteral("inspection-files"));
         QDir().mkpath(directory);
         const QString path = QDir(directory).filePath(
             QStringLiteral("%1_%2").arg(QUuid::createUuid().toString(QUuid::WithoutBraces), name));
@@ -930,8 +931,7 @@ InspectionPage::InspectionPage(QSqlDatabase database, Session session, QWidget *
         }
         const QString name = QFileInfo(query.value(0).toString()).fileName();
         const QByteArray data = query.value(1).toByteArray();
-        const QString directory = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                      .filePath(QStringLiteral("IceBeautyWms/inspection-files"));
+        const QString directory = SystemProfile::temporaryPath(QStringLiteral("inspection-files"));
         QDir().mkpath(directory);
         const QString path = QDir(directory).filePath(
             QStringLiteral("%1_%2").arg(QUuid::createUuid().toString(QUuid::WithoutBraces), name));

@@ -1,5 +1,7 @@
 #include "ui/pages/MaterialPage.h"
 
+#include "core/SystemProfile.h"
+
 #include "import/LegacyInventoryImporter.h"
 #include "import/XlsxExporter.h"
 #include "services/InventoryService.h"
@@ -1537,7 +1539,8 @@ void MaterialPage::manageProjects()
     connect(addButton, &QPushButton::clicked, &dialog, [this, &dialog, reload, writeAudit] {
         bool accepted = false;
         QString code = QInputDialog::getText(&dialog, QStringLiteral("新增项目代码"),
-            QStringLiteral("项目代码（例如 SM01）"), QLineEdit::Normal, {}, &accepted);
+            QStringLiteral("项目代码（例如 %1）").arg(SystemProfile::defaultProjectCode()),
+            QLineEdit::Normal, {}, &accepted);
         if (!accepted) return;
         code = MaterialCodeService::normalizeProjectCode(code);
         if (!MaterialCodeService::isValidProjectCode(code)) {

@@ -1,5 +1,7 @@
 #include "ui/dialogs/DocumentTemplateDialog.h"
 
+#include "core/SystemProfile.h"
+
 #include <QAbstractItemView>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -117,7 +119,9 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     root->addWidget(heading);
 
     auto *description = new QLabel(
-        QStringLiteral("以下内容会写入“仓库系统表单模板”中的原始 Excel 版式。正式提交后同时保存到数据库附件和“我的文档\\冰美肌仓库系统表单”分类文件夹。所有签字、批准和签署日期位置保持空白，打印后手写。"),
+        QStringLiteral("以下内容会写入“%1”中的原始 Excel 版式。正式提交后同时保存到数据库附件和“我的文档\\%2”分类文件夹。所有签字、批准和签署日期位置保持空白，打印后手写。")
+            .arg(SystemProfile::templateDirectoryName(),
+                 SystemProfile::archiveDirectoryName()),
         this);
     description->setObjectName(QStringLiteral("mutedText"));
     description->setWordWrap(true);

@@ -1,5 +1,6 @@
 #include "ui/pages/ExcelImportPage.h"
 
+#include "core/SystemProfile.h"
 #include "services/InventoryService.h"
 #include "import/XlsxExporter.h"
 
@@ -51,8 +52,8 @@ ExcelImportPage::ExcelImportPage(QSqlDatabase database, Session session, QWidget
     heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
     layout->addWidget(heading);
     auto *hint = new QLabel(QStringLiteral(
-        "适配“冰美肌库存-0629.xlsx”结构。先预览再导入；零库存、负数和数量缺失的物料只建立物料档案（不含库存），"
-        "无编码或数量非法的数据不会入账。"), panel);
+        "%1旧库存导入。先预览再导入；零库存、负数和数量缺失的物料只建立物料档案（不含库存），"
+        "无编码或数量非法的数据不会入账。").arg(SystemProfile::displayName()), panel);
     hint->setWordWrap(true);
     hint->setObjectName(QStringLiteral("mutedText"));
     layout->addWidget(hint);
@@ -124,8 +125,11 @@ ExcelImportPage::ExcelImportPage(QSqlDatabase database, Session session, QWidget
     connect(materialTemplate, &QPushButton::clicked, this, &ExcelImportPage::exportMaterialTemplate);
     connect(initialTemplate, &QPushButton::clicked, this, &ExcelImportPage::exportInitialTemplate);
     connect(inventoryExport, &QPushButton::clicked, this, &ExcelImportPage::exportInventory);
-    const QString defaultFile = QStringLiteral("D:/WMS/冰美肌库存-0629.xlsx");
-    if (QFileInfo::exists(defaultFile)) m_fileEdit->setText(QDir::toNativeSeparators(defaultFile));
+    if (!SystemProfile::isMeiJingLing()) {
+        const QString defaultFile = QStringLiteral("D:/WMS/冰美肌库存-0629.xlsx");
+        if (QFileInfo::exists(defaultFile))
+            m_fileEdit->setText(QDir::toNativeSeparators(defaultFile));
+    }
     refreshReferenceData();
 }
 

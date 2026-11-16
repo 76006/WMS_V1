@@ -1,6 +1,7 @@
 #include "ui/LoginDialog.h"
 
 #include "core/PasswordHasher.h"
+#include "core/SystemProfile.h"
 
 #include <QFileInfo>
 #include <QDateTime>
@@ -20,7 +21,7 @@ LoginDialog::LoginDialog(QSqlDatabase database,
                          QWidget *parent)
     : QDialog(parent), m_database(std::move(database))
 {
-    setWindowTitle(QStringLiteral("冰美肌库存管理 - 登录"));
+    setWindowTitle(SystemProfile::windowTitle() + QStringLiteral(" - 登录"));
     setModal(true);
     setMinimumWidth(430);
 
@@ -28,7 +29,7 @@ LoginDialog::LoginDialog(QSqlDatabase database,
     root->setContentsMargins(42, 36, 42, 32);
     root->setSpacing(14);
 
-    auto *title = new QLabel(QStringLiteral("冰美肌库存管理"), this);
+    auto *title = new QLabel(SystemProfile::windowTitle(), this);
     title->setStyleSheet(QStringLiteral("font-size: 24px; font-weight: 600; color: #111827;"));
 #ifndef NDEBUG
     auto *subtitle = new QLabel(QStringLiteral("测试模式：admin 可留空密码直接登录"), this);

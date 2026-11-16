@@ -154,6 +154,11 @@ function Clear-TableRows($sheet, [int]$firstRow, [int]$rowCount, [int]$columnCou
                  $sheet.Cells.Item($firstRow + $rowCount - 1, $columnCount)).ClearContents()
 }
 
+function Is-MeiJingLing($data) {
+    return [string]::Equals((TextValue $data.profileId), 'MEI_JING_LING',
+                            [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Expand-Table($sheet, [int]$firstRow, [int]$baseRows, [int]$requiredRows,
                       [int]$columnCount, [bool]$mergeIssueCells, [bool]$mergeInspectionCells) {
     if ($requiredRows -le $baseRows) { return 0 }
@@ -189,17 +194,34 @@ function Expand-Table($sheet, [int]$firstRow, [int]$baseRows, [int]$requiredRows
 
 function Fill-Inspection($sheet, $data) {
     $required = @($data.lines).Count
-    $extra = Expand-Table $sheet 12 15 $required 8 $false $true
-    Clear-TableRows $sheet 12 ($required + [Math]::Max(0, 15 - $required)) 8
-    Set-Cell $sheet 2 6 ("编号：" + (TextValue $data.documentNumber))
+    $mjl = Is-MeiJingLing $data
+    $columnCount = $(if ($mjl) { 9 } else { 8 })
+    $extra = Expand-Table $sheet 12 15 $required $columnCount $false (-not $mjl)
+    if ($mjl -and $extra -gt 0) {
+        for ($row = 27; $row -lt (27 + $extra); $row++) {
+            $null = $sheet.Range($sheet.Cells.Item($row, 2), $sheet.Cells.Item($row, 3)).Merge()
+            $null = $sheet.Range($sheet.Cells.Item($row, 6), $sheet.Cells.Item($row, 7)).Merge()
+            $null = $sheet.Range($sheet.Cells.Item($row, 8), $sheet.Cells.Item($row, 9)).Merge()
+        }
+    }
+    Clear-TableRows $sheet 12 ($required + [Math]::Max(0, 15 - $required)) $columnCount
+    if (-not $mjl) {
+        Set-Cell $sheet 2 6 ("编号：" + (TextValue $data.documentNumber))
+    }
     Set-Cell $sheet 3 2 (Get-Field $data 'entrustedBy')
     Set-Cell $sheet 4 2 (Get-Field $data 'notificationDepartment')
     Set-Cell $sheet 5 2 (Get-Field $data 'arrivalDate')
     Set-Cell $sheet 6 2 (TextValue $data.documentDate)
     $urgency = (Get-Field $data 'urgency').ToUpperInvariant()
-    Set-Cell $sheet 7 2 ($(if ($urgency -eq 'EXPEDITED') { '☑' } else { '□' }) + ' 加急（常规1-3天）')
-    Set-Cell $sheet 7 4 ($(if ($urgency -eq 'URGENT') { '☑' } else { '□' }) + ' 急（常规7天内）')
-    Set-Cell $sheet 7 7 ($(if ($urgency -eq 'NORMAL' -or [string]::IsNullOrWhiteSpace($urgency)) { '☑' } else { '□' }) + ' 正常（常规7-15天）')
+    if ($mjl) {
+        Set-Cell $sheet 7 2 ('加急  ' + $(if ($urgency -eq 'EXPEDITED') { '☑' } else { '□' }) + '（1-3天）')
+        Set-Cell $sheet 7 5 ('急  ' + $(if ($urgency -eq 'URGENT') { '☑' } else { '□' }) + '（7天内）')
+        Set-Cell $sheet 7 8 ('正常  ' + $(if ($urgency -eq 'NORMAL' -or [string]::IsNullOrWhiteSpace($urgency)) { '☑' } else { '□' }) + '（7-15天）')
+    } else {
+        Set-Cell $sheet 7 2 ($(if ($urgency -eq 'EXPEDITED') { '☑' } else { '□' }) + ' 加急（常规1-3天）')
+        Set-Cell $sheet 7 4 ($(if ($urgency -eq 'URGENT') { '☑' } else { '□' }) + ' 急（常规7天内）')
+        Set-Cell $sheet 7 7 ($(if ($urgency -eq 'NORMAL' -or [string]::IsNullOrWhiteSpace($urgency)) { '☑' } else { '□' }) + ' 正常（常规7-15天）')
+    }
     Set-Cell $sheet 8 2 ((@($data.lines) | Measure-Object -Property quantity -Sum).Sum)
     # 检验日期、检验结果、结论和签字属于检验完成后的手写/回填区域，通知单创建时必须留空。
     Set-Cell $sheet 9 2 ''
@@ -208,12 +230,19 @@ function Fill-Inspection($sheet, $data) {
         $row = 12 + $index
         Set-Cell $sheet $row 1 (TextValue $line.code)
         Set-Cell $sheet $row 2 (TextValue $line.name)
-        Set-Cell $sheet $row 3 (NumberValue $line.quantity)
-        Set-Cell $sheet $row 4 (TextValue $line.orderNumber)
-        Set-Cell $sheet $row 5 (TextValue $line.batchNo)
-        Set-Cell $sheet $row 7 (TextValue $line.supplier)
+        if ($mjl) {
+            Set-Cell $sheet $row 4 (NumberValue $line.quantity)
+            Set-Cell $sheet $row 5 (TextValue $line.orderNumber)
+            Set-Cell $sheet $row 6 (TextValue $line.batchNo)
+            Set-Cell $sheet $row 8 (TextValue $line.supplier)
+        } else {
+            Set-Cell $sheet $row 3 (NumberValue $line.quantity)
+            Set-Cell $sheet $row 4 (TextValue $line.orderNumber)
+            Set-Cell $sheet $row 5 (TextValue $line.batchNo)
+            Set-Cell $sheet $row 7 (TextValue $line.supplier)
+        }
     }
-    $sheet.PageSetup.PrintArea = '$A$1:$H$' + (35 + $extra)
+    $sheet.PageSetup.PrintArea = $(if ($mjl) { '$A$1:$I$' } else { '$A$1:$H$' }) + (35 + $extra)
 }
 
 function Fill-Inbound($sheet, $data) {
@@ -221,7 +250,11 @@ function Fill-Inbound($sheet, $data) {
     $extra = Expand-Table $sheet 5 19 $required 9 $false $false
     Clear-TableRows $sheet 5 ($required + [Math]::Max(0, 19 - $required)) 9
     $date = [datetime]::ParseExact((TextValue $data.documentDate), 'yyyy-MM-dd', $null)
-    if ((TextValue $data.kind) -eq 'finishedInbound') {
+    if (Is-MeiJingLing $data) {
+        # 美鲸灵两种入库单均只在表内显示月份；系统单号保留在文件名和数据库中。
+        Set-Cell $sheet 3 1 ("月份：" + $date.ToString('yyyy年MM月'))
+    }
+    elseif ((TextValue $data.kind) -eq 'finishedInbound') {
         # 新版成品入库单将月份和单号拆分为两个区域：A3:B3、F3:I3。
         Set-Cell $sheet 3 1 $date.ToString('yyyy年M月')
         Set-Cell $sheet 3 6 ("单号：" + (TextValue $data.documentNumber))
@@ -321,10 +354,17 @@ function Fill-Outbound($sheet, $data) {
     $company = Get-Field $data 'customerCompany'
     if ([string]::IsNullOrWhiteSpace($company)) { $company = Get-Field $data 'destination' }
     if ([string]::IsNullOrWhiteSpace($company)) { $company = Get-Field $data 'purpose' }
-    Set-Cell $sheet 2 6 ("　单号：" + (TextValue $data.documentNumber))
+    if (-not (Is-MeiJingLing $data)) {
+        Set-Cell $sheet 2 6 ("　单号：" + (TextValue $data.documentNumber))
+    }
     Set-Cell $sheet 3 1 ("发往单位：" + $company)
     Set-Cell $sheet 3 3 ("　收货人：" + (Get-Field $data 'customerContact'))
-    Set-Cell $sheet 3 6 ("出库日期：" + (TextValue $data.documentDate))
+    if (Is-MeiJingLing $data) {
+        $outboundDate = [datetime]::ParseExact((TextValue $data.documentDate), 'yyyy-MM-dd', $null)
+        Set-Cell $sheet 3 6 ("出 库 日 期：" + $outboundDate.ToString('yyyy年M月d日'))
+    } else {
+        Set-Cell $sheet 3 6 ("出库日期：" + (TextValue $data.documentDate))
+    }
     for ($index = 0; $index -lt $required; $index++) {
         $line = @($data.lines)[$index]
         $row = 5 + $index

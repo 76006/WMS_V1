@@ -1,4 +1,5 @@
 #include "core/DatabaseConfig.h"
+#include "core/SystemProfile.h"
 
 #include <QDir>
 #include <QSettings>
@@ -7,7 +8,7 @@
 QString DatabaseConfig::defaultFilePath()
 {
     const QString dataDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    return QDir(dataDirectory).filePath(QStringLiteral("ice_beauty_wms.db"));
+    return QDir(dataDirectory).filePath(SystemProfile::databaseFileName());
 }
 
 DatabaseConfig DatabaseConfig::load()

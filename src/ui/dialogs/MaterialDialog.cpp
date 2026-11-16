@@ -1,5 +1,7 @@
 #include "ui/dialogs/MaterialDialog.h"
 
+#include "core/SystemProfile.h"
+
 #include "services/MaterialCodeService.h"
 
 #include <QCheckBox>
@@ -60,13 +62,16 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
 
     m_typeCombo = new QComboBox(formContent);
     m_typeCombo->addItem(QStringLiteral("M - 原材料"), QStringLiteral("M"));
+    if (SystemProfile::isMeiJingLing())
+        m_typeCombo->addItem(QStringLiteral("W - 半成品"), QStringLiteral("W"));
     m_typeCombo->addItem(QStringLiteral("P - 成品"), QStringLiteral("P"));
-    m_typeCombo->addItem(QStringLiteral("O - 耗材/包装/附件"), QStringLiteral("O"));
+    m_typeCombo->addItem(SystemProfile::isMeiJingLing()
+                             ? QStringLiteral("O - 辅料")
+                             : QStringLiteral("O - 耗材/包装/附件"),
+                         QStringLiteral("O"));
     m_projectCombo = new QComboBox(formContent);
     m_disciplineCombo = new QComboBox(formContent);
-    m_disciplineCombo->addItem(QStringLiteral("1 - 结构件"), QStringLiteral("1"));
-    m_disciplineCombo->addItem(QStringLiteral("2 - 电子件"), QStringLiteral("2"));
-    m_disciplineCombo->addItem(QStringLiteral("9 - 其他"), QStringLiteral("9"));
+    refreshDisciplineOptions();
     m_codeEdit = new QLineEdit(formContent);
     m_codeEdit->setMaxLength(64);
     m_codeEdit->setPlaceholderText(QStringLiteral("可使用自动编码，也可手工输入"));
@@ -129,7 +134,10 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
 
     form->addRow(QStringLiteral("物料类型 *"), m_typeCombo);
     form->addRow(QStringLiteral("项目代码 *"), m_projectCombo);
-    form->addRow(QStringLiteral("专业类别 *"), m_disciplineCombo);
+    form->addRow(SystemProfile::isMeiJingLing()
+                     ? QStringLiteral("分类代码 *")
+                     : QStringLiteral("专业类别 *"),
+                 m_disciplineCombo);
     form->addRow(QStringLiteral("物料编码 *"), codeRow);
     form->addRow(QString(), m_codeHint);
     form->addRow(QStringLiteral("物料名称 *"), m_nameEdit);
@@ -166,6 +174,7 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     connect(m_warehouseCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MaterialDialog::loadLocations);
     connect(m_typeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        refreshDisciplineOptions();
         applyDefaultCategory();
         refreshGeneratedCode();
     });
@@ -205,6 +214,34 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     }
 }
 
+void MaterialDialog::refreshDisciplineOptions()
+{
+    const QString previous = m_disciplineCombo->currentData().toString();
+    const QString type = m_typeCombo->currentData().toString();
+    m_disciplineCombo->blockSignals(true);
+    m_disciplineCombo->clear();
+    if (!SystemProfile::isMeiJingLing()) {
+        m_disciplineCombo->addItem(QStringLiteral("1 - 结构件"), QStringLiteral("1"));
+        m_disciplineCombo->addItem(QStringLiteral("2 - 电子件"), QStringLiteral("2"));
+        m_disciplineCombo->addItem(QStringLiteral("9 - 其他"), QStringLiteral("9"));
+    } else if (type == QStringLiteral("P")) {
+        m_disciplineCombo->addItem(QStringLiteral("1 - 主机设备类（系统）"), QStringLiteral("1"));
+        m_disciplineCombo->addItem(QStringLiteral("2 - 器械类"), QStringLiteral("2"));
+        m_disciplineCombo->addItem(QStringLiteral("3 - 附件类"), QStringLiteral("3"));
+    } else if (type == QStringLiteral("O")) {
+        m_disciplineCombo->addItem(QStringLiteral("1 - 生产辅料"), QStringLiteral("1"));
+        m_disciplineCombo->addItem(QStringLiteral("2 - 非生产辅料"), QStringLiteral("2"));
+    } else {
+        m_disciplineCombo->addItem(QStringLiteral("1 - 机械"), QStringLiteral("1"));
+        m_disciplineCombo->addItem(QStringLiteral("2 - 电子"), QStringLiteral("2"));
+        m_disciplineCombo->addItem(QStringLiteral("3 - 光学"), QStringLiteral("3"));
+        m_disciplineCombo->addItem(QStringLiteral("9 - 其他"), QStringLiteral("9"));
+    }
+    const int previousIndex = m_disciplineCombo->findData(previous);
+    if (previousIndex >= 0) m_disciplineCombo->setCurrentIndex(previousIndex);
+    m_disciplineCombo->blockSignals(false);
+}
+
 void MaterialDialog::loadReferenceData()
 {
     m_categoryCombo->clear();
@@ -229,7 +266,7 @@ void MaterialDialog::loadReferenceData()
                                     .arg(projects.value(0).toString(), projects.value(1).toString()),
                                 projects.value(0));
     }
-    const int defaultProject = m_projectCombo->findData(QStringLiteral("SM01"));
+    const int defaultProject = m_projectCombo->findData(SystemProfile::defaultProjectCode());
     if (defaultProject >= 0) m_projectCombo->setCurrentIndex(defaultProject);
     m_projectCombo->blockSignals(false);
 
@@ -250,6 +287,7 @@ void MaterialDialog::applyDefaultCategory()
     if (m_materialId > 0) return;
     const QString type = m_typeCombo->currentData().toString();
     const QString categoryCode = type == QStringLiteral("P") ? QStringLiteral("FINISHED")
+        : type == QStringLiteral("W") ? QStringLiteral("SEMI")
         : type == QStringLiteral("O") ? QStringLiteral("CONSUMABLE")
                                       : QStringLiteral("RAW");
     const int index = m_categoryCombo->findData(categoryCode, CategoryCodeRole);

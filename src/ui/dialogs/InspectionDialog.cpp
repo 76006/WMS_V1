@@ -1,5 +1,6 @@
 #include "ui/dialogs/InspectionDialog.h"
 
+#include "core/SystemProfile.h"
 #include "services/OfficeTemplateService.h"
 #include "ui/widgets/ComboBoxSearch.h"
 
@@ -39,7 +40,9 @@ QString displayQuantity(double value)
 
 QString inspectionNumberPrefix(const QDate &date)
 {
-    return QStringLiteral("BMJ-JY-%1-").arg(date.toString(QStringLiteral("yyyyMMdd")));
+    return QStringLiteral("%1-%2-")
+        .arg(SystemProfile::inspectionNumberStem(),
+             date.toString(QStringLiteral("yyyyMMdd")));
 }
 
 bool isInspectionNumberForDate(const QString &number, const QDate &date)
@@ -160,8 +163,9 @@ InspectionDialog::InspectionDialog(QSqlDatabase database,
     m_numberEdit->setText(m_inspection.inspectionNumber);
     m_numberEdit->setReadOnly(true);
     m_numberEdit->setToolTip(QStringLiteral(
-        "送检单号按 BMJ-JY-年月日-三位当日流水号自动生成；"
-        "单号被占用或日期变化时会自动重新取号"));
+        "送检单号按 %1-年月日-三位当日流水号自动生成；"
+        "单号被占用或日期变化时会自动重新取号")
+        .arg(SystemProfile::inspectionNumberStem()));
     m_dateEdit = new QDateEdit(initialInspectionDate, this);
     m_dateEdit->setCalendarPopup(true);
     m_dateEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));

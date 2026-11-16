@@ -44,10 +44,10 @@ bool DatabaseManager::open(const DatabaseConfig &config, QString *errorMessage)
     }
 
     QSqlQuery pragma(m_database);
+    // 这里只设置不会改写数据库文件的连接选项。数据库身份由迁移器先做
+    // 只读预检；WAL 等会改写文件头的设置必须等身份确认后再启用。
     const QStringList statements = {
         QStringLiteral("PRAGMA foreign_keys = ON"),
-        QStringLiteral("PRAGMA journal_mode = WAL"),
-        QStringLiteral("PRAGMA synchronous = NORMAL"),
         QStringLiteral("PRAGMA busy_timeout = 5000")
     };
     for (const QString &statement : statements) {
@@ -61,6 +61,29 @@ bool DatabaseManager::open(const DatabaseConfig &config, QString *errorMessage)
     }
 
     m_databaseFilePath = fileInfo.absoluteFilePath();
+    return true;
+}
+
+bool DatabaseManager::configureForUse(QString *errorMessage)
+{
+    if (!isOpen()) {
+        if (errorMessage) *errorMessage = QStringLiteral("数据库尚未打开。");
+        return false;
+    }
+    QSqlQuery pragma(m_database);
+    const QStringList statements = {
+        QStringLiteral("PRAGMA journal_mode = WAL"),
+        QStringLiteral("PRAGMA synchronous = NORMAL")
+    };
+    for (const QString &statement : statements) {
+        if (!pragma.exec(statement)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("数据库运行设置失败：%1")
+                                    .arg(pragma.lastError().text());
+            }
+            return false;
+        }
+    }
     return true;
 }
 

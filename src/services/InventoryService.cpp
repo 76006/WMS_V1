@@ -1,5 +1,7 @@
 #include "services/InventoryService.h"
 
+#include "core/SystemProfile.h"
+
 #include <QRegularExpression>
 #include <QSet>
 #include <QDateTime>
@@ -1216,9 +1218,14 @@ QString InventoryService::nextDocumentNumber(const QString &documentType,
     while (sequence <= maximumSequence) {
         const QString sequencePart = QStringLiteral("%1").arg(
             sequence, width, 10, QLatin1Char('0'));
-        documentNumber = type == QStringLiteral("SCLL")
-            ? prefix + datePart + sequencePart
-            : QStringLiteral("%1-%2-%3").arg(prefix, datePart, sequencePart);
+        if (type == QStringLiteral("SCLL")) {
+            documentNumber = SystemProfile::isMeiJingLing()
+                ? QStringLiteral("%1%2-%3").arg(prefix, datePart, sequencePart)
+                : prefix + datePart + sequencePart;
+        } else {
+            documentNumber = QStringLiteral("%1-%2-%3")
+                                 .arg(prefix, datePart, sequencePart);
+        }
         collision.bindValue(0, documentNumber);
         if (!collision.exec()) {
             setError(errorMessage, collision.lastError().text());

@@ -1,5 +1,6 @@
 #include "ui/pages/ShipmentQueryPage.h"
 
+#include "core/SystemProfile.h"
 #include "ui/widgets/ComboBoxSearch.h"
 #include "services/AttachmentService.h"
 #include "services/OfficeTemplateService.h"
@@ -74,8 +75,7 @@ bool openStoredAttachment(QSqlDatabase database, qlonglong operatorId,
                              error.isEmpty() ? QStringLiteral("收货单附件不存在或已经删除。") : error);
         return false;
     }
-    const QString directory = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                  .filePath(QStringLiteral("IceBeautyWms/shipment-receipts"));
+    const QString directory = SystemProfile::temporaryPath(QStringLiteral("shipment-receipts"));
     if (!QDir().mkpath(directory)) {
         QMessageBox::warning(parent, QStringLiteral("打开收货单失败"),
                              QStringLiteral("无法创建临时文件夹。"));
@@ -577,8 +577,7 @@ void ShipmentQueryPage::openSelectedDeliveryForm()
     }
     const QString originalName = QFileInfo(query.value(0).toString()).fileName();
     const QByteArray data = query.value(1).toByteArray();
-    const QString directory = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                  .filePath(QStringLiteral("IceBeautyWms/shipment-forms"));
+    const QString directory = SystemProfile::temporaryPath(QStringLiteral("shipment-forms"));
     QDir().mkpath(directory);
     const QString path = QDir(directory).filePath(
         QStringLiteral("%1_%2").arg(QUuid::createUuid().toString(QUuid::WithoutBraces),

@@ -105,11 +105,26 @@ cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH=D:\Qt\6.5.3\mingw_6
 cmake --build build
 ```
 
-项目已关闭测试目标，默认只构建主程序 `IceBeautyWms`。
+项目已关闭测试目标，同一份源码会生成两个互相独立的程序：
+
+- `IceBeautyWms.exe`：冰美肌库存管理
+- `MeiJingLingWms.exe`：美鲸灵库存管理
+
+两个程序使用不同的应用配置、SQLite 数据库、模板目录、表单归档目录、临时文件目录和编号前缀，可以同时运行。数据库同时保存文件头身份码和系统身份记录，并在任何建表、迁移或业务写入之前核对；选错对方数据库或其他 SQLite 文件时会直接拒绝打开。
 
 ## Windows 发布
 
-执行 `scripts/package-windows.ps1` 会自动匹配本机 Qt 6 MinGW 工具链，在 `dist` 目录生成便携运行目录、免安装 ZIP 和 `IceBeautyWms-Setup.exe`。加上 `-ZipOnly` 时只生成便携目录和 ZIP，不生成安装程序。脚本会检查 Windows 平台插件与 SQLite 驱动，并在不依赖 Qt 开发环境变量的情况下执行一次独立启动验证；也可通过 `-QtRoot` 显式指定 Qt 路径。安装程序默认安装到当前用户的 `%LOCALAPPDATA%\Programs\IceBeautyWms`，不会覆盖数据库目录。
+发布脚本必须明确选择产品，两个发布包不会混装：
+
+```powershell
+# 冰美肌免安装包
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Product IceBeauty -ZipOnly
+
+# 美鲸灵免安装包
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Product MeiJingLing -ZipOnly
+```
+
+不传 `-Product` 时默认生成冰美肌版本；去掉 `-ZipOnly` 才会生成对应安装程序。脚本会检查 Windows 平台插件与 SQLite 驱动并执行独立启动验证，也可通过 `-QtRoot` 显式指定 Qt 路径。安装位置和数据库目录均按产品名称分开，不会互相覆盖。
 
 项目约定：开发阶段不自动执行发布脚本；仅在 Debug 人工调试完成且用户明确要求后生成安装程序和 ZIP。
 

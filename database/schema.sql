@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS number_rules (
     prefix TEXT NOT NULL,
     sequence_date TEXT NOT NULL DEFAULT '',
     current_sequence INTEGER NOT NULL DEFAULT 0 CHECK (current_sequence >= 0),
-    sequence_width INTEGER NOT NULL DEFAULT 4 CHECK (sequence_width BETWEEN 3 AND 8)
+    sequence_width INTEGER NOT NULL DEFAULT 4 CHECK (sequence_width BETWEEN 2 AND 8)
 );
 
 CREATE TABLE IF NOT EXISTS business_documents (

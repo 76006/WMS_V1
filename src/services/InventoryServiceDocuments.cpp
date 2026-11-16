@@ -1,5 +1,7 @@
 #include "services/InventoryService.h"
 
+#include "core/SystemProfile.h"
+
 #include <QCryptographicHash>
 #include <QDate>
 #include <QDateTime>
@@ -34,8 +36,9 @@ QString lineError(int lineNumber, const QString &message)
 
 bool isValidInspectionNumber(const QString &number, const QDate &date)
 {
-    const QString prefix = QStringLiteral("BMJ-JY-%1-")
-                               .arg(date.toString(QStringLiteral("yyyyMMdd")));
+    const QString prefix = QStringLiteral("%1-%2-")
+                               .arg(SystemProfile::inspectionNumberStem(),
+                                    date.toString(QStringLiteral("yyyyMMdd")));
     if (!number.startsWith(prefix) || number.size() != prefix.size() + 3) return false;
     bool ok = false;
     const int sequence = number.right(3).toInt(&ok);
@@ -83,9 +86,12 @@ bool loadAndValidateInspectionNotice(QSqlDatabase database,
     const qlonglong attachmentId = notice.value(6).toLongLong();
     QSqlQuery attachment(database);
     attachment.prepare(QStringLiteral(
-        "SELECT 1 FROM attachments WHERE id=? AND business_type='inspection_notice' "
-        "AND business_id=? AND is_deleted=0 AND file_size>0"));
+        "SELECT 1 FROM attachments a WHERE a.id=? AND a.is_deleted=0 AND a.file_size>0 AND ("
+        "(a.business_type='inspection_notice' AND a.business_id=?) OR "
+        "(a.business_type='inspection_result' AND EXISTS("
+        "SELECT 1 FROM inspection_results r WHERE r.id=a.business_id AND r.notice_id=?)))"));
     attachment.addBindValue(attachmentId);
+    attachment.addBindValue(noticeId);
     attachment.addBindValue(noticeId);
     if (attachmentId <= 0 || !attachment.exec() || !attachment.next()) {
         setDocumentError(errorMessage, QStringLiteral("选择的合格送检通知缺少有效检验附件。"));
@@ -224,7 +230,8 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         if (!isValidInspectionNumber(request.inspection.inspectionNumber.trimmed(),
                                      request.inspection.inspectionDate)) {
             setDocumentError(errorMessage,
-                             QStringLiteral("送检单号必须符合 BMJ-JY-年月日-三位流水号，并与送检日期一致。"));
+                             QStringLiteral("送检单号必须符合 %1-年月日-三位流水号，并与送检日期一致。")
+                                 .arg(SystemProfile::inspectionNumberStem()));
             return false;
         }
         if (request.inspection.result.trimmed().toUpper() != QStringLiteral("QUALIFIED")) {

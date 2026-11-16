@@ -1,5 +1,6 @@
 #include "ui/pages/FormManagementPage.h"
 
+#include "core/SystemProfile.h"
 #include "services/AttachmentService.h"
 #include "services/OfficeTemplateService.h"
 #include "ui/widgets/TableExcelExport.h"
@@ -324,9 +325,7 @@ bool FormManagementPage::saveAttachmentToTemporaryFile(qlonglong attachmentId, Q
     QString safeName = payload.fileName.trimmed();
     safeName.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("_"));
     if (safeName.isEmpty()) safeName = QStringLiteral("表单文件");
-    const QString directory = QDir::cleanPath(
-        QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-        + QStringLiteral("/IceBeautyWms/forms"));
+    const QString directory = SystemProfile::temporaryPath(QStringLiteral("forms"));
     if (!QDir().mkpath(directory)) {
         if (errorMessage) *errorMessage = QStringLiteral("无法创建表单临时目录。");
         return false;

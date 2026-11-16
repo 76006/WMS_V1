@@ -1,5 +1,7 @@
 #include "services/InspectionService.h"
 
+#include "core/SystemProfile.h"
+
 #include <QCryptographicHash>
 #include <QMap>
 #include <QRegularExpression>
@@ -169,8 +171,9 @@ bool InspectionService::validateDraft(const InspectionNoticeDraft &draft,
 
 QString InspectionService::nextInspectionNumber(const QDate &date, QString *errorMessage) const
 {
-    const QString prefix = QStringLiteral("BMJ-JY-%1-")
-                               .arg(date.toString(QStringLiteral("yyyyMMdd")));
+    const QString prefix = QStringLiteral("%1-%2-")
+                               .arg(SystemProfile::inspectionNumberStem(),
+                                    date.toString(QStringLiteral("yyyyMMdd")));
     const QRegularExpression pattern(
         QStringLiteral("^%1(\\d{3})$").arg(QRegularExpression::escape(prefix)),
         QRegularExpression::CaseInsensitiveOption);

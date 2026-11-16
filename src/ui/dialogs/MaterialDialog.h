@@ -32,6 +32,7 @@ private slots:
 
 private:
     void loadReferenceData();
+    void refreshDisciplineOptions();
     void loadMaterial();
     void updateImagePreview();
     void showError(const QString &message);

@@ -8,6 +8,8 @@ public:
     static bool migrate(QSqlDatabase database, QString *errorMessage = nullptr);
 
 private:
+    static bool validateDatabaseOwnershipBeforeMigration(QSqlDatabase database,
+                                                         QString *errorMessage);
     static bool executeSchema(QSqlDatabase database, QString *errorMessage);
     static bool applyProductionWorkflowMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyFinalFeaturesMigration(QSqlDatabase database, QString *errorMessage);
@@ -27,6 +29,10 @@ private:
     static bool applyIssueLineUsageMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyInspectionQuantitiesMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyInspectionResultRecordsMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applySystemIdentityMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applyTwoDigitNumberRulesMigration(QSqlDatabase database,
+                                                  QString *errorMessage);
+    static bool ensureSystemIdentity(QSqlDatabase database, QString *errorMessage);
     static bool executeSqlResource(QSqlDatabase database,
                                    const QString &resourcePath,
                                    const QString &operationName,

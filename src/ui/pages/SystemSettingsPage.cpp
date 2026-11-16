@@ -1,4 +1,5 @@
 #include "ui/pages/SystemSettingsPage.h"
+#include "core/SystemProfile.h"
 #include "services/UserService.h"
 #include <QCheckBox>
 #include <QDateTime>
@@ -218,7 +219,8 @@ void SystemSettingsPage::clearBusinessData()
                              QStringLiteral("无法找到“我的文档”文件夹，没有删除任何数据。"));
         return;
     }
-    backupRoot = QDir(backupRoot).filePath(QStringLiteral("冰美肌仓库系统表单/数据库备份"));
+    backupRoot = QDir(backupRoot).filePath(
+        SystemProfile::archiveDirectoryName() + QStringLiteral("/数据库备份"));
     if (!QDir().mkpath(backupRoot)) {
         QMessageBox::warning(this, QStringLiteral("无法备份"),
                              QStringLiteral("无法创建数据库备份文件夹，没有删除任何数据。"));
@@ -380,9 +382,13 @@ void SystemSettingsPage::saveNumberRules()
         const QString prefix = m_numberRulesTable->item(row, 1)->text().trimmed().toUpper();
         bool widthOk = false;
         const int width = m_numberRulesTable->item(row, 2)->text().toInt(&widthOk);
-        if (prefix.isEmpty() || prefix.size() > 12 || !widthOk || width < 3 || width > 8) {
+        const int minimumWidth = SystemProfile::isMeiJingLing() ? 2 : 3;
+        if (prefix.isEmpty() || prefix.size() > 12 || !widthOk
+            || width < minimumWidth || width > 8) {
             ok = false;
-            error = QStringLiteral("%1 的前缀不能为空且最长12位，流水号位数应为3到8。").arg(type);
+            error = QStringLiteral("%1 的前缀不能为空且最长12位，流水号位数应为%2到8。")
+                        .arg(type)
+                        .arg(minimumWidth);
             break;
         }
         if (prefixes.contains(prefix)) {

@@ -1,4 +1,5 @@
 #include "core/DatabaseConfig.h"
+#include "core/SystemProfile.h"
 #include "database/DatabaseManager.h"
 #include "database/SchemaMigrator.h"
 #include "ui/LoginDialog.h"
@@ -16,6 +17,7 @@
 #include <QMessageBox>
 #include <QScrollBar>
 #include <QSqlQuery>
+#include <QTextStream>
 #include <QWheelEvent>
 #include <QtWebView/QtWebView>
 
@@ -127,8 +129,8 @@ int main(int argc, char *argv[])
     QApplication application(argc, argv);
     TableWheelFilter tableWheelFilter(&application);
     application.installEventFilter(&tableWheelFilter);
-    QCoreApplication::setOrganizationName(QStringLiteral("IceBeauty"));
-    QCoreApplication::setApplicationName(QStringLiteral("IceBeautyWms"));
+    QCoreApplication::setOrganizationName(SystemProfile::organizationName());
+    QCoreApplication::setApplicationName(SystemProfile::applicationName());
     QCoreApplication::setApplicationVersion(QStringLiteral("1.1.0"));
 
     QFile styleFile(QStringLiteral(":/resources/styles.qss"));
@@ -137,7 +139,7 @@ int main(int argc, char *argv[])
     }
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("冰美肌库存管理系统"));
+    parser.setApplicationDescription(SystemProfile::windowTitle() + QStringLiteral("系统"));
     parser.addHelpOption();
     parser.addVersionOption();
     QCommandLineOption databaseOption({QStringLiteral("d"), QStringLiteral("database")},
@@ -151,6 +153,16 @@ int main(int argc, char *argv[])
     parser.addOption(smokeOption);
     parser.addOption(uiSmokeOption);
     parser.process(application);
+    const bool headlessCheck = parser.isSet(smokeOption) || parser.isSet(uiSmokeOption);
+
+    const auto reportStartupFailure = [headlessCheck](const QString &title,
+                                                      const QString &message) {
+        if (headlessCheck) {
+            QTextStream(stderr) << title << QStringLiteral(": ") << message << Qt::endl;
+        } else {
+            QMessageBox::critical(nullptr, title, message);
+        }
+    };
 
     DatabaseConfig config = DatabaseConfig::load();
     if (parser.isSet(databaseOption)) {
@@ -166,12 +178,16 @@ int main(int argc, char *argv[])
     DatabaseManager databaseManager;
     QString errorMessage;
     if (!databaseManager.open(config, &errorMessage)) {
-        QMessageBox::critical(nullptr, QStringLiteral("数据库打开失败"), errorMessage);
+        reportStartupFailure(QStringLiteral("数据库打开失败"), errorMessage);
         return 1;
     }
     if (!SchemaMigrator::migrate(databaseManager.database(), &errorMessage)) {
-        QMessageBox::critical(nullptr, QStringLiteral("数据库初始化失败"), errorMessage);
+        reportStartupFailure(QStringLiteral("数据库初始化失败"), errorMessage);
         return 2;
+    }
+    if (!databaseManager.configureForUse(&errorMessage)) {
+        reportStartupFailure(QStringLiteral("数据库运行设置失败"), errorMessage);
+        return 3;
     }
     if (parser.isSet(smokeOption)) {
         return 0;
@@ -181,7 +197,7 @@ int main(int argc, char *argv[])
         if (!user.exec(QStringLiteral(
                 "SELECT id,username,display_name FROM users WHERE username='admin'"))
             || !user.next()) {
-            return 3;
+            return 4;
         }
         Session session;
         session.userId = user.value(0).toLongLong();

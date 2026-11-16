@@ -2,6 +2,8 @@
     [string]$QtRoot = '',
     [string]$BuildDirectory = 'build-release',
     [string]$OutputDirectory = 'dist',
+    [ValidateSet('IceBeauty', 'MeiJingLing')]
+    [string]$Product = 'IceBeauty',
     [switch]$ZipOnly
 )
 
@@ -44,9 +46,18 @@ if (-not (Test-Path -LiteralPath $cmakePath)) {
 }
 $buildPath = Join-Path $projectRoot $BuildDirectory
 $outputPath = Join-Path $projectRoot $OutputDirectory
-$appPath = Join-Path $outputPath 'IceBeautyWms'
-$zipPath = Join-Path $outputPath 'IceBeautyWms-Windows-x64.zip'
-$setupPath = Join-Path $outputPath 'IceBeautyWms-Setup.exe'
+if ($Product -eq 'MeiJingLing') {
+    $appName = 'MeiJingLingWms'
+    $displayName = '美鲸灵库存管理'
+    $installComponent = 'MeiJingLing'
+} else {
+    $appName = 'IceBeautyWms'
+    $displayName = '冰美肌库存管理'
+    $installComponent = 'IceBeauty'
+}
+$appPath = Join-Path $outputPath $appName
+$zipPath = Join-Path $outputPath "$appName-Windows-x64.zip"
+$setupPath = Join-Path $outputPath "$appName-Setup.exe"
 $cmake = $cmakePath
 $mingwBin = Join-Path $mingwDirectory.FullName 'bin'
 $env:Path = "$mingwBin;$QtRoot\bin;$env:Path"
@@ -54,21 +65,21 @@ $env:Path = "$mingwBin;$QtRoot\bin;$env:Path"
 & $cmake -S $projectRoot -B $buildPath -G 'MinGW Makefiles' `
     "-DCMAKE_PREFIX_PATH=$QtRoot" '-DCMAKE_BUILD_TYPE=Release' '-DBUILD_TESTING=OFF'
 if ($LASTEXITCODE -ne 0) { throw 'Release 配置失败。' }
-& $cmake --build $buildPath -j 4
+& $cmake --build $buildPath --target $appName -j 4
 if ($LASTEXITCODE -ne 0) { throw 'Release 构建失败。' }
 
 if (Test-Path -LiteralPath $appPath) { Remove-Item -LiteralPath $appPath -Recurse -Force }
 New-Item -ItemType Directory -Path $appPath -Force | Out-Null
-& $cmake --install $buildPath --prefix $appPath
+& $cmake --install $buildPath --prefix $appPath --component $installComponent
 if ($LASTEXITCODE -ne 0) { throw '安装文件整理失败。' }
 & "$QtRoot\bin\windeployqt.exe" --compiler-runtime --no-opengl-sw `
-    --qtpaths "$QtRoot\bin\qtpaths6.exe" $appPath\IceBeautyWms.exe
+    --qtpaths "$QtRoot\bin\qtpaths6.exe" (Join-Path $appPath "$appName.exe")
 if ($LASTEXITCODE -ne 0) { throw 'Qt 运行依赖部署失败。' }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $appPath
 Copy-Item -LiteralPath (Join-Path $projectRoot 'DEVELOPMENT_STATUS.md') -Destination $appPath
 
 $requiredFiles = @(
-    (Join-Path $appPath 'IceBeautyWms.exe'),
+    (Join-Path $appPath "$appName.exe"),
     (Join-Path $appPath 'platforms\qwindows.dll'),
     (Join-Path $appPath 'sqldrivers\qsqlite.dll')
 )
@@ -81,7 +92,7 @@ $smokeDatabase = Join-Path $outputPath "package-smoke-$PID.db"
 $savedPath = $env:Path
 try {
     $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
-    $smoke = Start-Process -FilePath (Join-Path $appPath 'IceBeautyWms.exe') `
+    $smoke = Start-Process -FilePath (Join-Path $appPath "$appName.exe") `
         -ArgumentList @('--smoke-test', '--database', $smokeDatabase) -WorkingDirectory $appPath `
         -Wait -PassThru -WindowStyle Hidden
     if ($smoke.ExitCode -ne 0) { throw "发布版独立启动检查失败，退出码: $($smoke.ExitCode)" }
@@ -104,20 +115,21 @@ if ($ZipOnly) {
 $stagingPath = Join-Path $outputPath 'installer-staging'
 if (Test-Path -LiteralPath $stagingPath) { Remove-Item -LiteralPath $stagingPath -Recurse -Force }
 New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
-Copy-Item -LiteralPath $zipPath -Destination (Join-Path $stagingPath 'IceBeautyWms.zip')
+Copy-Item -LiteralPath $zipPath -Destination (Join-Path $stagingPath "$appName.zip")
 $installScript = @'
 @echo off
 setlocal
-set "TARGET=%LOCALAPPDATA%\Programs\IceBeautyWms"
+set "TARGET=%LOCALAPPDATA%\Programs\__APP_NAME__"
 if not exist "%TARGET%" mkdir "%TARGET%"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%~dp0IceBeautyWms.zip' -DestinationPath '%TARGET%' -Force; $ws=New-Object -ComObject WScript.Shell; $sc=$ws.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\IceBeautyWms.lnk'); $sc.TargetPath='%TARGET%\IceBeautyWms.exe'; $sc.WorkingDirectory='%TARGET%'; $sc.Save()"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%~dp0__APP_NAME__.zip' -DestinationPath '%TARGET%' -Force; $ws=New-Object -ComObject WScript.Shell; $sc=$ws.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\__APP_NAME__.lnk'); $sc.TargetPath='%TARGET%\__APP_NAME__.exe'; $sc.WorkingDirectory='%TARGET%'; $sc.Save()"
 if errorlevel 1 exit /b 1
-start "" "%TARGET%\IceBeautyWms.exe"
+start "" "%TARGET%\__APP_NAME__.exe"
 endlocal
 '@
+$installScript = $installScript.Replace('__APP_NAME__', $appName)
 Set-Content -LiteralPath (Join-Path $stagingPath 'install.cmd') -Value $installScript -Encoding ASCII
 
-$sedPath = Join-Path $stagingPath 'IceBeautyWms.sed'
+$sedPath = Join-Path $stagingPath "$appName.sed"
 $sed = @"
 [Version]
 Class=IEXPRESS
@@ -135,17 +147,17 @@ InstallPrompt=%InstallPrompt%
 DisplayLicense=%DisplayLicense%
 FinishMessage=%FinishMessage%
 TargetName=$setupPath
-FriendlyName=冰美肌库存管理安装程序
+FriendlyName=$displayName 安装程序
 AppLaunched=install.cmd
 PostInstallCmd=<None>
 AdminQuietInstCmd=
 UserQuietInstCmd=
 SourceFiles=SourceFiles
 [Strings]
-InstallPrompt=是否安装冰美肌库存管理？
+InstallPrompt=是否安装$displayName？
 DisplayLicense=
 FinishMessage=安装完成。
-FILE0=IceBeautyWms.zip
+FILE0=$appName.zip
 FILE1=install.cmd
 [SourceFiles]
 SourceFiles0=$stagingPath\

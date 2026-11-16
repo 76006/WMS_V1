@@ -1,5 +1,7 @@
 #include "ui/MainWindow.h"
 
+#include "core/SystemProfile.h"
+
 #include "ui/pages/DashboardPage.h"
 #include "ui/pages/AttachmentPage.h"
 #include "ui/pages/AuditLogPage.h"
@@ -60,7 +62,7 @@ MainWindow::MainWindow(QSqlDatabase database,
       m_session(std::move(session)),
       m_databaseFilePath(databaseFilePath)
 {
-    setWindowTitle(QStringLiteral("冰美肌库存管理"));
+    setWindowTitle(SystemProfile::windowTitle());
     resize(1440, 880);
     setMinimumSize(1120, 700);
     buildUi();
@@ -80,7 +82,7 @@ void MainWindow::buildUi()
     auto *sideLayout = new QVBoxLayout(sidebar);
     sideLayout->setContentsMargins(0, 0, 0, 10);
     sideLayout->setSpacing(0);
-    auto *brand = new QLabel(QStringLiteral("冰美肌 WMS"), sidebar);
+    auto *brand = new QLabel(SystemProfile::displayName() + QStringLiteral(" WMS"), sidebar);
     brand->setObjectName(QStringLiteral("brandTitle"));
     auto *subtitle = new QLabel(QStringLiteral("轻量库存管理"), sidebar);
     subtitle->setObjectName(QStringLiteral("brandSubtitle"));

@@ -1,5 +1,7 @@
 #include "services/OfficeTemplateService.h"
 
+#include "core/SystemProfile.h"
+
 #include "services/AttachmentService.h"
 
 #include <QCoreApplication>
@@ -204,6 +206,23 @@ QString OfficeTemplateService::formTitle(OfficeFormKind kind)
 
 QString OfficeTemplateService::templateFileName(OfficeFormKind kind)
 {
+    if (SystemProfile::isMeiJingLing()) {
+        switch (kind) {
+        case OfficeFormKind::Inspection:
+            return QStringLiteral("MG-JL13-07 材料检验通知单---A0 .xlsx");
+        case OfficeFormKind::RawMaterialInbound:
+            return QStringLiteral("MG-JL15-02 原材料入库单---A0.xls");
+        case OfficeFormKind::ProductionIssue:
+            return QStringLiteral("MG-JL11-05 领料单---A0.xls");
+        case OfficeFormKind::FinishedGoodsInbound:
+            return QStringLiteral("MG-JL15-02 成品入库单---A0.xls");
+        case OfficeFormKind::StockOutbound:
+            return QStringLiteral("MG-JL15-03 出库单---A0.xls");
+        case OfficeFormKind::DeliveryConfirmation:
+            // 正式的美鲸灵送货确认单尚未提供；保留独立文件名，绝不回退读取冰美肌模板。
+            return QStringLiteral("美鲸灵送货确认单 .xls");
+        }
+    }
     switch (kind) {
     case OfficeFormKind::Inspection:
         return QStringLiteral("BMJ-SMSP-16 材料检验通知单---A0 .xlsx");
@@ -234,7 +253,7 @@ QString OfficeTemplateService::archiveRootPath()
         QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     return documentsPath.isEmpty()
         ? QString()
-        : QDir(documentsPath).filePath(QStringLiteral("冰美肌仓库系统表单"));
+        : QDir(documentsPath).filePath(SystemProfile::archiveDirectoryName());
 }
 
 QString OfficeTemplateService::archiveFilePath(const OfficeTemplateDocument &document)
@@ -367,7 +386,7 @@ QString OfficeTemplateService::findTemplateFile(OfficeFormKind kind)
     for (int level = 0; level < 5 && parent.cdUp(); ++level) roots << parent.absolutePath();
     for (const QString &root : std::as_const(roots)) {
         const QString candidate = QDir(root).filePath(
-            QStringLiteral("仓库系统表单模板/%1").arg(fileName));
+            QStringLiteral("%1/%2").arg(SystemProfile::templateDirectoryName(), fileName));
         if (QFileInfo::exists(candidate)) return QDir::toNativeSeparators(candidate);
     }
     return {};
@@ -487,8 +506,9 @@ bool OfficeTemplateService::renderToFile(const OfficeTemplateDocument &document,
     const QString templatePath = findTemplateFile(document.kind);
     if (templatePath.isEmpty()) {
         setError(errorMessage,
-                 QStringLiteral("找不到模板“%1”。请确认“仓库系统表单模板”文件夹位于程序目录或项目目录。")
-                     .arg(templateFileName(document.kind)));
+                 QStringLiteral("找不到模板“%1”。请确认“%2”文件夹位于程序目录或项目目录。")
+                     .arg(templateFileName(document.kind),
+                          SystemProfile::templateDirectoryName()));
         return false;
     }
     const QFileInfo outputInfo(outputPath);
@@ -508,6 +528,7 @@ bool OfficeTemplateService::renderToFile(const OfficeTemplateDocument &document,
     }
 
     QJsonObject root = documentToJson(document);
+    root.insert(QStringLiteral("profileId"), SystemProfile::profileId());
     root.insert(QStringLiteral("sheetName"), sheetName(document.kind));
     root.insert(QStringLiteral("outputPath"), QDir::toNativeSeparators(outputPath));
     // 脚本按引擎逐个完整重试，每次都要从未修改的模板重新复制，避免失败的表单污染下一次尝试。
@@ -674,8 +695,7 @@ bool OfficeTemplateService::saveToDocumentsArchive(const OfficeTemplateDocument 
 
 bool OfficeTemplateService::openPreview(const OfficeTemplateDocument &document, QWidget *parent)
 {
-    const QString root = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                             .filePath(QStringLiteral("IceBeautyWms/form-previews"));
+    const QString root = SystemProfile::temporaryPath(QStringLiteral("form-previews"));
     QDir().mkpath(root);
     const QString suffix = QFileInfo(templateFileName(document.kind)).suffix();
     const QString path = QDir(root).filePath(
@@ -867,7 +887,8 @@ bool OfficeTemplateService::isReusableAttachment(QSqlDatabase database,
 QString OfficeTemplateService::incompleteFormHint(bool formCompleted)
 {
     return formCompleted
-        ? QStringLiteral("业务单据已生效，库存没有变化；表单已保存到数据库附件和“我的文档\\冰美肌仓库系统表单”归档文件夹并标记为已完成。")
+        ? QStringLiteral("业务单据已生效，库存没有变化；表单已保存到数据库附件和“我的文档\\%1”归档文件夹并标记为已完成。")
+              .arg(SystemProfile::archiveDirectoryName())
         : QStringLiteral("业务单据已生效，库存没有变化；表单记录已保留，可在“表单管理”中选择该表单并点击“重新生成未完成表单”重试。");
 }
 
@@ -1246,7 +1267,8 @@ bool OfficeTemplateService::persistDocumentForm(QSqlDatabase database,
     // 数据库附件和本地归档文件夹都成功，表单才算完成。
     if (archivedPath.isEmpty()) {
         if (saveErrors.isEmpty()) {
-            saveErrors.append(QStringLiteral("无法保存表单到“我的文档\\冰美肌仓库系统表单”归档文件夹。"));
+            saveErrors.append(QStringLiteral("无法保存表单到“我的文档\\%1”归档文件夹。")
+                                  .arg(SystemProfile::archiveDirectoryName()));
         }
         markDocumentFormFailed(database, formRecordId,
                                saveErrors.join(QStringLiteral("\n")), errorMessage);

@@ -14,6 +14,7 @@ set(WMS_SOURCES
     src/main.cpp
     src/core/DatabaseConfig.cpp
     src/core/PasswordHasher.cpp
+    src/core/SystemProfile.cpp
     src/database/DatabaseManager.cpp
     src/database/SchemaMigrator.cpp
     src/import/LegacyInventoryImporter.cpp
@@ -67,6 +68,7 @@ set(WMS_SOURCES
     src/import/XlsxExporter.h
     src/core/PasswordHasher.h
     src/core/Session.h
+    src/core/SystemProfile.h
     src/database/DatabaseManager.h
     src/database/SchemaMigrator.h
     src/services/AttachmentService.h
@@ -112,10 +114,7 @@ set(WMS_SOURCES
     src/ui/widgets/TableExcelExport.h
 )
 
-qt_add_executable(IceBeautyWms WIN32 ${WMS_SOURCES})
-qt_add_resources(IceBeautyWms "wms_resources"
-    PREFIX "/"
-    FILES
+set(WMS_RESOURCE_FILES
         database/schema.sql
         database/migrations/002_production_workflow.sql
         database/migrations/003_final_features.sql
@@ -135,21 +134,38 @@ qt_add_resources(IceBeautyWms "wms_resources"
         database/migrations/017_issue_line_usage.sql
         database/migrations/018_inspection_quantities.sql
         database/migrations/019_inspection_result_records.sql
+        database/migrations/020_system_identity.sql
+        database/migrations/021_two_digit_number_rules.sql
         resources/PdfPreview.qml
         resources/fill_office_template.ps1
         resources/styles.qss
 )
 
-target_include_directories(IceBeautyWms PRIVATE src)
-target_link_libraries(IceBeautyWms PRIVATE Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView Qt6::PrintSupport)
+function(add_wms_application target profile_definition)
+    qt_add_executable(${target} WIN32 ${WMS_SOURCES})
+    qt_add_resources(${target} "${target}_resources"
+        PREFIX "/"
+        FILES ${WMS_RESOURCE_FILES}
+    )
+    target_compile_definitions(${target} PRIVATE ${profile_definition})
+    target_include_directories(${target} PRIVATE src)
+    target_link_libraries(${target} PRIVATE
+        Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView Qt6::PrintSupport)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /utf-8 /W4)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
 
-install(TARGETS IceBeautyWms RUNTIME DESTINATION .)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/仓库系统表单模板" DESTINATION .)
+add_wms_application(IceBeautyWms WMS_PROFILE_ICE_BEAUTY=1)
+add_wms_application(MeiJingLingWms WMS_PROFILE_MEI_JING_LING=1)
 
-if(MSVC)
-    target_compile_options(IceBeautyWms PRIVATE /utf-8 /W4)
-else()
-    target_compile_options(IceBeautyWms PRIVATE -Wall -Wextra -Wpedantic)
+install(TARGETS IceBeautyWms RUNTIME DESTINATION . COMPONENT IceBeauty)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/仓库系统表单模板" DESTINATION . COMPONENT IceBeauty)
+if(EXISTS "${CMAKE_SOURCE_DIR}/美鲸灵仓库系统表单模板")
+    install(DIRECTORY "${CMAKE_SOURCE_DIR}/美鲸灵仓库系统表单模板" DESTINATION . COMPONENT MeiJingLing)
 endif()
+install(TARGETS MeiJingLingWms RUNTIME DESTINATION . COMPONENT MeiJingLing)
 
 set(BUILD_TESTING OFF CACHE BOOL "Build project tests" FORCE)

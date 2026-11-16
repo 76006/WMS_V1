@@ -1,5 +1,7 @@
 #include "ui/widgets/StockLineTable.h"
 
+#include "core/SystemProfile.h"
+
 #include "ui/widgets/ComboBoxSearch.h"
 
 #include <QAbstractItemView>
@@ -882,8 +884,9 @@ void StockLineTable::assignAutomaticBatch(int row)
 
 QString StockLineTable::nextAutomaticBatchNumber(int excludedRow) const
 {
-    const QString prefix = QStringLiteral("SM%1").arg(
-        m_documentDate.toString(QStringLiteral("yyyyMMdd")));
+    const QString prefix = QStringLiteral("%1%2")
+        .arg(SystemProfile::batchNumberPrefix(),
+             m_documentDate.toString(QStringLiteral("yyyyMMdd")));
     const QRegularExpression pattern(
         QStringLiteral("^%1(\\d{3})$").arg(QRegularExpression::escape(prefix)));
     QSet<int> usedSequences;

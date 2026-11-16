@@ -26,14 +26,14 @@ bool MaterialCodeService::isValidMaterialType(const QString &materialType)
 {
     const QString value = materialType.trimmed().toUpper();
     return value == QStringLiteral("M") || value == QStringLiteral("P")
-        || value == QStringLiteral("O");
+        || value == QStringLiteral("O") || value == QStringLiteral("W");
 }
 
 bool MaterialCodeService::isValidDisciplineCode(const QString &disciplineCode)
 {
     const QString value = disciplineCode.trimmed();
     return value == QStringLiteral("1") || value == QStringLiteral("2")
-        || value == QStringLiteral("9");
+        || value == QStringLiteral("3") || value == QStringLiteral("9");
 }
 
 QString MaterialCodeService::nextCode(QSqlDatabase database,
