@@ -4,6 +4,7 @@
 #include "database/SchemaMigrator.h"
 #include "ui/LoginDialog.h"
 #include "ui/MainWindow.h"
+#include "network/NetworkWindow.h"
 
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
@@ -15,6 +16,7 @@
 #include <QEvent>
 #include <QFile>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QSqlQuery>
 #include <QTextStream>
@@ -152,8 +154,40 @@ int main(int argc, char *argv[])
     parser.addOption(databaseOption);
     parser.addOption(smokeOption);
     parser.addOption(uiSmokeOption);
+    parser.addOption(QCommandLineOption("server", QStringLiteral("使用局域网库存查询模式。"), "url"));
+    parser.addOption(QCommandLineOption("local", QStringLiteral("直接启动单机版。")));
+    parser.addOption(QCommandLineOption("network-smoke-test", QStringLiteral("联网登录和查询验证后退出，凭据从测试环境变量读取。")));
     parser.process(application);
     const bool headlessCheck = parser.isSet(smokeOption) || parser.isSet(uiSmokeOption);
+
+    if (parser.isSet("network-smoke-test") && !parser.isSet("server")) {
+        QTextStream(stderr) << "--network-smoke-test requires --server\n";
+        return 8;
+    }
+    bool networkMode = parser.isSet("server");
+    if (!networkMode && !headlessCheck && !parser.isSet("local") && !parser.isSet(databaseOption)) {
+        QMessageBox choice;
+        choice.setWindowTitle(SystemProfile::windowTitle());
+        choice.setText(QStringLiteral("请选择运行方式"));
+        choice.setInformativeText(QStringLiteral("单机版使用当前电脑的数据；局域网试用版支持连接服务器登录和查询库存。"));
+        auto *local = choice.addButton(QStringLiteral("单机版"), QMessageBox::AcceptRole);
+        auto *network = choice.addButton(QStringLiteral("局域网查询"), QMessageBox::ActionRole);
+        choice.addButton(QMessageBox::Cancel);
+        choice.setDefaultButton(local);
+        choice.exec();
+        if (choice.clickedButton() == network) networkMode = true;
+        else if (choice.clickedButton() != local) return 0;
+    }
+    if (networkMode) {
+        if (headlessCheck || parser.isSet(databaseOption) || parser.isSet("local")) {
+            QTextStream(stderr) << "Network and local database options cannot be combined\n";
+            return 8;
+        }
+        NetworkWindow window(parser.value("server"));
+        window.show();
+        if (parser.isSet("network-smoke-test")) window.startSmokeCheck();
+        return application.exec();
+    }
 
     const auto reportStartupFailure = [headlessCheck](const QString &title,
                                                       const QString &message) {

@@ -6,12 +6,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Sql QuickWidgets WebView PrintSupport)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Sql QuickWidgets WebView PrintSupport Network)
 
 qt_standard_project_setup()
 
 set(WMS_SOURCES
     src/main.cpp
+    src/network/NetworkWindow.cpp
+    src/network/NetworkWindow.h
     src/core/DatabaseConfig.cpp
     src/core/PasswordHasher.cpp
     src/core/SystemProfile.cpp
@@ -150,7 +152,7 @@ function(add_wms_application target profile_definition)
     target_compile_definitions(${target} PRIVATE ${profile_definition})
     target_include_directories(${target} PRIVATE src)
     target_link_libraries(${target} PRIVATE
-        Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView Qt6::PrintSupport)
+        Qt6::Core Qt6::Widgets Qt6::Sql Qt6::QuickWidgets Qt6::WebView Qt6::PrintSupport Qt6::Network)
     if(MSVC)
         target_compile_options(${target} PRIVATE /utf-8 /W4)
     else()
@@ -169,3 +171,18 @@ endif()
 install(TARGETS MeiJingLingWms RUNTIME DESTINATION . COMPONENT MeiJingLing)
 
 set(BUILD_TESTING OFF CACHE BOOL "Build project tests" FORCE)
+
+option(WMS_BUILD_SERVER "Build the PostgreSQL LAN query pilot" ON)
+if(WMS_BUILD_SERVER)
+    find_package(Qt6 6.5 REQUIRED COMPONENTS HttpServer)
+    qt_add_executable(WmsServer
+        src/server/main.cpp src/server/LanDatabase.cpp src/server/LanDatabase.h
+        src/server/LanServer.cpp src/server/LanServer.h src/core/PasswordHasher.cpp)
+    target_include_directories(WmsServer PRIVATE src)
+    target_link_libraries(WmsServer PRIVATE Qt6::Core Qt6::Sql Qt6::Network Qt6::HttpServer)
+    if(MSVC)
+        target_compile_options(WmsServer PRIVATE /utf-8 /W4)
+    else()
+        target_compile_options(WmsServer PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()
