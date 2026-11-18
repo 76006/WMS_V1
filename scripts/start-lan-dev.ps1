@@ -11,6 +11,39 @@ $runtime = Join-Path $repo 'outputs/lan-dev'
 if (!$PostgresRoot) { $PostgresRoot = Join-Path $runtime 'postgres/pgsql' }
 $pgBin = Join-Path $PostgresRoot 'bin'
 $serverExe = Join-Path (Join-Path $repo $BuildDirectory) 'WmsServer.exe'
+$profile = if ($Product -eq 'IceBeauty') { 'ICE_BEAUTY' } else { 'MEI_JING_LING' }
+$port = if ($Product -eq 'IceBeauty') { 18080 } else { 18081 }
+$pidFile = Join-Path $runtime "$Product-server.json"
+
+# Check before starting PostgreSQL or reading any credentials. An ordinary desktop
+# user may see an elevated WmsServer's PID and start time but not its executable path.
+$listener = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |
+    Where-Object { $_.LocalAddress -in @('127.0.0.1','0.0.0.0') } | Select-Object -First 1
+if ($listener) {
+    if (Test-Path -LiteralPath $pidFile) {
+        $record = Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
+        $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+        if ($process -and $process.Id -eq $record.pid -and $process.ProcessName -eq 'WmsServer' -and
+            $process.StartTime -and $process.StartTime.ToUniversalTime() -eq ([datetime]$record.started).ToUniversalTime() -and
+            (!$process.Path -or $process.Path -eq $serverExe)) {
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 3 -MaximumRedirection 0
+            if ($health.status -ne 'ok' -or $health.product -ne $profile) {
+                throw "The running server on port $port did not pass the $Product health check."
+            }
+            if ($AllowLan -and $listener.LocalAddress -eq '127.0.0.1') {
+                throw "$Product is running in local mode. Use the host LAN setup launcher to switch to LAN mode."
+            }
+            Write-Output "$Product server is already running on port $port."
+            return
+        }
+    }
+    throw "Port $port is in use. The listener could not be verified as this workspace's $Product server."
+}
+$portCheck = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
+try { $portCheck.Start() }
+catch { throw "Port $port is unavailable: $($_.Exception.Message)" }
+finally { $portCheck.Stop() }
+
 if (!(Test-Path -LiteralPath (Join-Path $pgBin 'initdb.exe'))) { throw 'Provide extracted official PostgreSQL binaries with -PostgresRoot.' }
 if (!(Test-Path -LiteralPath $serverExe)) { throw 'Build the WmsServer target first.' }
 $env:PATH = "$pgBin;$(Join-Path $QtRoot 'bin');$env:PATH"
@@ -45,8 +78,6 @@ if ($LASTEXITCODE -ne 0) {
     if ($pgStart.ExitCode -ne 0) { throw 'PostgreSQL start failed; see outputs/lan-dev/postgres.log' }
 }
 $dbName = if ($Product -eq 'IceBeauty') { 'wms_icebeauty_business_demo' } else { 'wms_meijingling_business_demo' }
-$profile = if ($Product -eq 'IceBeauty') { 'ICE_BEAUTY' } else { 'MEI_JING_LING' }
-$port = if ($Product -eq 'IceBeauty') { 18080 } else { 18081 }
 $env:PGPASSWORD = $secrets.postgres
 $psql = Join-Path $pgBin 'psql.exe'
 function Invoke-AdminSql([string]$sql) {
@@ -91,19 +122,6 @@ if (!$businessSchema) {
         if ($LASTEXITCODE -ne 0) { throw 'Business schema initialization failed' }
     } finally { Remove-Item Env:WMS_DEMO_ADMIN_PASSWORD -ErrorAction SilentlyContinue }
 }
-$pidFile = Join-Path $runtime "$Product-server.json"
-if (Test-Path -LiteralPath $pidFile) {
-    $previous = Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
-    $process = Get-Process -Id $previous.pid -ErrorAction SilentlyContinue
-    if ($process -and $process.Path -eq $serverExe -and $process.StartTime.ToUniversalTime() -eq ([datetime]$previous.started).ToUniversalTime()) {
-        Write-Output "$Product server is already running on port $port. Stop it before changing listen settings."
-        return
-    }
-}
-$portCheck = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
-try { $portCheck.Start() }
-catch { throw "Port $port is occupied by another process. Stop that process before starting this development server." }
-finally { $portCheck.Stop() }
 $listen = if ($AllowLan) { '0.0.0.0' } else { '127.0.0.1' }
 $arguments = @('--product',$profile,'--port',"$port",'--listen',$listen)
 if ($AllowLan) { $arguments += '--allow-insecure-lan' }
