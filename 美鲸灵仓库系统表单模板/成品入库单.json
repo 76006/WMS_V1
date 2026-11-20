@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "sheetName": "Sheet1",
+  "layoutColumns": 9,
+  "header": [
+    {"height": 38.25, "cells": [{"from": 1, "to": 9, "style": "title", "text": "  成 品 _入 库 单"}]},
+    {
+      "height": 20.25,
+      "cells": [
+        {"from": 1, "to": 4, "style": "label"},
+        {"from": 5, "to": 5, "style": "label"},
+        {"from": 6, "to": 6, "style": "label"},
+        {"from": 7, "to": 7, "style": "label"},
+        {"from": 8, "to": 9, "style": "label"}
+      ]
+    },
+    {"height": 27.0, "cells": [{"from": 1, "to": 9, "style": "detail", "text": "月份：{documentDate:yyyy年MM月}"}]}
+  ],
+  "details": {
+    "minRows": 19,
+    "headerHeight": 26.25,
+    "rowHeight": 26.25,
+    "columns": [
+      {"label": "序号", "field": "index", "width": 4.5},
+      {"label": "日  期", "field": "documentDate", "width": 12.664},
+      {"label": "物料编码", "field": "line.code", "width": 14.5},
+      {"label": "批号", "field": "line.batchNo", "width": 10.082},
+      {"label": "产品/材料名称", "field": "line.name", "width": 17.832},
+      {"label": "规格型号", "field": "line.specification", "width": 9.832},
+      {"label": "单位", "field": "line.unit", "width": 7.0},
+      {"label": "数量", "field": "line.quantity", "width": 7.5, "style": "number"},
+      {"label": "备注", "field": "line.notes", "width": 10.164, "fallback": "fields.notes"}
+    ]
+  },
+  "footer": [
+    {
+      "height": 25.5,
+      "cells": [{"from": 1, "to": 5, "style": "signature", "text": "入  库  人："}, {"from": 6, "to": 9, "style": "signature2", "text": "日期："}]
+    },
+    {
+      "height": 25.5,
+      "cells": [{"from": 1, "to": 5, "style": "signature", "text": "部门负责人："}, {"from": 6, "to": 9, "style": "signature2", "text": "日期："}]
+    }
+  ],
+  "styles": {
+    "default": {"font": "宋体", "size": 12.0},
+    "tableHeader": {"size": 11.0, "align": "center", "border": "all", "wrap": true},
+    "detail": {"size": 11.0, "align": "left", "border": "all", "wrap": true},
+    "number": {"size": 11.0, "align": "right", "border": "all", "wrap": true},
+    "title": {"size": 20.0, "bold": true, "align": "center", "wrap": true},
+    "label": {"size": 11.0, "align": "left", "border": "bottom"},
+    "signature": {"size": 11.0, "align": "left", "border": "left top bottom", "wrap": true},
+    "signature2": {"size": 11.0, "align": "left", "border": "right top bottom", "wrap": true}
+  },
+  "print": {
+    "orientation": "portrait",
+    "paperSize": 9,
+    "fitToWidth": 1,
+    "repeatHeader": false,
+    "centerHorizontally": true,
+    "centerVertically": false,
+    "margins": {"left": 0.75, "right": 0.75, "top": 1.0, "bottom": 1.0, "header": 0.5, "footer": 0.5},
+    "header": "&L上海美鲸灵医疗科技有限公司&RMG-JL15-02",
+    "footer": "&L版本所有，_x000a_未经允许不得修改及复制！&R版本：A0"
+  }
+}

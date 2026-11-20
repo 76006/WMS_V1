@@ -1,4 +1,5 @@
 #include "server/BusinessDatabase.h"
+#include "server/TestLoginPasswords.h"
 #include "network/QueryBridge.h"
 #include "core/PasswordHasher.h"
 #include "core/SystemProfile.h"
@@ -110,9 +111,54 @@ QJsonObject BusinessDatabase::execute(const QJsonObject &request)
     return {{"select",query.isSelect()&&!returning},{"fields",fields},{"rows",rows},{"affected",query.numRowsAffected()},{"insertId",Wire::value(id)}};
 }
 
+bool BusinessDatabase::upgradeProcessBoms(QSqlDatabase raw, const QString &product, QString *error)
+{
+    QSqlQuery query(raw);
+    if (!query.exec("SELECT to_regclass('wms_business.network_identity')") || !query.next()) {
+        *error = query.lastError().text();
+        return false;
+    }
+    if (query.value(0).isNull()) return true; // Standalone LAN pilot schema.
+    query.prepare("SELECT 1 FROM wms_business.network_identity WHERE product=? AND version=2");
+    query.addBindValue(product);
+    if (!query.exec() || !query.next()) {
+        *error = QStringLiteral("联网业务库身份不匹配");
+        return false;
+    }
+    QStringList migrations;
+    for (const int version : {22, 23, 24}) {
+        if (!query.exec(QStringLiteral("SELECT 1 FROM wms_business.schema_migrations WHERE version=%1").arg(version))) {
+            *error = query.lastError().text(); return false;
+        }
+        if (query.next()) continue;
+        QFile migration(version == 22 ? ":/database/migrations/022_process_boms.sql"
+                        : version == 23 ? ":/database/migrations/023_production_stages.sql"
+                                        : ":/database/migrations/024_purchase_suppliers.sql");
+        if (!migration.open(QIODevice::ReadOnly)) { *error = migration.errorString(); return false; }
+        migrations.append(QString::fromUtf8(migration.readAll()));
+    }
+    if (migrations.isEmpty()) return true;
+
+    if (!raw.transaction()) { *error = raw.lastError().text(); return false; }
+    if (!run(raw, "SET LOCAL search_path=wms_business,public,pg_catalog", error)) {
+        raw.rollback();
+        return false;
+    }
+    for (const auto &statement : migrations.join(QLatin1Char('\n')).trimmed().split(';', Qt::SkipEmptyParts)) {
+        if (!run(raw, statement, error)) { raw.rollback(); return false; }
+    }
+    if (raw.commit()) return true;
+    *error = raw.lastError().text();
+    raw.rollback();
+    return false;
+}
+
 bool BusinessDatabase::initialize(QSqlDatabase raw,const QString &product,const QString &password,QString *error)
 {
-    if(password.size()<12){*error="Set WMS_DEMO_ADMIN_PASSWORD (at least 12 characters)";return false;}
+    if (password.size() < 12 && !TestLoginPasswords::acceptsDefault(password)) {
+        *error = "Set WMS_DEMO_ADMIN_PASSWORD (at least 12 characters)";
+        return false;
+    }
     QSqlQuery existing(raw);
     if(!existing.exec("SELECT 1 FROM information_schema.schemata WHERE schema_name='wms_business'")){*error=existing.lastError().text();return false;}
     if(existing.next()){*error="Business schema already exists; refusing to overwrite";return false;}

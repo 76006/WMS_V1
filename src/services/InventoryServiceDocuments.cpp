@@ -202,6 +202,51 @@ bool InventoryService::setDocumentSubmissionToken(qlonglong documentId,
     return true;
 }
 
+bool InventoryService::savePurchaseSupplier(qlonglong itemId, qlonglong materialId,
+                                            const QString &supplier, QString *errorMessage)
+{
+    QSqlQuery original(m_database);
+    original.prepare(QStringLiteral("INSERT INTO material_supplier_defaults(material_id,original_brand) "
+        "SELECT id,brand FROM materials WHERE id=? ON CONFLICT(material_id) DO NOTHING"));
+    original.addBindValue(materialId);
+    if (!original.exec()) { setDocumentError(errorMessage, original.lastError().text()); return false; }
+    QSqlQuery row(m_database);
+    row.prepare(QStringLiteral("INSERT INTO purchase_item_suppliers(document_item_id,supplier) VALUES(?,?) "
+        "ON CONFLICT(document_item_id) DO UPDATE SET supplier=excluded.supplier"));
+    row.addBindValue(itemId); row.addBindValue(normalizedText(supplier));
+    if (!row.exec()) { setDocumentError(errorMessage, row.lastError().text()); return false; }
+    return true;
+}
+
+bool InventoryService::refreshPurchaseSuppliers(QString *errorMessage)
+{
+    // Business date defines the latest receipt. Editing/backdating an older document
+    // must not replace the supplier of a newer batch. Each receipt keeps its own snapshot.
+    QSqlQuery materials(m_database);
+    if (!materials.exec(QStringLiteral(
+        "UPDATE materials SET brand=COALESCE((SELECT s.supplier FROM purchase_item_suppliers s "
+        "JOIN business_document_items i ON i.id=s.document_item_id JOIN business_documents d ON d.id=i.document_id "
+        "WHERE i.material_id=materials.id AND d.document_type='CGRK' "
+        "AND d.status IN ('POSTED','PARTIALLY_REVERSED') AND i.quantity-i.reversed_quantity>0.0000001 "
+        "AND s.supplier<>'' ORDER BY d.document_date DESC,d.id DESC,i.id DESC LIMIT 1),"
+        "(SELECT original_brand FROM material_supplier_defaults b WHERE b.material_id=materials.id)) "
+        "WHERE EXISTS(SELECT 1 FROM material_supplier_defaults b WHERE b.material_id=materials.id)"))) {
+        setDocumentError(errorMessage, materials.lastError().text()); return false;
+    }
+    QSqlQuery batches(m_database);
+    if (!batches.exec(QStringLiteral(
+        "UPDATE batches SET supplier=COALESCE((SELECT s.supplier FROM purchase_item_suppliers s "
+        "JOIN business_document_items i ON i.id=s.document_item_id JOIN business_documents d ON d.id=i.document_id "
+        "WHERE i.material_id=batches.material_id AND i.batch_no=batches.batch_no AND d.document_type='CGRK' "
+        "AND d.status IN ('POSTED','PARTIALLY_REVERSED') AND i.quantity-i.reversed_quantity>0.0000001 "
+        "AND s.supplier<>'' ORDER BY d.document_date DESC,d.id DESC,i.id DESC LIMIT 1),'') "
+        "WHERE EXISTS(SELECT 1 FROM purchase_item_suppliers s JOIN business_document_items i ON i.id=s.document_item_id "
+        "WHERE i.material_id=batches.material_id AND i.batch_no=batches.batch_no)"))) {
+        setDocumentError(errorMessage, batches.lastError().text()); return false;
+    }
+    return true;
+}
+
 bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                                          bool inbound,
                                          PostedDocument *postedDocument,
@@ -263,6 +308,31 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
     }
     if (!beginImmediate(errorMessage)) return false;
 
+    if (!request.productionStageKey.isEmpty() && (!inbound || type != QStringLiteral("CPRK") || request.productionRunId <= 0)) {
+        setDocumentError(errorMessage, QStringLiteral("分阶段领料请使用生产领料，完工入库必须关联生产任务。"));
+        rollback(); return false;
+    }
+    if (type == QStringLiteral("CPRK")) {
+        QSqlQuery material(m_database);
+        material.prepare(QStringLiteral("SELECT c.code FROM materials m JOIN material_categories c ON c.id=m.category_id WHERE m.id=? AND m.is_active=1"));
+        if (!inbound || request.lines.isEmpty()) { rollback(); return false; }
+        for (const auto &line : request.lines) {
+            material.bindValue(0, line.materialId);
+            if (!material.exec() || !material.next() || !QStringList{QStringLiteral("FINISHED"),QStringLiteral("SEMI")}.contains(material.value(0).toString())) {
+                setDocumentError(errorMessage, QStringLiteral("完工入库只能选择启用的成品或半成品。")); rollback(); return false;
+            }
+        }
+        if (request.productionRunId > 0 && request.productionStageKey.isEmpty()) {
+            QSqlQuery run(m_database);
+            run.prepare(QStringLiteral("SELECT product_material_id FROM production_runs WHERE id=?"));
+            run.addBindValue(request.productionRunId);
+            if (!run.exec() || !run.next()) { setDocumentError(errorMessage, QStringLiteral("找不到生产批次。")); rollback(); return false; }
+            for (const auto &line : request.lines) if (line.materialId != run.value(0).toLongLong()) {
+                setDocumentError(errorMessage, QStringLiteral("入库物料与生产批次的成品不一致。")); rollback(); return false;
+            }
+        }
+    }
+
     InspectionNoticeSnapshot inspectionNotice;
     if (inbound && request.inspectionNoticeId > 0
         && !loadAndValidateInspectionNotice(m_database, request.inspectionNoticeId,
@@ -282,11 +352,14 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                          request.documentDate, request.handlerName, request.purpose,
                          request.notes, QVariant(), errorMessage);
     if (documentId <= 0
-        || !setDocumentSubmissionToken(documentId, request.submissionToken, errorMessage)) {
+        || !(inbound && type == QStringLiteral("CPRK") && request.productionRunId > 0
+            ? setDocumentProductionContext(documentId, request.productionRunId, request.submissionToken, errorMessage)
+            : setDocumentSubmissionToken(documentId, request.submissionToken, errorMessage))
+        || !saveProductionStage(documentId, request.productionRunId, request, inbound, errorMessage)) {
         rollback();
         return false;
     }
-    if (inbound && type == QStringLiteral("CGRK")) {
+    if (inbound) {
         QSqlQuery supplier(m_database);
         supplier.prepare(QStringLiteral("UPDATE business_documents SET supplier=? WHERE id=?"));
         supplier.addBindValue(normalizedText(request.supplier));
@@ -451,6 +524,11 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
             rollback();
             return false;
         }
+        if (inbound && type == QStringLiteral("CGRK")
+            && !savePurchaseSupplier(itemId, movement.materialId,
+                movement.supplier.trimmed().isEmpty() ? request.supplier : movement.supplier, &detail)) {
+            setDocumentError(errorMessage, lineError(index + 1, detail)); rollback(); return false;
+        }
         const qlonglong ledgerId = createLedger(documentId, itemId, type, movement.materialId,
                                                  movement.batchNo.trimmed(),
                                                  inbound ? movement.quantity : 0.0,
@@ -489,6 +567,13 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         }
     }
 
+    if (inbound && type == QStringLiteral("CPRK") && request.productionRunId > 0) {
+        QSqlQuery serialBatch(m_database);
+        serialBatch.prepare(QStringLiteral("UPDATE serial_numbers SET production_batch="
+            "(SELECT batch_no FROM production_runs WHERE id=?) WHERE last_document_id=?"));
+        serialBatch.addBindValue(request.productionRunId); serialBatch.addBindValue(documentId);
+        if (!serialBatch.exec()) { setDocumentError(errorMessage, serialBatch.lastError().text()); rollback(); return false; }
+    }
     if (inbound && request.inspectionNoticeId > 0) {
         const QString now = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
         QSqlQuery consumeQuantities(m_database);
@@ -537,6 +622,9 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
     }
 
     if (!finalizeDocument(documentId, errorMessage)
+        || (inbound && type == QStringLiteral("CGRK") && !refreshPurchaseSuppliers(errorMessage))
+        || (inbound && type == QStringLiteral("CPRK") && request.productionRunId > 0
+            && !refreshProductionRunStatus(request.productionRunId, errorMessage))
         || !writeAudit(QStringLiteral("POST"), QStringLiteral("business_document"),
                        documentId, number, errorMessage)
         || !commit(errorMessage)) {

@@ -26,6 +26,7 @@ private slots:
     void updateActions();
 private:
     qlonglong selectedUserId() const;
+    QString promptPassword(const QString &title, const QString &field, bool *accepted);
     QSqlDatabase m_database;
     Session m_session;
     QLineEdit *m_keywordEdit = nullptr;

@@ -143,7 +143,8 @@ MaterialDialog::MaterialDialog(QSqlDatabase database,
     form->addRow(QStringLiteral("物料名称 *"), m_nameEdit);
     form->addRow(QStringLiteral("规格型号"), m_specificationEdit);
     form->addRow(QStringLiteral("物料分类 *"), m_categoryCombo);
-    form->addRow(QStringLiteral("品牌"), m_brandEdit);
+    m_brandEdit->setToolTip(QStringLiteral("采购入库后按最新有效入库单的供应商更新；各历史批次保留各自供应商。"));
+    form->addRow(QStringLiteral("品牌 / 供应商"), m_brandEdit);
     form->addRow(QStringLiteral("单位 *"), m_unitEdit);
     form->addRow(QStringLiteral("单台用量"), m_unitUsageSpin);
     form->addRow(QStringLiteral("加工方式"), m_processingMethodCombo);

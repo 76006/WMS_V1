@@ -17,6 +17,7 @@ public:
     int depth() const {return m_depth;}
     QSqlDatabase raw() const {return m_raw;}
     static bool initialize(QSqlDatabase raw,const QString &product,const QString &password,QString *error);
+    static bool upgradeProcessBoms(QSqlDatabase raw, const QString &product, QString *error);
 private:
     QString translate(QString sql) const;
     QSqlDatabase m_raw,m_bridge;

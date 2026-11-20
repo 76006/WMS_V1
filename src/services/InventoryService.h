@@ -66,6 +66,9 @@ struct StockDocumentRequest
     QString notes;
     QString submissionToken;
     qlonglong productionRunId = 0;
+    // Empty preserves legacy/manual issues. "0" is whole-machine assembly.
+    QString productionStageKey;
+    QString productionBomFingerprint;
     // 独立送检通知主键。大于0时以数据库中的合格通知为唯一送检依据。
     qlonglong inspectionNoticeId = 0;
     InboundInspectionRequest inspection;
@@ -103,6 +106,9 @@ struct TransferRequest : public StockMovementRequest
 {
     qlonglong targetWarehouseId = 0;
     qlonglong targetLocationId = 0;
+    // All lines share the document header and destination. An empty list retains
+    // the original single-line request format for older LAN clients.
+    QList<StockMovementRequest> lines;
 };
 
 struct ReversalRequest
@@ -330,7 +336,8 @@ private:
                          const StockMovementRequest &request,
                          qlonglong targetWarehouseId,
                          qlonglong targetLocationId,
-                         QString *errorMessage);
+                         QString *errorMessage,
+                         int lineNumber = 1);
     qlonglong createDocumentItem(qlonglong documentId,
                                  int lineNumber,
                                  const StockMovementRequest &request,
@@ -347,7 +354,13 @@ private:
                                     const QString &submissionToken,
                                     QString *errorMessage);
     qlonglong ensureProductionRun(const ProductionRunRequest &run, QString *errorMessage);
+    bool saveProductionStage(qlonglong documentId, qlonglong runId,
+                             const StockDocumentRequest &document, bool inbound,
+                             QString *errorMessage);
     bool refreshProductionRunStatus(qlonglong productionRunId, QString *errorMessage);
+    bool refreshPurchaseSuppliers(QString *errorMessage);
+    bool savePurchaseSupplier(qlonglong itemId, qlonglong materialId,
+                               const QString &supplier, QString *errorMessage);
     bool changeBalance(qlonglong materialId,
                        qlonglong warehouseId,
                        qlonglong locationId,

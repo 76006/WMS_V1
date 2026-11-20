@@ -1,4 +1,5 @@
 #include "server/LanDatabase.h"
+#include "server/TestLoginPasswords.h"
 #include "core/PasswordHasher.h"
 
 #include <QSqlError>
@@ -11,6 +12,11 @@ bool LanDatabase::open(QString *error)
 {
     if (!m_db.isValid()) {
         m_db = QSqlDatabase::addDatabase(QStringLiteral("QPSQL"), QStringLiteral("lan_server"));
+        if (!m_db.isValid()) {
+            *error = QStringLiteral("QPSQL could not be loaded. Check the matching Qt PostgreSQL plugin and libpq dependencies. "
+                                    "Use QT_DEBUG_PLUGINS=1 for loader details. Database credentials have not been checked yet.");
+            return false;
+        }
         m_db.setHostName(qEnvironmentVariable("WMS_PG_HOST", "127.0.0.1"));
         bool ok = false;
         const int port = qEnvironmentVariable("WMS_PG_PORT", "5432").toInt(&ok);
@@ -25,7 +31,11 @@ bool LanDatabase::open(QString *error)
         *error = "Set WMS_PG_DATABASE, WMS_PG_USER and WMS_PG_PASSWORD";
         return false;
     }
-    if (!m_db.open()) { *error = "PostgreSQL connection failed; check configuration and QPSQL/libpq installation"; return false; }
+    if (!m_db.open()) {
+        *error = QStringLiteral("PostgreSQL connection failed (%1:%2, database %3): %4")
+                     .arg(m_db.hostName()).arg(m_db.port()).arg(m_db.databaseName(), m_db.lastError().text());
+        return false;
+    }
     QSqlQuery settings(m_db);
     if (!settings.exec("SET statement_timeout = '5s'") || !settings.exec("SET TIME ZONE 'UTC'")) {
         *error = "Cannot configure PostgreSQL connection";
@@ -57,9 +67,9 @@ bool LanDatabase::ready()
     return open(&error) && verify(&error);
 }
 
-bool LanDatabase::initializeDemo(const QString &password, QString *error)
+bool LanDatabase::initialize(const QString &password, bool includeDemoStock, QString *error)
 {
-    if (password.size() < 12 || password.size() > 1024) {
+    if ((password.size() < 12 && !TestLoginPasswords::acceptsDefault(password)) || password.size() > 1024) {
         *error = "WMS_DEMO_ADMIN_PASSWORD must contain 12 to 1024 characters";
         return false;
     }
@@ -98,7 +108,9 @@ bool LanDatabase::initializeDemo(const QString &password, QString *error)
         "INSERT INTO wms_lan.locations(warehouse_id,code) SELECT id,'A-01' FROM wms_lan.warehouses",
         "INSERT INTO wms_lan.stock_balances(material_id,warehouse_id,location_id,batch_no,quantity) SELECT m.id,w.id,l.id,'DEMO-BATCH',100 FROM wms_lan.materials m CROSS JOIN wms_lan.warehouses w JOIN wms_lan.locations l ON l.warehouse_id=w.id"
     };
-    for (const auto &sql : demo) if (!query.exec(sql)) return fail();
+    if (includeDemoStock) {
+        for (const auto &sql : demo) if (!query.exec(sql)) return fail();
+    }
     if (!m_db.commit()) return fail();
     return true;
 }

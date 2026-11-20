@@ -1,6 +1,9 @@
 #include "server/LanDatabase.h"
+#include "server/ServerStartup.h"
 #include "server/LanServer.h"
 #include "server/BusinessApi.h"
+#include "server/LegacyImport.h"
+#include "server/LegacySource.h"
 #include "core/SystemProfile.h"
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -14,17 +17,26 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName("WmsServer");
     QCommandLineParser parser;
-    parser.setApplicationDescription("WMS PostgreSQL LAN query pilot (no production stock posting)");
+    parser.setApplicationDescription("WMS PostgreSQL business server");
     parser.addHelpOption();
     parser.addOptions({{"product", "ICE_BEAUTY or MEI_JING_LING", "product", "ICE_BEAUTY"},
         {"listen", "Listen address", "address", "127.0.0.1"},
-        {"port", "HTTP(S) port", "port", "18080"},
+        {"port", "HTTP(S) port (IceBeauty 18080, MeiJingLing 18081)", "port"},
         {"init-demo", "Initialize a new test schema and exit"},
+        {"init-lan-empty", "Initialize the legacy LAN schema without sample inventory and exit"},
         {"init-business", "Initialize the complete business schema and exit"},
+        {"import-legacy", "Import a legacy SQLite database into an empty business database and exit", "path"},
         {"allow-insecure-lan", "Allow HTTP over a trusted test LAN"},
         {"tls-cert", "PEM server certificate", "path"},
         {"tls-key", "PEM private key", "path"}});
     parser.process(app);
+    const bool demo = parser.isSet("init-demo");
+    const bool empty = parser.isSet("init-lan-empty");
+    const bool importLegacy = parser.isSet("import-legacy");
+    if (int(demo) + int(empty) + int(parser.isSet("init-business")) + int(importLegacy) > 1) {
+        QTextStream(stderr) << "Choose only one initialization option\n";
+        return 1;
+    }
     const auto product = parser.value("product");
     if (product != "ICE_BEAUTY" && product != "MEI_JING_LING") {
         QTextStream(stderr) << "Unknown product\n"; return 1;
@@ -32,22 +44,39 @@ int main(int argc, char **argv)
     LanDatabase database(product);
     SystemProfile::setServerProfile(product);
     QString error;
+    if (!ServerStartup::prepare(product, &error)) { QTextStream(stderr) << error << '\n'; return 2; }
     if (!database.open(&error)) { QTextStream(stderr) << error << '\n'; return 2; }
+    if (!demo && !empty && !parser.isSet("init-business") &&
+        !BusinessDatabase::upgradeProcessBoms(database.connection(), product, &error)) {
+        QTextStream(stderr) << error << '\n'; return 4;
+    }
+    if (importLegacy) {
+        LegacySource source;
+        QString report;
+        if (!source.prepare(parser.value("import-legacy"), product, &error)
+            || !LegacyImport::run(database.connection(), source.database(), product, &report, &error)) {
+            QTextStream(stderr) << error << '\n'; return 8;
+        }
+        QTextStream(stdout) << report << Qt::endl;
+        return 0;
+    }
     if(parser.isSet("init-business")) {
         if(!BusinessDatabase::initialize(database.connection(),product,qEnvironmentVariable("WMS_DEMO_ADMIN_PASSWORD"),&error)) {
             QTextStream(stderr)<<error<<'\n';return 3;
         }
         QTextStream(stdout)<<"Initialized full business schema for "<<product<<'\n';return 0;
     }
-    if (parser.isSet("init-demo")) {
-        if (!database.initializeDemo(qEnvironmentVariable("WMS_DEMO_ADMIN_PASSWORD"), &error)) {
+    if (demo || empty) {
+        if (!database.initialize(qEnvironmentVariable("WMS_DEMO_ADMIN_PASSWORD"), demo, &error)) {
             QTextStream(stderr) << error << '\n'; return 3;
         }
-        QTextStream(stdout) << "Initialized isolated test schema for " << product << '\n'; return 0;
+        QTextStream(stdout) << "Initialized LAN schema for " << product << '\n'; return 0;
     }
     if (!database.verify(&error)) { QTextStream(stderr) << error << '\n'; return 4; }
     bool portOk = false;
-    const int port = parser.value("port").toInt(&portOk);
+    const QString portValue = parser.isSet("port") ? parser.value("port")
+        : product == QStringLiteral("MEI_JING_LING") ? QStringLiteral("18081") : QStringLiteral("18080");
+    const int port = portValue.toInt(&portOk);
     const QHostAddress address(parser.value("listen"));
     if (!portOk || port < 1 || port > 65535 || address.isNull()) { QTextStream(stderr) << "Invalid listen address/port\n"; return 5; }
     LanServer server(database);
@@ -64,7 +93,8 @@ int main(int argc, char **argv)
         QTextStream(stderr) << "Non-loopback requires TLS or explicit --allow-insecure-lan for test data\n"; return 6;
     }
     if (!server.http().listen(address, static_cast<quint16>(port))) {
-        QTextStream(stderr) << "Cannot listen on requested address/port\n"; return 7;
+        QTextStream(stderr) << "Cannot listen on port " << port
+                            << ". Close old WMS listeners with the one-click launcher or scripts/stop-wms-listeners.ps1.\n"; return 7;
     }
     QTextStream(stdout) << "WmsServer ready " << (tls ? "https" : "http") << "://"
                         << address.toString() << ':' << port << " product=" << product << Qt::endl;

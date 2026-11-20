@@ -71,7 +71,7 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     auto *heading = new QLabel(QStringLiteral("库存调拨"), panel);
     heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
     layout->addWidget(heading);
-    auto *hint = new QLabel(QStringLiteral("每次调拨一条库存记录；SN物料需选择全部调拨SN。"), panel);
+    auto *hint = new QLabel(QStringLiteral("一张调拨单可添加多条物料，统一调往目标库位；SN物料需逐行选择对应SN。"), panel);
     hint->setObjectName(QStringLiteral("mutedText"));
     layout->addWidget(hint);
     auto *form = new QFormLayout;
@@ -83,7 +83,9 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     m_handlerEdit->setProperty("currentUserDefault", true);
     m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_targetWarehouse = new QComboBox(panel);
+    m_targetWarehouse->setObjectName(QStringLiteral("transferTargetWarehouse"));
     m_targetLocation = new QComboBox(panel);
+    m_targetLocation->setObjectName(QStringLiteral("transferTargetLocation"));
     m_notesEdit = new QTextEdit(panel);
     m_notesEdit->setMaximumHeight(65);
     form->addRow(QStringLiteral("调拨日期 *"), m_dateEdit);
@@ -106,14 +108,14 @@ TransferPage::TransferPage(QSqlDatabase database, Session session, QWidget *pare
     recentPanel->setObjectName(QStringLiteral("panel"));
     auto *recentLayout = new QVBoxLayout(recentPanel);
     auto *recentToolbar = new QHBoxLayout;
-    recentToolbar->addWidget(new QLabel(QStringLiteral("近期调拨单"), recentPanel));
+    recentToolbar->addWidget(new QLabel(QStringLiteral("近期调拨明细（同一单号可有多行）"), recentPanel));
     recentToolbar->addStretch();
     auto *editRecentButton = new QPushButton(QStringLiteral("修改单据"), recentPanel);
     editRecentButton->setProperty("primary", true);
     auto *fullScreenRecentButton = new QPushButton(QStringLiteral("全屏显示"), recentPanel);
     recentToolbar->addWidget(editRecentButton);
     recentToolbar->addWidget(fullScreenRecentButton);
-    m_reverseButton = new QPushButton(QStringLiteral("部分/全部撤销"), recentPanel);
+    m_reverseButton = new QPushButton(QStringLiteral("撤销所选明细"), recentPanel);
     m_reverseButton->setProperty("danger", true);
     recentToolbar->addWidget(m_reverseButton);
     recentLayout->addLayout(recentToolbar);
@@ -202,7 +204,7 @@ void TransferPage::refreshTransfers()
         "JOIN locations sl ON sl.id=i.location_id JOIN warehouses tw ON tw.id=i.target_warehouse_id "
         "JOIN locations tl ON tl.id=i.target_location_id "
         "WHERE d.document_type='DB' AND d.stock_direction='TRANSFER' AND d.status<>'REVERSED' "
-        "ORDER BY d.id DESC")
+        "ORDER BY d.id DESC,i.line_number")
         + (m_transferTable->property("tableFullScreenActive").toBool() ? QString() : QStringLiteral(" LIMIT 30")));
     while (query.next()) {
         const int row = m_transferTable->rowCount();
@@ -230,7 +232,7 @@ void TransferPage::updateReversalState()
 {
     const int row = m_transferTable->currentRow();
     bool enabled = false;
-    QString reason = QStringLiteral("请选择一张可撤销的调拨单");
+    QString reason = QStringLiteral("请选择一条可撤销的调拨明细");
     if (row >= 0) {
         const auto *number = m_transferTable->item(row, 0);
         const double remaining = m_transferTable->item(row, 8)->text().toDouble();
@@ -238,7 +240,7 @@ void TransferPage::updateReversalState()
             || number->data(CreatorIdRole).toLongLong() == m_session.userId;
         enabled = m_session.canManageWarehouse() && allowedOwner && remaining > 0.0000001;
         if (!allowedOwner) reason = QStringLiteral("只有管理员或原调拨单创建人可以撤销");
-        else if (remaining <= 0.0000001) reason = QStringLiteral("该调拨单已无可撤销数量");
+        else if (remaining <= 0.0000001) reason = QStringLiteral("该调拨明细已无可撤销数量");
         else reason.clear();
     }
     m_reverseButton->setEnabled(enabled);
@@ -249,10 +251,9 @@ void TransferPage::submit()
 {
     QString error;
     const QList<StockMovementRequest> lines = m_sourceLine->lines(&error);
-    if (lines.size() != 1) {
+    if (lines.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("调拨明细有误"),
-                             lines.isEmpty() && !error.isEmpty()
-                                 ? error : QStringLiteral("每张调拨单必须且只能保留一条物料明细。"));
+                             !error.isEmpty() ? error : QStringLiteral("请至少添加一条调拨物料明细。"));
         return;
     }
     if (m_targetLocation->currentIndex() < 0) {
@@ -260,9 +261,9 @@ void TransferPage::submit()
         return;
     }
     if (QMessageBox::question(this, QStringLiteral("确认调拨"),
-        QStringLiteral("确认将所选库存调拨到目标库位？")) != QMessageBox::Yes) return;
+        QStringLiteral("确认将这 %1 条物料明细统一调拨到目标库位？").arg(lines.size())) != QMessageBox::Yes) return;
     TransferRequest request;
-    static_cast<StockMovementRequest &>(request) = lines.first();
+    request.lines = lines;
     request.documentType = QStringLiteral("DB");
     request.documentDate = m_dateEdit->date();
     request.handlerName = m_handlerEdit->text().trimmed();
@@ -276,7 +277,7 @@ void TransferPage::submit()
         return;
     }
     QMessageBox::information(this, QStringLiteral("调拨完成"),
-                             QStringLiteral("调拨单 %1 已生效。").arg(posted.documentNumber));
+                             QStringLiteral("调拨单 %1 已生效，共 %2 条明细。").arg(posted.documentNumber).arg(lines.size()));
     m_notesEdit->clear();
     m_sourceLine->clearLines();
     emit stockChanged();

@@ -148,6 +148,7 @@ void NetworkWindow::login()
         session.username=data.value("username").toString();
         session.displayName=data.value("displayName").toString();
         session.roleCode=data.value("roleCode").toString();
+        session.testPasswordDefaults = data.value("testPasswordDefaults").toBool();
         for(const auto &permission:data.value("permissions").toArray())session.permissions.insert(permission.toString());
         auto database=RemoteBackend::connect(m_baseUrl,m_token);
         auto *window=new MainWindow(database,session,m_baseUrl.toString());

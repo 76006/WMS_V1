@@ -73,7 +73,7 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     m_handlerEdit->setProperty("currentUserDefault", true);
     m_handlerEdit->setProperty("lastCurrentUserDefault", m_session.displayName);
     m_supplierEdit = new QLineEdit(panel);
-    m_supplierEdit->setPlaceholderText(QStringLiteral("采购入库时填写，可用于批号追溯"));
+    m_supplierEdit->setPlaceholderText(QStringLiteral("入库单供应商默认值；各物料可在表单中分别填写"));
     m_purposeEdit = new QLineEdit(panel);
     m_numberLabel = new QLabel(QStringLiteral("提交时自动生成"), panel);
     m_numberLabel->setObjectName(QStringLiteral("mutedText"));
@@ -160,8 +160,9 @@ StockInPage::StockInPage(QSqlDatabase database, Session session, QWidget *parent
     connect(m_typeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
         const bool purchase = m_typeCombo->currentData().toString() == QStringLiteral("CGRK");
         m_lines->setPurchaseMode(purchase);
-        m_supplierEdit->setEnabled(purchase);
-        if (!purchase) m_supplierEdit->clear();
+        const bool rawInbound = m_typeCombo->currentData().toString() != QStringLiteral("SCWG");
+        m_supplierEdit->setEnabled(rawInbound);
+        if (!rawInbound) m_supplierEdit->clear();
     });
     updateInspectionRequirement();
     resetSubmissionToken();
@@ -291,7 +292,7 @@ void StockInPage::updateInspectionRequirement()
             return;
         }
         m_loadedInspectionNoticeId = noticeId;
-        if (m_supplierEdit->text().trimmed().isEmpty()) m_supplierEdit->setText(notice.supplier);
+        m_supplierEdit->setText(notice.supplier);
         if (m_purposeEdit->text().trimmed().isEmpty())
             m_purposeEdit->setText(notice.purchaseOrderNumber);
     }
@@ -336,6 +337,11 @@ void StockInPage::submit()
         QMessageBox::warning(this, QStringLiteral("无法填写入库单模板"), error);
         return;
     }
+    for (int index = 0; index < inboundForm.lines.size(); ++index) {
+        if (lines.at(index).supplier.trimmed().isEmpty()
+            && !m_supplierEdit->text().trimmed().isEmpty())
+            inboundForm.lines[index].supplier = m_supplierEdit->text().trimmed();
+    }
     DocumentTemplateDialog inboundDialog(inboundForm, this);
     if (inboundDialog.exec() != QDialog::Accepted) return;
     inboundForm = inboundDialog.document();
@@ -374,13 +380,16 @@ void StockInPage::submit()
     request.documentType = m_typeCombo->currentData().toString();
     request.documentDate = m_dateEdit->date();
     request.handlerName = m_handlerEdit->text().trimmed();
-    request.supplier = request.documentType == QStringLiteral("CGRK")
-        ? m_supplierEdit->text().trimmed() : QString();
+    request.supplier = m_supplierEdit->text().trimmed();
     request.purpose = m_purposeEdit->text().trimmed();
     request.notes = m_notesEdit->toPlainText().trimmed();
     request.submissionToken = m_submissionToken;
     request.inspectionNoticeId = inspectionNoticeId;
     request.lines = lines;
+    if (inboundForm.kind == OfficeFormKind::RawMaterialInbound) {
+        for (int index = 0; index < request.lines.size(); ++index)
+            request.lines[index].supplier = inboundForm.lines.at(index).supplier;
+    }
     m_submitButton->setEnabled(false);
     InventoryService service(m_database, m_session.userId);
     PostedDocument posted;

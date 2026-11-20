@@ -25,6 +25,7 @@ set(WMS_SOURCES
     src/database/DatabaseManager.cpp
     src/database/SchemaMigrator.cpp
     src/import/LegacyInventoryImporter.cpp
+    src/import/JsonFormRenderer.cpp
     src/import/XlsxExporter.cpp
     src/services/AttachmentService.cpp
     src/services/InventoryService.cpp
@@ -33,6 +34,8 @@ set(WMS_SOURCES
     src/services/InventoryServiceRevision.cpp
     src/services/InspectionService.cpp
     src/services/MaterialCodeService.cpp
+    src/services/ProcessBom.cpp
+    src/services/ProductionTask.cpp
     src/services/OfficeTemplateService.cpp
     src/services/ShipmentReceiptService.cpp
     src/services/InventoryReportService.cpp
@@ -56,6 +59,7 @@ set(WMS_SOURCES
     src/ui/pages/InspectionPage.cpp
     src/ui/pages/LedgerPage.cpp
     src/ui/pages/MaterialPage.cpp
+    src/ui/pages/MaterialPageProcessBom.cpp
     src/ui/pages/PlaceholderPage.cpp
     src/ui/pages/ProductionIssuePage.cpp
     src/ui/pages/ProductionReturnPage.cpp
@@ -143,8 +147,10 @@ set(WMS_RESOURCE_FILES
         database/migrations/019_inspection_result_records.sql
         database/migrations/020_system_identity.sql
         database/migrations/021_two_digit_number_rules.sql
+        database/migrations/022_process_boms.sql
+        database/migrations/023_production_stages.sql
+        database/migrations/024_purchase_suppliers.sql
         resources/PdfPreview.qml
-        resources/fill_office_template.ps1
         resources/styles.qss
 )
 
@@ -175,9 +181,9 @@ add_wms_application(IceBeautyWms WMS_PROFILE_ICE_BEAUTY=1)
 add_wms_application(MeiJingLingWms WMS_PROFILE_MEI_JING_LING=1)
 
 install(TARGETS IceBeautyWms RUNTIME DESTINATION . COMPONENT IceBeauty)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/仓库系统表单模板" DESTINATION . COMPONENT IceBeauty)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/仓库系统表单模板" DESTINATION . COMPONENT IceBeauty FILES_MATCHING PATTERN "*.json")
 if(EXISTS "${CMAKE_SOURCE_DIR}/美鲸灵仓库系统表单模板")
-    install(DIRECTORY "${CMAKE_SOURCE_DIR}/美鲸灵仓库系统表单模板" DESTINATION . COMPONENT MeiJingLing)
+    install(DIRECTORY "${CMAKE_SOURCE_DIR}/美鲸灵仓库系统表单模板" DESTINATION . COMPONENT MeiJingLing FILES_MATCHING PATTERN "*.json")
 endif()
 install(TARGETS MeiJingLingWms RUNTIME DESTINATION . COMPONENT MeiJingLing)
 
@@ -188,14 +194,21 @@ if(WMS_BUILD_SERVER)
     find_package(Qt6 6.5 REQUIRED COMPONENTS HttpServer)
     qt_add_executable(WmsServer
         src/server/main.cpp src/server/LanDatabase.cpp src/server/LanDatabase.h
+        src/server/ServerStartup.cpp src/server/ServerStartup.h
         src/server/LanServer.cpp src/server/LanServer.h src/core/PasswordHasher.cpp
         src/core/SystemProfile.cpp src/server/BusinessDatabase.cpp src/server/BusinessApi.cpp
         src/server/BusinessRpc.cpp src/network/QueryBridge.cpp src/network/RemoteBackend.cpp
+        src/server/LegacyImport.cpp src/server/LegacyImport.h
+        src/server/LegacySource.cpp src/server/LegacySource.h src/database/SchemaMigrator.cpp
         src/services/InventoryService.cpp src/services/InventoryServiceDocuments.cpp
         src/services/InventoryServiceProduction.cpp src/services/InventoryServiceRevision.cpp
+        src/services/ProductionTask.cpp
         src/services/InspectionService.cpp src/services/UserService.cpp
         src/services/AttachmentService.cpp src/services/ShipmentReceiptService.cpp)
     qt_add_resources(WmsServer "business_schema" PREFIX "/" FILES database/postgresql/business-schema.json)
+    set(WMS_LEGACY_SCHEMA_RESOURCES ${WMS_RESOURCE_FILES})
+    list(FILTER WMS_LEGACY_SCHEMA_RESOURCES INCLUDE REGEX "^database/")
+    qt_add_resources(WmsServer "legacy_schema" PREFIX "/" FILES ${WMS_LEGACY_SCHEMA_RESOURCES})
     target_compile_definitions(WmsServer PRIVATE WMS_SERVER_BUILD)
     target_include_directories(WmsServer PRIVATE src)
     target_link_libraries(WmsServer PRIVATE Qt6::Core Qt6::Sql Qt6::Network Qt6::HttpServer)

@@ -126,6 +126,8 @@ template<> struct Codec<StockDocumentRequest> {
   o.insert("notes",Codec<QString>::put(v.notes));
   o.insert("submissionToken",Codec<QString>::put(v.submissionToken));
   o.insert("productionRunId",Codec<qlonglong>::put(v.productionRunId));
+  o.insert("productionStageKey",Codec<QString>::put(v.productionStageKey));
+  o.insert("productionBomFingerprint",Codec<QString>::put(v.productionBomFingerprint));
   o.insert("inspectionNoticeId",Codec<qlonglong>::put(v.inspectionNoticeId));
   o.insert("inspection",Codec<InboundInspectionRequest>::put(v.inspection));
   o.insert("lines",Codec<QList<StockMovementRequest>>::put(v.lines));
@@ -148,6 +150,8 @@ template<> struct Codec<StockDocumentRequest> {
   if(o.contains("notes")) v.notes=Codec<QString>::get(o.value("notes"));
   if(o.contains("submissionToken")) v.submissionToken=Codec<QString>::get(o.value("submissionToken"));
   if(o.contains("productionRunId")) v.productionRunId=Codec<qlonglong>::get(o.value("productionRunId"));
+  if(o.contains("productionStageKey")) v.productionStageKey=Codec<QString>::get(o.value("productionStageKey"));
+  if(o.contains("productionBomFingerprint")) v.productionBomFingerprint=Codec<QString>::get(o.value("productionBomFingerprint"));
   if(o.contains("inspectionNoticeId")) v.inspectionNoticeId=Codec<qlonglong>::get(o.value("inspectionNoticeId"));
   if(o.contains("inspection")) v.inspection=Codec<InboundInspectionRequest>::get(o.value("inspection"));
   if(o.contains("lines")) v.lines=Codec<QList<StockMovementRequest>>::get(o.value("lines"));
@@ -216,12 +220,14 @@ template<> struct Codec<TransferRequest> {
   QJsonObject o=Codec<StockMovementRequest>::put(v).toObject();
   o.insert("targetWarehouseId",Codec<qlonglong>::put(v.targetWarehouseId));
   o.insert("targetLocationId",Codec<qlonglong>::put(v.targetLocationId));
+  o.insert("lines",Codec<QList<StockMovementRequest>>::put(v.lines));
   return o;
  }
  static TransferRequest get(const QJsonValue &value){ TransferRequest v; const auto o=value.toObject();
   static_cast<StockMovementRequest&>(v)=Codec<StockMovementRequest>::get(value);
   if(o.contains("targetWarehouseId")) v.targetWarehouseId=Codec<qlonglong>::get(o.value("targetWarehouseId"));
   if(o.contains("targetLocationId")) v.targetLocationId=Codec<qlonglong>::get(o.value("targetLocationId"));
+  if(o.contains("lines")) v.lines=Codec<QList<StockMovementRequest>>::get(o.value("lines"));
   return v;
  }
 };

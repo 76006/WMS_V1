@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Session.h"
+#include "services/ProductionTask.h"
 
 #include <QSqlDatabase>
 #include <QWidget>
@@ -31,12 +32,16 @@ signals:
 
 private slots:
     void importProductBom();
+    void importProcessBom();
     void submit();
     void updateIssueType();
 
 private:
     void refreshRecentDocuments();
     void resetSubmissionToken();
+    void refreshProductionStages();
+    void refreshStageProgress();
+    void selectProductionTask();
 
     QSqlDatabase m_database;
     Session m_session;
@@ -44,6 +49,13 @@ private:
     QComboBox *m_productCombo = nullptr;
     QLineEdit *m_productModelEdit = nullptr;
     QLineEdit *m_batchEdit = nullptr;
+    QComboBox *m_taskCombo = nullptr;
+    QComboBox *m_stageCombo = nullptr;
+    QTableWidget *m_demandTable = nullptr;
+    QLabel *m_stageSummary = nullptr;
+    ProductionTask m_task;
+    qlonglong m_taskRunId = 0;
+    QString m_bomFingerprint;
     QDoubleSpinBox *m_plannedQuantity = nullptr;
     QDateEdit *m_dateEdit = nullptr;
     QLineEdit *m_handlerEdit = nullptr;
@@ -54,6 +66,7 @@ private:
     QGroupBox *m_productionFieldsGroup = nullptr;
     StockLineTable *m_lines = nullptr;
     QPushButton *m_submitButton = nullptr;
+    QPushButton *m_processBomButton = nullptr;
     QTableWidget *m_recentTable = nullptr;
     QString m_submissionToken;
 };

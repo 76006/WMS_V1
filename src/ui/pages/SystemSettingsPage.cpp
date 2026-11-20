@@ -56,10 +56,14 @@ SystemSettingsPage::SystemSettingsPage(QSqlDatabase database, Session session,
     for (QLineEdit *edit : {m_currentPassword, m_newPassword, m_confirmPassword})
         edit->setEchoMode(QLineEdit::Password);
 #ifndef NDEBUG
-    if (m_session.isAdministrator()) m_currentPassword->setPlaceholderText(QStringLiteral("Debug测试管理员可留空"));
+    if (m_session.isAdministrator() && !RemoteBackend::isRemote(m_database))
+        m_currentPassword->setPlaceholderText(QStringLiteral("Debug测试管理员可留空"));
 #endif
     form->addRow(QStringLiteral("当前密码"), m_currentPassword);
-    form->addRow(QStringLiteral("新密码（至少8位）"), m_newPassword);
+    if (m_session.testPasswordDefaults)
+        m_newPassword->setPlaceholderText(QStringLiteral("可使用 123456，或自定义至少 8 位的密码"));
+    form->addRow(m_session.testPasswordDefaults ? QStringLiteral("新密码") : QStringLiteral("新密码（至少8位）"),
+                 m_newPassword);
     form->addRow(QStringLiteral("确认新密码"), m_confirmPassword);
     layout->addLayout(form);
     auto *change = new QPushButton(QStringLiteral("修改密码"), panel);

@@ -9,7 +9,7 @@ class LanDatabase
 public:
     explicit LanDatabase(QString product);
     bool open(QString *error);
-    bool initializeDemo(const QString &password, QString *error);
+    bool initialize(const QString &password, bool includeDemoStock, QString *error);
     bool verify(QString *error);
     bool ready();
     QSqlDatabase connection() const { return m_db; }

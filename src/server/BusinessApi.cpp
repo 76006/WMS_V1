@@ -1,5 +1,6 @@
 #include "server/BusinessApi.h"
 #include "server/BusinessRpc.h"
+#include "server/TestLoginPasswords.h"
 #include "core/PasswordHasher.h"
 #include "network/QueryBridge.h"
 #include <QCryptographicHash>
@@ -19,7 +20,7 @@ QHttpServerResponse error(const QString &message,Status status=Status::BadReques
 QByteArray hash(const QByteArray &value){return QCryptographicHash::hash(value,QCryptographicHash::Sha256).toHex();}
 QString lexical(QString sql){sql.replace(QRegularExpression("'(?:''|[^'])*'"),"''");sql.remove('"');return sql;}
 QString permissionForTable(const QString &table){
-    if(QStringList{"materials","material_images","material_projects","material_bom_items","material_categories"}.contains(table))return "MANAGE_MATERIALS";
+    if(QStringList{"materials","material_images","material_projects","material_bom_items","process_boms","material_categories"}.contains(table))return "MANAGE_MATERIALS";
     if(QStringList{"warehouses","locations"}.contains(table))return "MANAGE_WAREHOUSES";
     if(table=="role_permissions")return "MANAGE_USERS";
     if(table=="number_rules")return "MANAGE_SYSTEM";
@@ -79,6 +80,7 @@ QHttpServerResponse BusinessApi::login(const QHttpServerRequest &request)
     m_sessions.insert(hash(secret),{id,QDateTime::currentDateTimeUtc().addSecs(8*3600),database,{}});
     QSqlQuery audit(database->raw());audit.prepare("INSERT INTO audit_logs(user_id,action,entity_type,entity_id) VALUES(?,'LOGIN','user',?)");audit.addBindValue(id);audit.addBindValue(id);audit.exec();
     return QHttpServerResponse(QJsonObject{{"apiVersion",2},{"product",m_product},{"token",QString::fromLatin1(secret)},
+        {"testPasswordDefaults",TestLoginPasswords::enabled()},
         {"userId",QString::number(id)},{"username",user.value(1).toString()},{"displayName",user.value(2).toString()},{"roleCode",user.value(4).toString()},{"permissions",codes}});
 }
 QHttpServerResponse BusinessApi::data(const QHttpServerRequest &request)

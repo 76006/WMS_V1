@@ -109,7 +109,7 @@ bool InventoryService::postMovement(const StockMovementRequest &request,
     }
 
     const QString type = request.documentType.trimmed().toUpper();
-    if (inbound && type == QStringLiteral("CGRK")) {
+    if (inbound) {
         if (request.orderedQuantity < -QuantityTolerance
             || request.giftQuantity < -QuantityTolerance
             || request.giftQuantity > qMax(0.0, request.quantity - request.orderedQuantity)
@@ -257,22 +257,52 @@ bool InventoryService::postTransfer(const TransferRequest &request,
         return BusinessWire::Codec<bool>::get(reply.value("result"));
     }
 
-    StockMovementRequest transferMovement = request;
-    transferMovement.documentType = QStringLiteral("DB");
-    const MaterialRules rules = materialRules(request.materialId, errorMessage);
-    if (!rules.valid || !validateMovement(transferMovement, rules, errorMessage)
-        || !validateLocation(request.warehouseId, request.locationId, errorMessage)
-        || !validateLocation(request.targetWarehouseId, request.targetLocationId, errorMessage)) {
+    QList<StockMovementRequest> lines = request.lines;
+    if (lines.isEmpty() && request.materialId > 0)
+        lines.append(static_cast<const StockMovementRequest &>(request));
+    if (lines.isEmpty()) {
+        setError(errorMessage, QStringLiteral("请至少添加一条调拨物料明细。"));
         return false;
     }
-    if (request.warehouseId == request.targetWarehouseId
-        && request.locationId == request.targetLocationId) {
-        setError(errorMessage, QStringLiteral("原库位与目标库位不能相同。"));
-        return false;
-    }
-
     if (!beginImmediate(errorMessage)) {
         return false;
+    }
+    const auto failLine = [&](int index) {
+        if (errorMessage) *errorMessage = QStringLiteral("第 %1 行：%2").arg(index + 1).arg(*errorMessage);
+        rollback();
+        return false;
+    };
+    if (!validateLocation(request.targetWarehouseId, request.targetLocationId, errorMessage)) {
+        rollback();
+        return false;
+    }
+    QSet<QString> documentSerials;
+    for (int index = 0; index < lines.size(); ++index) {
+        auto &line = lines[index];
+        line.documentType = QStringLiteral("DB");
+        line.documentDate = request.documentDate;
+        if (line.notes.isEmpty()) line.notes = request.notes;
+        if (!std::isfinite(line.quantity)) {
+            setError(errorMessage, QStringLiteral("数量必须是有效数字。"));
+            return failLine(index);
+        }
+        const MaterialRules rules = materialRules(line.materialId, errorMessage);
+        if (!rules.valid || !validateMovement(line, rules, errorMessage)
+            || !validateLocation(line.warehouseId, line.locationId, errorMessage)) {
+            return failLine(index);
+        }
+        if (line.warehouseId == request.targetWarehouseId && line.locationId == request.targetLocationId) {
+            setError(errorMessage, QStringLiteral("原库位与目标库位不能相同。"));
+            return failLine(index);
+        }
+        for (const auto &serial : line.serialNumbers) {
+            const auto key = serial.trimmed().toCaseFolded();
+            if (documentSerials.contains(key)) {
+                setError(errorMessage, QStringLiteral("SN %1 在其他明细中重复。").arg(serial));
+                return failLine(index);
+            }
+            documentSerials.insert(key);
+        }
     }
     const QString number = nextDocumentNumber(QStringLiteral("DB"), request.documentDate, errorMessage);
     if (number.isEmpty()) {
@@ -282,71 +312,69 @@ bool InventoryService::postTransfer(const TransferRequest &request,
     const qlonglong documentId = createDocument(number, QStringLiteral("DB"), QStringLiteral("TRANSFER"),
                                                  request.documentDate, request.handlerName, request.purpose,
                                                  request.notes, QVariant(), errorMessage);
-    const qlonglong itemId = documentId > 0
-        ? createItem(documentId, request, request.targetWarehouseId, request.targetLocationId, errorMessage)
-        : 0;
-    if (itemId <= 0) {
+    if (documentId <= 0) {
         rollback();
         return false;
     }
-
-    double sourceBefore = 0.0;
-    double sourceAfter = 0.0;
-    double targetBefore = 0.0;
-    double targetAfter = 0.0;
-    if (!changeBalance(request.materialId, request.warehouseId, request.locationId,
-                       request.batchNo.trimmed(), -request.quantity, &sourceBefore, &sourceAfter, errorMessage)
-        || !changeBalance(request.materialId, request.targetWarehouseId, request.targetLocationId,
-                          request.batchNo.trimmed(), request.quantity, &targetBefore, &targetAfter, errorMessage)) {
-        rollback();
-        return false;
-    }
-
-    const qlonglong outLedger = createLedger(documentId, itemId, QStringLiteral("DB-OUT"), request.materialId,
-                                              request.batchNo.trimmed(), 0.0, request.quantity,
-                                              sourceBefore, sourceAfter, request.warehouseId,
-                                              request.locationId, request.notes, errorMessage);
-    const qlonglong inLedger = outLedger > 0
-        ? createLedger(documentId, itemId, QStringLiteral("DB-IN"), request.materialId,
-                       request.batchNo.trimmed(), request.quantity, 0.0,
-                       targetBefore, targetAfter, request.targetWarehouseId,
-                       request.targetLocationId, request.notes, errorMessage)
-        : 0;
-    if (inLedger <= 0) {
-        rollback();
-        return false;
-    }
-
-    for (const QString &serial : request.serialNumbers) {
-        QSqlQuery serialQuery(m_database);
-        serialQuery.prepare(QStringLiteral(
-            "SELECT id FROM serial_numbers WHERE serial_no = ? AND material_id = ? AND status = 'IN_STOCK' "
-            "AND warehouse_id = ? AND location_id = ? AND batch_no = ?"));
-        serialQuery.addBindValue(serial.trimmed());
-        serialQuery.addBindValue(request.materialId);
-        serialQuery.addBindValue(request.warehouseId);
-        serialQuery.addBindValue(request.locationId);
-        serialQuery.addBindValue(databaseText(request.batchNo));
-        if (!serialQuery.exec() || !serialQuery.next()) {
-            setError(errorMessage, QStringLiteral("SN %1 不在所选源库位中。").arg(serial));
-            rollback();
-            return false;
+    for (int index = 0; index < lines.size(); ++index) {
+        const auto &line = lines.at(index);
+        const qlonglong itemId = createItem(documentId, line, request.targetWarehouseId,
+                                            request.targetLocationId, errorMessage, index + 1);
+        if (itemId <= 0) return failLine(index);
+        double sourceBefore = 0.0;
+        double sourceAfter = 0.0;
+        double targetBefore = 0.0;
+        double targetAfter = 0.0;
+        if (!changeBalance(line.materialId, line.warehouseId, line.locationId,
+                           line.batchNo.trimmed(), -line.quantity, &sourceBefore, &sourceAfter, errorMessage)
+            || !changeBalance(line.materialId, request.targetWarehouseId, request.targetLocationId,
+                              line.batchNo.trimmed(), line.quantity, &targetBefore, &targetAfter, errorMessage)) {
+            return failLine(index);
         }
-        const qlonglong serialId = serialQuery.value(0).toLongLong();
-        QSqlQuery update(m_database);
-        update.prepare(QStringLiteral(
-            "UPDATE serial_numbers SET warehouse_id = ?, location_id = ?, last_document_id = ? WHERE id = ?"));
-        update.addBindValue(request.targetWarehouseId);
-        update.addBindValue(request.targetLocationId);
-        update.addBindValue(documentId);
-        update.addBindValue(serialId);
-        if (!update.exec() || !linkLedgerSerial(outLedger, serialId, errorMessage)
-            || !linkLedgerSerial(inLedger, serialId, errorMessage)) {
-            if (errorMessage && errorMessage->isEmpty()) {
-                *errorMessage = update.lastError().text();
+
+        const qlonglong outLedger = createLedger(documentId, itemId, QStringLiteral("DB-OUT"), line.materialId,
+                                                  line.batchNo.trimmed(), 0.0, line.quantity,
+                                                  sourceBefore, sourceAfter, line.warehouseId,
+                                                  line.locationId, line.notes, errorMessage);
+        const qlonglong inLedger = outLedger > 0
+            ? createLedger(documentId, itemId, QStringLiteral("DB-IN"), line.materialId,
+                           line.batchNo.trimmed(), line.quantity, 0.0,
+                           targetBefore, targetAfter, request.targetWarehouseId,
+                           request.targetLocationId, line.notes, errorMessage)
+            : 0;
+        if (inLedger <= 0) {
+            return failLine(index);
+        }
+
+        for (const QString &serial : line.serialNumbers) {
+            QSqlQuery serialQuery(m_database);
+            serialQuery.prepare(QStringLiteral(
+                "SELECT id FROM serial_numbers WHERE serial_no = ? AND material_id = ? AND status = 'IN_STOCK' "
+                "AND warehouse_id = ? AND location_id = ? AND batch_no = ?"));
+            serialQuery.addBindValue(serial.trimmed());
+            serialQuery.addBindValue(line.materialId);
+            serialQuery.addBindValue(line.warehouseId);
+            serialQuery.addBindValue(line.locationId);
+            serialQuery.addBindValue(databaseText(line.batchNo));
+            if (!serialQuery.exec() || !serialQuery.next()) {
+                setError(errorMessage, QStringLiteral("SN %1 不在所选源库位中。").arg(serial));
+                return failLine(index);
             }
-            rollback();
-            return false;
+            const qlonglong serialId = serialQuery.value(0).toLongLong();
+            QSqlQuery update(m_database);
+            update.prepare(QStringLiteral(
+                "UPDATE serial_numbers SET warehouse_id = ?, location_id = ?, last_document_id = ? WHERE id = ?"));
+            update.addBindValue(request.targetWarehouseId);
+            update.addBindValue(request.targetLocationId);
+            update.addBindValue(documentId);
+            update.addBindValue(serialId);
+            if (!update.exec() || !linkLedgerSerial(outLedger, serialId, errorMessage)
+                || !linkLedgerSerial(inLedger, serialId, errorMessage)) {
+                if (errorMessage && errorMessage->isEmpty()) {
+                    *errorMessage = update.lastError().text();
+                }
+                return failLine(index);
+            }
         }
     }
 
@@ -1071,6 +1099,7 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     updateSource.addBindValue(sourceDocumentId);
 
     if (!updateSource.exec() || !finalizeDocument(documentId, errorMessage)
+        || (sourceType == QStringLiteral("CGRK") && !refreshPurchaseSuppliers(errorMessage))
         || (sourceType == QStringLiteral("CPRK")
             && !refreshProductionRunStatus(productionRunId, errorMessage))
         || !writeAudit(QStringLiteral("REVERSE"), QStringLiteral("business_document"),
@@ -1361,15 +1390,17 @@ qlonglong InventoryService::createItem(qlonglong documentId,
                                        const StockMovementRequest &request,
                                        qlonglong targetWarehouseId,
                                        qlonglong targetLocationId,
-                                       QString *errorMessage)
+                                       QString *errorMessage,
+                                       int lineNumber)
 {
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "INSERT INTO business_document_items(document_id,line_number,material_id,quantity,"
         "ordered_quantity,gift_quantity,batch_no,warehouse_id,location_id,"
         "target_warehouse_id,target_location_id,notes) "
-        "VALUES(?,1,?,?,?,?,?,?,?,?,?,?)"));
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"));
     query.addBindValue(documentId);
+    query.addBindValue(lineNumber);
     query.addBindValue(request.materialId);
     query.addBindValue(request.quantity);
     query.addBindValue(request.orderedQuantity);

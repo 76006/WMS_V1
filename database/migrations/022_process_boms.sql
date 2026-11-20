@@ -1,0 +1,6 @@
+CREATE TABLE process_boms (
+    product_material_id INTEGER NOT NULL PRIMARY KEY REFERENCES materials(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    payload TEXT NOT NULL
+);
+
+INSERT INTO schema_migrations(version) VALUES (22);

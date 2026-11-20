@@ -1,6 +1,8 @@
 #include "services/OfficeTemplateService.h"
+#include "services/ProductionTask.h"
 
 #include "core/SystemProfile.h"
+#include "import/JsonFormRenderer.h"
 
 #include "services/AttachmentService.h"
 
@@ -133,18 +135,6 @@ bool formKindFromCode(const QString &code, OfficeFormKind *kind)
     return true;
 }
 
-QString sheetName(OfficeFormKind kind)
-{
-    switch (kind) {
-    case OfficeFormKind::ProductionIssue:
-        return QStringLiteral("领料单");
-    case OfficeFormKind::DeliveryConfirmation:
-        return QStringLiteral("送货确认单");
-    default:
-        return QStringLiteral("Sheet1");
-    }
-}
-
 QString safeFilePart(QString value)
 {
     value = value.trimmed();
@@ -171,24 +161,6 @@ bool isHandwrittenSignatureField(const QString &key)
     };
     return fields.contains(key);
 }
-
-void terminateTemplateAutomationProcess(const QString &processIdPath)
-{
-    QFile processIdFile(processIdPath);
-    if (!processIdFile.open(QIODevice::ReadOnly)) return;
-    bool ok = false;
-    const qlonglong processId = QString::fromLatin1(processIdFile.readAll()).trimmed().toLongLong(&ok);
-    processIdFile.close();
-    if (!ok || processId <= 0) return;
-    QProcess terminator;
-    terminator.setProgram(QStringLiteral("taskkill.exe"));
-    terminator.setArguments({QStringLiteral("/PID"), QString::number(processId),
-                             QStringLiteral("/T"), QStringLiteral("/F")});
-    terminator.start();
-    terminator.waitForFinished(5000);
-    QFile::remove(processIdPath);
-}
-
 }
 
 QString OfficeTemplateService::formTitle(OfficeFormKind kind)
@@ -206,45 +178,13 @@ QString OfficeTemplateService::formTitle(OfficeFormKind kind)
 
 QString OfficeTemplateService::templateFileName(OfficeFormKind kind)
 {
-    if (SystemProfile::isMeiJingLing()) {
-        switch (kind) {
-        case OfficeFormKind::Inspection:
-            return QStringLiteral("MG-JL13-07 材料检验通知单---A0 .xlsx");
-        case OfficeFormKind::RawMaterialInbound:
-            return QStringLiteral("MG-JL15-02 原材料入库单---A0.xls");
-        case OfficeFormKind::ProductionIssue:
-            return QStringLiteral("MG-JL11-05 领料单---A0.xls");
-        case OfficeFormKind::FinishedGoodsInbound:
-            return QStringLiteral("MG-JL15-02 成品入库单---A0.xls");
-        case OfficeFormKind::StockOutbound:
-            return QStringLiteral("MG-JL15-03 出库单---A0.xls");
-        case OfficeFormKind::DeliveryConfirmation:
-            // 正式的美鲸灵送货确认单尚未提供；保留独立文件名，绝不回退读取冰美肌模板。
-            return QStringLiteral("美鲸灵送货确认单 .xls");
-        }
-    }
-    switch (kind) {
-    case OfficeFormKind::Inspection:
-        return QStringLiteral("BMJ-SMSP-16 材料检验通知单---A0 .xlsx");
-    case OfficeFormKind::RawMaterialInbound:
-        return QStringLiteral("BMJ-SMSP-18 原材料入库单---A0.xls");
-    case OfficeFormKind::ProductionIssue:
-        return QStringLiteral("BMJ-SMSP-17 领料单---A0.xls");
-    case OfficeFormKind::FinishedGoodsInbound:
-        return QStringLiteral("BMJ-SMSP-18 成品入库单---A0.xls");
-    case OfficeFormKind::StockOutbound:
-        return QStringLiteral("BMJ-SMSP-19 出库单---A0.xls");
-    case OfficeFormKind::DeliveryConfirmation:
-        return QStringLiteral("送货确认单 .xls");
-    }
-    return {};
+    return formTitle(kind) + QStringLiteral(".json");
 }
 
 QString OfficeTemplateService::outputFileName(const OfficeTemplateDocument &document)
 {
-    const QString suffix = QFileInfo(templateFileName(document.kind)).suffix();
-    return QStringLiteral("%1_%2.%3")
-        .arg(formTitle(document.kind), safeFilePart(document.documentNumber), suffix);
+    return QStringLiteral("%1_%2.xlsx")
+        .arg(formTitle(document.kind), safeFilePart(document.documentNumber));
 }
 
 QString OfficeTemplateService::archiveRootPath()
@@ -260,10 +200,12 @@ QString OfficeTemplateService::archiveFilePath(const OfficeTemplateDocument &doc
 {
     const QString rootPath = archiveRootPath();
     const QString number = document.documentNumber.trimmed();
-    const QString suffix = QFileInfo(templateFileName(document.kind)).suffix();
-    if (rootPath.isEmpty() || number.isEmpty() || suffix.isEmpty()) return {};
-    return QDir(QDir(rootPath).filePath(formTitle(document.kind)))
-        .filePath(QStringLiteral("%1.%2").arg(safeFilePart(number), suffix));
+    if (rootPath.isEmpty() || number.isEmpty()) return {};
+    const QString base = QDir(QDir(rootPath).filePath(formTitle(document.kind))).filePath(safeFilePart(number));
+    const QString current = base + QStringLiteral(".xlsx");
+    const QString legacy = base + QStringLiteral(".xls");
+    if (!QFileInfo::exists(current) && QFileInfo::exists(legacy)) return legacy;
+    return current;
 }
 
 bool OfficeTemplateService::archiveReversedDocumentForms(QSqlDatabase database,
@@ -301,40 +243,43 @@ bool OfficeTemplateService::archiveReversedDocumentForms(QSqlDatabase database,
             continue;
         }
         const QFileInfo sourceInfo(sourcePath);
-        QDir cancelledDir(sourceInfo.dir().filePath(QStringLiteral("已撤销")));
-        if (!cancelledDir.exists() && !sourceInfo.dir().mkpath(QStringLiteral("已撤销"))) {
+        const QDir directory = sourceInfo.dir();
+        QDir cancelledDir(directory.filePath(QStringLiteral("已撤销")));
+        if (!directory.mkpath(QStringLiteral("已撤销"))) {
             allOk = false;
             if (errors) errors->append(QStringLiteral("无法创建撤销归档目录：%1")
                                            .arg(QDir::toNativeSeparators(cancelledDir.path())));
             continue;
         }
-        QString targetPath = cancelledDir.filePath(
-            QStringLiteral("已撤销-%1").arg(sourceInfo.fileName()));
-        if (!sourceInfo.exists()) {
-            if (QFileInfo::exists(targetPath)) {
-                if (archivedPaths) archivedPaths->append(QDir::toNativeSeparators(targetPath));
-            } else {
-                allOk = false;
-                if (errors) errors->append(QStringLiteral("未找到需要归档的表单文件：%1")
-                                               .arg(QDir::toNativeSeparators(sourcePath)));
+        // A document regenerated after upgrading can have both a historical .xls
+        // and a current .xlsx. Retrying reversal must also find already moved files.
+        bool found = false;
+        for (const auto &suffix : {QStringLiteral(".xlsx"), QStringLiteral(".xls")}) {
+            const QString fileName = sourceInfo.completeBaseName() + suffix;
+            const QString original = directory.filePath(fileName);
+            QString target = cancelledDir.filePath(QStringLiteral("已撤销-") + fileName);
+            const bool previouslyMoved = QFileInfo::exists(target);
+            if (!QFileInfo::exists(original) && !previouslyMoved) continue;
+            found = true;
+            if (QFileInfo::exists(original)) {
+                if (previouslyMoved) {
+                    target = cancelledDir.filePath(QStringLiteral("已撤销-%1-%2%3").arg(
+                        sourceInfo.completeBaseName(), QUuid::createUuid().toString(QUuid::Id128), suffix));
+                }
+                if (!QFile::rename(original, target)) {
+                    allOk = false;
+                    if (errors) errors->append(QStringLiteral("无法移动表单文件（文件可能正被占用）：%1")
+                                                   .arg(QDir::toNativeSeparators(original)));
+                    continue;
+                }
             }
-            continue;
+            if (archivedPaths) archivedPaths->append(QDir::toNativeSeparators(target));
         }
-        if (QFileInfo::exists(targetPath)) {
-            const QString suffix = QFileInfo(targetPath).suffix();
-            const QString baseName = QFileInfo(targetPath).completeBaseName();
-            const QString timestamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
-            targetPath = cancelledDir.filePath(QStringLiteral("%1-%2.%3")
-                .arg(baseName, timestamp, suffix));
-        }
-        if (!QFile::rename(sourcePath, targetPath)) {
+        if (!found) {
             allOk = false;
-            if (errors) errors->append(QStringLiteral(
-                "无法移动表单文件（文件可能正被占用）：%1")
-                    .arg(QDir::toNativeSeparators(sourcePath)));
-            continue;
+            if (errors) errors->append(QStringLiteral("未找到需要归档的表单文件：%1")
+                                           .arg(QDir::toNativeSeparators(sourcePath)));
         }
-        if (archivedPaths) archivedPaths->append(QDir::toNativeSeparators(targetPath));
     }
     return allOk;
 }
@@ -347,9 +292,12 @@ QList<OfficeTemplateLine> OfficeTemplateService::materialLines(
     QList<OfficeTemplateLine> result;
     QSqlQuery query(database);
     query.prepare(QStringLiteral(
-        "SELECT code,name,specification,unit,unit_usage FROM materials WHERE id=?"));
+        "SELECT m.code,m.name,m.specification,m.unit,m.unit_usage,b.supplier "
+        "FROM materials m LEFT JOIN batches b ON b.material_id=m.id AND b.batch_no=? "
+        "WHERE m.id=?"));
     for (const StockMovementRequest &source : lines) {
-        query.bindValue(0, source.materialId);
+        query.bindValue(0, source.batchNo.trimmed());
+        query.bindValue(1, source.materialId);
         if (!query.exec() || !query.next()) {
             setError(errorMessage,
                      QStringLiteral("读取物料 %1 的模板资料失败：%2")
@@ -368,6 +316,8 @@ QList<OfficeTemplateLine> OfficeTemplateService::materialLines(
         line.batchNo = source.batchNo;
         line.serialNumbers = source.serialNumbers.join(QStringLiteral("、"));
         line.notes = source.notes;
+        line.supplier = source.supplier.trimmed().isEmpty()
+            ? query.value(5).toString() : source.supplier.trimmed();
         line.externalQuantity = source.externalDispatch ? source.quantity : 0.0;
         line.reworkQuantity = source.secondaryDispatch ? source.quantity : 0.0;
         line.lossQuantity = source.lossMarked ? source.quantity : 0.0;
@@ -381,7 +331,7 @@ QString OfficeTemplateService::findTemplateFile(OfficeFormKind kind)
 {
     const QString fileName = templateFileName(kind);
     QStringList roots;
-    roots << QDir::currentPath() << QCoreApplication::applicationDirPath();
+    roots << QCoreApplication::applicationDirPath() << QDir::currentPath();
     QDir parent(QCoreApplication::applicationDirPath());
     for (int level = 0; level < 5 && parent.cdUp(); ++level) roots << parent.absolutePath();
     for (const QString &root : std::as_const(roots)) {
@@ -511,106 +461,26 @@ bool OfficeTemplateService::renderToFile(const OfficeTemplateDocument &document,
                           SystemProfile::templateDirectoryName()));
         return false;
     }
-    const QFileInfo outputInfo(outputPath);
-    if (!QDir().mkpath(outputInfo.absolutePath())) {
-        setError(errorMessage, QStringLiteral("无法创建表单保存目录：%1")
-                                   .arg(outputInfo.absolutePath()));
-        return false;
-    }
-    if (QFileInfo::exists(outputPath) && !QFile::remove(outputPath)) {
-        setError(errorMessage, QStringLiteral("无法覆盖表单文件，文件可能正在使用：%1")
-                                   .arg(outputPath));
-        return false;
-    }
-    if (!QFile::copy(templatePath, outputPath)) {
-        setError(errorMessage, QStringLiteral("复制表单模板失败：%1").arg(templatePath));
-        return false;
-    }
-
     QJsonObject root = documentToJson(document);
-    root.insert(QStringLiteral("profileId"), SystemProfile::profileId());
-    root.insert(QStringLiteral("sheetName"), sheetName(document.kind));
-    root.insert(QStringLiteral("outputPath"), QDir::toNativeSeparators(outputPath));
-    // 脚本按引擎逐个完整重试，每次都要从未修改的模板重新复制，避免失败的表单污染下一次尝试。
-    root.insert(QStringLiteral("templatePath"), QDir::toNativeSeparators(templatePath));
-    // 手写签字字段只在填写模板时过滤，存档载荷仍保留完整资料。
-    QJsonObject fields;
+    QJsonObject fields = root.value(QStringLiteral("fields")).toObject();
     for (auto it = document.fields.cbegin(); it != document.fields.cend(); ++it) {
-        if (!isHandwrittenSignatureField(it.key())) fields.insert(it.key(), it.value());
+        if (isHandwrittenSignatureField(it.key())) fields.remove(it.key());
     }
     root.insert(QStringLiteral("fields"), fields);
-
-    QTemporaryDir workingDir;
-    if (!workingDir.isValid()) {
-        QFile::remove(outputPath);
-        setError(errorMessage, QStringLiteral("无法创建表单处理临时目录。"));
-        return false;
+    double total = 0;
+    for (const auto &line : document.lines) total += line.quantity;
+    root.insert(QStringLiteral("totalQuantity"), total);
+    const auto urgency = document.fields.value(QStringLiteral("urgency")).trimmed().toUpper();
+    root.insert(QStringLiteral("expeditedMark"), urgency == "EXPEDITED" ? QStringLiteral("☑") : QStringLiteral("□"));
+    root.insert(QStringLiteral("urgentMark"), urgency == "URGENT" ? QStringLiteral("☑") : QStringLiteral("□"));
+    root.insert(QStringLiteral("normalMark"), urgency.isEmpty() || urgency == "NORMAL" ? QStringLiteral("☑") : QStringLiteral("□"));
+    QString outboundCompany;
+    for (const auto key : {"customerCompany", "destination", "purpose"}) {
+        outboundCompany = document.fields.value(key).trimmed();
+        if (!outboundCompany.isEmpty()) break;
     }
-    const QString jsonPath = workingDir.filePath(QStringLiteral("form.json"));
-    const QString scriptPath = workingDir.filePath(QStringLiteral("fill_office_template.ps1"));
-    const QString processIdPath = workingDir.filePath(QStringLiteral("spreadsheet-process.pid"));
-    root.insert(QStringLiteral("processIdPath"), QDir::toNativeSeparators(processIdPath));
-    QFile jsonFile(jsonPath);
-    if (!jsonFile.open(QIODevice::WriteOnly)
-        || jsonFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented)) < 0) {
-        QFile::remove(outputPath);
-        setError(errorMessage, QStringLiteral("无法准备模板填写数据。"));
-        return false;
-    }
-    jsonFile.close();
-    QFile scriptResource(QStringLiteral(":/resources/fill_office_template.ps1"));
-    if (!scriptResource.open(QIODevice::ReadOnly)) {
-        QFile::remove(outputPath);
-        setError(errorMessage, QStringLiteral("程序内缺少模板填写组件。"));
-        return false;
-    }
-    QFile scriptFile(scriptPath);
-    QByteArray scriptData = scriptResource.readAll();
-    if (!scriptData.startsWith("\xEF\xBB\xBF")) scriptData.prepend("\xEF\xBB\xBF");
-    if (!scriptFile.open(QIODevice::WriteOnly)
-        || scriptFile.write(scriptData) < 0) {
-        QFile::remove(outputPath);
-        setError(errorMessage, QStringLiteral("无法准备模板填写组件。"));
-        return false;
-    }
-    scriptFile.close();
-
-    QProcess process;
-    process.setProgram(QStringLiteral("powershell.exe"));
-    process.setArguments({QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"),
-                          QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"),
-                          QStringLiteral("Bypass"), QStringLiteral("-File"), scriptPath, jsonPath});
-    process.start();
-    if (!process.waitForStarted(10000)) {
-        QFile::remove(outputPath);
-        setError(errorMessage, QStringLiteral("无法启动 Windows 表单填写组件：%1")
-                                   .arg(process.errorString()));
-        return false;
-    }
-    if (!process.waitForFinished(120000)) {
-        process.kill();
-        process.waitForFinished();
-        terminateTemplateAutomationProcess(processIdPath);
-        QFile::remove(outputPath);
-        setError(errorMessage, QStringLiteral("填写模板超时。请关闭正在阻塞的 Excel 或 WPS 表格对话框后重试。"));
-        return false;
-    }
-    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-        terminateTemplateAutomationProcess(processIdPath);
-        const QString details = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-        QFile::remove(outputPath);
-        setError(errorMessage,
-                 QStringLiteral("无法填写%1。请确认本机已安装 Microsoft Excel 或 WPS 表格，相关自动化组件可用，且模板没有被其他程序占用。%2")
-                     .arg(formTitle(document.kind),
-                          details.isEmpty() ? QString() : QStringLiteral("\n\n%1").arg(details)));
-        return false;
-    }
-    if (!QFileInfo::exists(outputPath) || QFileInfo(outputPath).size() == 0) {
-        setError(errorMessage, QStringLiteral("%1生成后为空。")
-                                   .arg(formTitle(document.kind)));
-        return false;
-    }
-    return true;
+    root.insert(QStringLiteral("outboundCompany"), outboundCompany);
+    return JsonFormRenderer::write(templatePath, root, outputPath, errorMessage);
 }
 
 bool OfficeTemplateService::saveToDocumentsArchive(const OfficeTemplateDocument &document,
@@ -625,12 +495,6 @@ bool OfficeTemplateService::saveToDocumentsArchive(const OfficeTemplateDocument 
         return false;
     }
     // 归档文件名与正式附件保持一致：只用单号，不带表单名称或随机预览名。
-    const QString suffix = QFileInfo(templateFileName(document.kind)).suffix();
-    if (suffix.isEmpty()) {
-        setError(errorMessage,
-                 QStringLiteral("无法确定%1的输出文件格式。").arg(formTitle(document.kind)));
-        return false;
-    }
     const QString rootPath = archiveRootPath();
     if (rootPath.isEmpty()) {
         setError(errorMessage, QStringLiteral("无法获取“我的文档”目录。"));
@@ -642,7 +506,7 @@ bool OfficeTemplateService::saveToDocumentsArchive(const OfficeTemplateDocument 
                                    .arg(QDir::toNativeSeparators(formDirectory)));
         return false;
     }
-    const QString archiveFileName = QStringLiteral("%1.%2").arg(safeFilePart(number), suffix);
+    const QString archiveFileName = QStringLiteral("%1.xlsx").arg(safeFilePart(number));
     const QString archivePath = QDir(formDirectory).filePath(archiveFileName);
     const auto setArchiveError = [errorMessage, &archivePath](const QString &reason) {
         setError(errorMessage, QStringLiteral("无法保存表单到：%1（%2）")
@@ -697,11 +561,10 @@ bool OfficeTemplateService::openPreview(const OfficeTemplateDocument &document, 
 {
     const QString root = SystemProfile::temporaryPath(QStringLiteral("form-previews"));
     QDir().mkpath(root);
-    const QString suffix = QFileInfo(templateFileName(document.kind)).suffix();
     const QString path = QDir(root).filePath(
-        QStringLiteral("%1_%2.%3")
+        QStringLiteral("%1_%2.xlsx")
             .arg(formTitle(document.kind),
-                 QUuid::createUuid().toString(QUuid::WithoutBraces), suffix));
+                 QUuid::createUuid().toString(QUuid::WithoutBraces)));
     QString error;
     if (!renderToFile(document, path, &error)) {
         if (parent) QMessageBox::warning(parent, QStringLiteral("模板预览失败"), error);
@@ -965,10 +828,7 @@ bool OfficeTemplateService::attachToInspectionNotice(const OfficeTemplateDocumen
         return false;
     }
     const QString fileName = outputFileName(document);
-    const QString mime = QFileInfo(fileName).suffix().compare(
-                             QStringLiteral("xlsx"), Qt::CaseInsensitive) == 0
-        ? QStringLiteral("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        : QStringLiteral("application/vnd.ms-excel");
+    const QString mime = QStringLiteral("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     const QString sha256 = QString::fromLatin1(
         QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex());
     qlonglong attachmentId = notice.value(1).toLongLong();
@@ -1149,9 +1009,7 @@ bool OfficeTemplateService::persistDocumentForm(QSqlDatabase database,
     }
     const QByteArray data = file.readAll();
     file.close();
-    const QString mime = QFileInfo(path).suffix().compare(QStringLiteral("xlsx"), Qt::CaseInsensitive) == 0
-        ? QStringLiteral("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        : QStringLiteral("application/vnd.ms-excel");
+    const QString mime = QStringLiteral("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 
     // 重试或修改时复用附件编号，但必须把内容、摘要和上传信息一并替换。
     qlonglong attachmentId = documentFormAttachmentId(database, formRecordId);
@@ -1247,9 +1105,7 @@ bool OfficeTemplateService::persistDocumentForm(QSqlDatabase database,
             saveErrors.append(QStringLiteral("无法创建表单归档目录：%1")
                                   .arg(QDir::toNativeSeparators(rootPath)));
         } else {
-            const QString suffix = QFileInfo(templateFileName(document.kind)).suffix();
-            const QString archiveFileName = QStringLiteral("%1.%2")
-                                                .arg(safeFilePart(document.documentNumber), suffix);
+            const QString archiveFileName = safeFilePart(document.documentNumber) + QStringLiteral(".xlsx");
             const QString archivePath = QDir(formDirectory).filePath(archiveFileName);
             QSaveFile archiveFile(archivePath);
             if (!archiveFile.open(QIODevice::WriteOnly)
@@ -1306,9 +1162,11 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "COALESCE(s.contact_name,''),COALESCE(s.contact_phone,''),COALESCE(s.sales_order_no,''),"
         "COALESCE(s.logistics_company,''),COALESCE(s.tracking_no,''),"
         "COALESCE(s.delivery_date,''),COALESCE(p.batch_no,''),COALESCE(p.product_name,''),"
-        "COALESCE(p.product_model,''),COALESCE(p.planned_quantity,0) "
+        "COALESCE(p.product_model,''),COALESCE(p.planned_quantity,0),ds.stage_key,p.id,p.product_material_id "
         "FROM business_documents d LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
-        "LEFT JOIN production_runs p ON p.id=d.production_run_id WHERE d.id=?"));
+        "LEFT JOIN production_runs p ON p.id=d.production_run_id "
+        "LEFT JOIN production_document_stages ds ON ds.document_id=CASE WHEN d.document_type='SCTL' "
+        "THEN d.source_document_id ELSE d.id END WHERE d.id=?"));
     header.addBindValue(documentId);
     if (!header.exec() || !header.next()) {
         if (errors) errors->append(QStringLiteral("读取修改后的业务单据失败：%1")
@@ -1323,11 +1181,13 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "GROUP_CONCAT(DISTINCT sn.serial_no),source.quantity,"
         "COALESCE(o.external_dispatch,0),COALESCE(o.secondary_dispatch,0),"
         "COALESCE(o.loss_marked,0),COALESCE(o.return_to_stock,0),"
-        "COALESCE(u.unit_usage,-1) "
+        "COALESCE(u.unit_usage,-1),MAX(COALESCE(ps.supplier,b.supplier)) "
         "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
         "LEFT JOIN business_document_items source ON source.id=i.source_item_id "
         "LEFT JOIN issue_line_options o ON o.document_item_id=i.id "
         "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
+        "LEFT JOIN batches b ON b.material_id=i.material_id AND b.batch_no=i.batch_no "
+        "LEFT JOIN purchase_item_suppliers ps ON ps.document_item_id=i.id "
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id "
         "LEFT JOIN inventory_ledger_serials x ON x.ledger_id=l.id "
         "LEFT JOIN serial_numbers sn ON sn.id=x.serial_id WHERE i.document_id=? "
@@ -1348,6 +1208,7 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         line.quantity = lines.value(5).toDouble();
         line.batchNo = lines.value(6).toString();
         line.notes = lines.value(7).toString();
+        line.supplier = lines.value(15).toString();
         line.serialNumbers = lines.value(8).toString().replace(QLatin1Char(','), QStringLiteral("、"));
         const double specifiedUnitUsage = lines.value(14).toDouble();
         if (specifiedUnitUsage >= 0.0) line.unitUsage = specifiedUnitUsage;
@@ -1482,6 +1343,7 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
             document.kind = kind;
         }
         const auto originalFields = document.fields;
+        const auto originalLines = document.lines;
         const QString originalFormNumber = document.documentNumber;
         const QDate originalFormDate = document.documentDate;
         document.kind = kind;
@@ -1503,8 +1365,20 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         document.fields.insert(QStringLiteral("logisticsCompany"), header.value(12).toString());
         document.fields.insert(QStringLiteral("trackingNumber"), header.value(13).toString());
         const QString productionBatch = header.value(15).toString();
-        const QString productName = header.value(16).toString();
-        const QString productModel = header.value(17).toString();
+        QString productName = header.value(16).toString();
+        QString productModel = header.value(17).toString();
+        double stagePlannedQuantity = header.value(18).toDouble();
+        if (!header.value(19).toString().isEmpty()) {
+            ProductionTask task; QString error;
+            if (!ProductionTask::load(database, header.value(20).toLongLong(), header.value(21).toLongLong(), task, &error)) {
+                if (errors) errors->append(error);
+                return false;
+            }
+            if (const auto *stage = task.stage(header.value(19).toString())) {
+                productName = stage->name; productModel = stage->model;
+                stagePlannedQuantity *= stage->perMachine;
+            }
+        }
         if (!productionBatch.trimmed().isEmpty())
             document.fields.insert(QStringLiteral("productionBatch"), productionBatch);
         else
@@ -1522,8 +1396,8 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
                                    originalFields.value(QStringLiteral("productModel")));
         document.fields.insert(
             QStringLiteral("plannedQuantity"),
-            header.value(18).toDouble() > 0.0
-                ? QString::number(header.value(18).toDouble(), 'g', 12)
+            stagePlannedQuantity > 0.0
+                ? QString::number(stagePlannedQuantity, 'g', 12)
                 : originalFields.value(QStringLiteral("plannedQuantity")));
         if (kind == OfficeFormKind::ProductionIssue) {
             document.fields.insert(QStringLiteral("issueType"), documentType);
@@ -1563,6 +1437,23 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         }
         document.lines = materialRows;
         for (OfficeTemplateLine &line : document.lines) {
+            if (kind == OfficeFormKind::RawMaterialInbound) {
+                const QString supplier = document.fields.value(QStringLiteral("supplier"));
+                // Keep the recorded per-line supplier when unrelated document fields change.
+                // Changing the header supplier deliberately replaces that default for all lines.
+                QString recordedSupplier;
+                if (supplier == originalFields.value(QStringLiteral("supplier"))) {
+                    for (const OfficeTemplateLine &original : originalLines) {
+                        if (original.materialCode == line.materialCode
+                            && original.batchNo == line.batchNo) {
+                            recordedSupplier = original.supplier;
+                            break;
+                        }
+                    }
+                }
+                if (!recordedSupplier.trimmed().isEmpty()) line.supplier = recordedSupplier;
+                else if (!supplier.trimmed().isEmpty()) line.supplier = supplier;
+            }
             if (kind == OfficeFormKind::DeliveryConfirmation)
                 line.orderNumber = header.value(11).toString();
             if (kind == OfficeFormKind::Inspection) {

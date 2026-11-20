@@ -5,8 +5,7 @@
 /outputs/
 /.codex-work/
 /$log
-!/dist/IceBeautyWms-Windows-x64.zip
-!/dist/IceBeautyWms-Setup.exe
+!/dist/WMS仓库系统.zip
 /.qt/
 /.vs/
 /.vscode/

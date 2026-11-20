@@ -21,11 +21,17 @@ RUNTIME = ROOT / "outputs" / "lan-dev"
 BUILD = ROOT / os.environ.get("WMS_TEST_BUILD", "build-lan-business")
 PG_BIN = RUNTIME / "postgres" / "pgsql" / "bin"
 QT_BIN = Path(os.environ.get("WMS_TEST_QT_BIN", "D:/Qt/6.5.3/mingw_64/bin"))
-CREDS = json.loads((RUNTIME / "credentials.json").read_text(encoding="utf-8-sig"))
+FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+# Use the host launcher's resolver, including its saved path for other Windows accounts.
+DATA_ROOT = Path(subprocess.check_output(
+    ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); & './scripts/get-lan-data-root.ps1'"],
+    cwd=ROOT, encoding="utf-8-sig", creationflags=FLAGS
+).strip())
+CREDS = json.loads((DATA_ROOT / "credentials.json").read_text(encoding="utf-8-sig"))
 ENV = os.environ.copy()
 ENV["PATH"] = os.pathsep.join([str(PG_BIN), str(QT_BIN), ENV["PATH"]])
 ENV["QT_QPA_PLATFORM"] = "offscreen"
-FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 CHECKS = 0
 

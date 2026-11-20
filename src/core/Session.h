@@ -10,6 +10,7 @@ struct Session
     QString displayName;
     QString roleCode;
     QSet<QString> permissions;
+    bool testPasswordDefaults = false;
 
     bool isAdministrator() const { return roleCode == QStringLiteral("ADMIN"); }
     bool hasPermission(const QString &code) const

@@ -247,8 +247,35 @@ function Fill-Inspection($sheet, $data) {
 
 function Fill-Inbound($sheet, $data) {
     $required = @($data.lines).Count
-    $extra = Expand-Table $sheet 5 19 $required 9 $false $false
-    Clear-TableRows $sheet 5 ($required + [Math]::Max(0, 19 - $required)) 9
+    $rawInbound = (TextValue $data.kind) -eq 'rawInbound'
+    $columnCount = $(if ($rawInbound) { 10 } else { 9 })
+    if ($rawInbound) {
+        # Keep the supplied form's order: quantity, supplier, notes. Older deployed
+        # templates have nine columns; insert only when the supplier column is absent.
+        if ((TextValue $sheet.Cells.Item(4, 9).Value2).Trim() -ne '供应商') {
+            $null = $sheet.Columns.Item(9).Insert()
+            $null = $sheet.Range('J4:J23').Copy()
+            $null = $sheet.Range('I4:I23').PasteSpecial(-4122)
+            try { $excel.CutCopyMode = $false } catch {}
+        }
+        Set-Cell $sheet 4 9 '供应商'
+        $sheet.Columns.Item(9).ColumnWidth = 22
+        $sheet.Range('I5:I23').WrapText = $true
+        $sheet.Range('I5:I23').HorizontalAlignment = -4131
+        # The extra column must remain on the same printed page as its material.
+        $sheet.PageSetup.Orientation = 2
+        $sheet.PageSetup.CenterVertically = $false
+        $sheet.PageSetup.Zoom = $false
+        $sheet.PageSetup.FitToPagesWide = 1
+        $sheet.PageSetup.FitToPagesTall = $false
+        $sheet.PageSetup.PrintTitleRows = '$1:$4'
+        $sheet.PageSetup.TopMargin = 42
+        $sheet.PageSetup.BottomMargin = 42
+        $sheet.PageSetup.HeaderMargin = 12
+        $sheet.PageSetup.FooterMargin = 12
+    }
+    $extra = Expand-Table $sheet 5 19 $required $columnCount $false $false
+    Clear-TableRows $sheet 5 ($required + [Math]::Max(0, 19 - $required)) $columnCount
     $date = [datetime]::ParseExact((TextValue $data.documentDate), 'yyyy-MM-dd', $null)
     if (Is-MeiJingLing $data) {
         # 美鲸灵两种入库单均只在表内显示月份；系统单号保留在文件名和数据库中。
@@ -278,13 +305,35 @@ function Fill-Inbound($sheet, $data) {
         if ([string]::IsNullOrWhiteSpace($lineNotes)) {
             $lineNotes = TextValue (Get-Field $data 'notes')
         }
-        Set-Cell $sheet $row 9 $lineNotes
+        if ($rawInbound) {
+            $supplier = TextValue $line.supplier
+            if ([string]::IsNullOrWhiteSpace($supplier)) { $supplier = Get-Field $data 'supplier' }
+            Set-Cell $sheet $row 9 $supplier
+        }
+        Set-Cell $sheet $row $columnCount $lineNotes
+        if ($rawInbound) {
+            # Unmerged detail cells can auto-fit long supplier names without shrinking text.
+            $minimumHeight = $sheet.Rows.Item($row).RowHeight
+            $null = $sheet.Rows.Item($row).AutoFit()
+            if ($sheet.Rows.Item($row).RowHeight -lt $minimumHeight) {
+                $sheet.Rows.Item($row).RowHeight = $minimumHeight
+            }
+        }
     }
     Set-Cell $sheet (24 + $extra) 1 "入  库  人："
     Set-Cell $sheet (24 + $extra) 6 "日期："
     Set-Cell $sheet (25 + $extra) 1 "部门负责人："
     Set-Cell $sheet (25 + $extra) 6 "日期："
-    $sheet.PageSetup.PrintArea = '$A$1:$I$' + (25 + $extra)
+    $unusedRows = 0
+    if ($rawInbound -and $required -lt 19) {
+        # Match the compact sample: retain at least two detail rows, so a short
+        # document does not print a second page containing only blank rows/signatures.
+        $keptRows = [Math]::Max(2, $required)
+        $unusedRows = 19 - $keptRows
+        $firstUnused = 5 + $keptRows
+        $null = $sheet.Range("$firstUnused`:23").EntireRow.Delete()
+    }
+    $sheet.PageSetup.PrintArea = $(if ($rawInbound) { '$A$1:$J$' } else { '$A$1:$I$' }) + (25 + $extra - $unusedRows)
 }
 
 function Fill-ProductionIssue($sheet, $data) {

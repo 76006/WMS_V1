@@ -1,6 +1,7 @@
 #pragma once
 
 #include "services/InventoryService.h"
+#include "services/ProductionTask.h"
 
 #include <QDate>
 #include <QHash>
@@ -34,6 +35,7 @@ public:
     bool setInboundMaterials(const QList<StockMovementRequest> &materials,
                              QString *errorMessage = nullptr);
     void addToolbarAction(QWidget *action);
+    bool setProductionRemaining(const QList<ProductionDemand> &materials, QString *errorMessage);
 
 public slots:
     void refreshReferenceData();

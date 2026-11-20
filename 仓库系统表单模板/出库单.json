@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "sheetName": "Sheet1",
+  "layoutColumns": 8,
+  "header": [
+    {"height": 36.0, "cells": [{"from": 1, "to": 8, "style": "title", "text": " 出 库 单"}]},
+    {"height": 21.75, "cells": [{"from": 6, "to": 8, "style": "label", "text": "　单号：{documentNumber}"}]},
+    {
+      "height": 30.0,
+      "cells": [
+        {"from": 1, "to": 2, "style": "label2", "text": "发往单位：{outboundCompany}"},
+        {"from": 3, "to": 5, "style": "label3", "text": "　收货人：{fields.customerContact}"},
+        {"from": 6, "to": 8, "style": "label4", "text": "出库日期：{documentDate}"}
+      ]
+    }
+  ],
+  "details": {
+    "minRows": 10,
+    "headerHeight": 30.0,
+    "rowHeight": 30.0,
+    "columns": [
+      {"label": "序号", "field": "index", "width": 4.332},
+      {"label": "产品名称", "field": "line.name", "width": 23.5},
+      {"label": "规格型号", "field": "line.specification", "width": 13.082},
+      {"label": "单位", "field": "line.unit", "width": 6.75},
+      {"label": "数量", "field": "line.quantity", "width": 8.832, "style": "number"},
+      {"label": "生产批号", "field": "line.batchNo", "width": 9.832},
+      {"label": "序列号", "field": "line.serialNumbers", "width": 11.25},
+      {"label": "备注", "field": "line.notes", "width": 10.082, "fallback": "fields.notes"}
+    ]
+  },
+  "footer": [
+    {"height": 42.75, "cells": [{"from": 1, "to": 4, "style": "detail", "text": "出库人："}, {"from": 5, "to": 8, "style": "detail", "text": "日期："}]},
+    {"height": 42.75, "cells": [{"from": 1, "to": 4, "style": "detail", "text": "复核/检查人："}, {"from": 5, "to": 8, "style": "detail", "text": "日期："}]},
+    {"height": 42.75, "cells": [{"from": 1, "to": 4, "style": "detail", "text": "质量负责人："}, {"from": 5, "to": 8, "style": "detail", "text": "日期："}]},
+    {
+      "height": 15.0,
+      "cells": [{"from": 1, "to": 4, "style": "detail", "text": "总经理/管理者代表：", "rows": 3}, {"from": 5, "to": 8, "style": "detail", "text": "日期：", "rows": 3}]
+    },
+    {"height": 15.0, "cells": []},
+    {"height": 15.0, "cells": []}
+  ],
+  "styles": {
+    "default": {"font": "宋体", "size": 12.0},
+    "tableHeader": {"size": 11.0, "align": "center", "border": "all", "wrap": true},
+    "detail": {"size": 11.0, "align": "left", "border": "all", "wrap": true},
+    "number": {"size": 11.0, "align": "right", "border": "all", "wrap": true},
+    "title": {"size": 20.0, "bold": true, "align": "center", "wrap": true},
+    "label": {"size": 11.0, "align": "right", "wrap": true},
+    "label2": {"size": 11.0, "align": "left", "border": "left top bottom", "wrap": true},
+    "label3": {"size": 11.0, "align": "left", "border": "top bottom", "wrap": true},
+    "label4": {"size": 11.0, "align": "left", "border": "right top bottom", "wrap": true}
+  },
+  "print": {
+    "orientation": "portrait",
+    "paperSize": 9,
+    "fitToWidth": 1,
+    "repeatHeader": false,
+    "centerHorizontally": true,
+    "centerVertically": false,
+    "margins": {"left": 0.4722, "right": 0.3542, "top": 0.7479, "bottom": 0.7479, "header": 0.3146, "footer": 0.3146},
+    "header": "&L上海冰美肌美容科技有限公司&R编号：BMJ-SMSP-19",
+    "footer": "&L版本所有，_x000a_未经允许不得修改及复制！&R版本： A0"
+  }
+}

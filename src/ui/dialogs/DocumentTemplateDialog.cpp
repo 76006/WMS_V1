@@ -119,7 +119,7 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     root->addWidget(heading);
 
     auto *description = new QLabel(
-        QStringLiteral("以下内容会写入“%1”中的原始 Excel 版式。正式提交后同时保存到数据库附件和“我的文档\\%2”分类文件夹。所有签字、批准和签署日期位置保持空白，打印后手写。")
+        QStringLiteral("以下内容按“%1”目录中的 JSON 模板生成 Excel 表单。正式提交后同时保存到数据库附件和“我的文档\\%2”分类文件夹。所有签字、批准和签署日期位置保持空白，打印后手写。")
             .arg(SystemProfile::templateDirectoryName(),
                  SystemProfile::archiveDirectoryName()),
         this);
@@ -147,6 +147,8 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
     addEditableFields();
 
     auto *lineTitle = new QLabel(QStringLiteral("模板明细（来源于当前业务页面）"), this);
+    if (m_document.kind == OfficeFormKind::RawMaterialInbound)
+        lineTitle->setText(QStringLiteral("模板明细（双击供应商单元格可逐行填写）"));
     lineTitle->setStyleSheet(QStringLiteral("font-weight:600;"));
     root->addWidget(lineTitle);
     QStringList headers;
@@ -186,13 +188,15 @@ DocumentTemplateDialog::DocumentTemplateDialog(OfficeTemplateDocument document, 
         headers = {QStringLiteral("序号"), QStringLiteral("日期"), QStringLiteral("物料编码"),
                    QStringLiteral("批号"), QStringLiteral("物料名称"), QStringLiteral("规格型号"),
                    QStringLiteral("单位"), QStringLiteral("数量"), QStringLiteral("备注")};
+        if (m_document.kind == OfficeFormKind::RawMaterialInbound)
+            headers.insert(8, QStringLiteral("供应商"));
         break;
     }
     m_lineTable = new QTableWidget(0, headers.size(), this);
     m_lineTable->setHorizontalHeaderLabels(headers);
     const bool editableIssueLines = m_document.kind == OfficeFormKind::ProductionIssue
         && m_document.fields.value(QStringLiteral("originalIssueNumber")).trimmed().isEmpty();
-    if (editableIssueLines) {
+    if (editableIssueLines || m_document.kind == OfficeFormKind::RawMaterialInbound) {
         m_lineTable->setEditTriggers(QAbstractItemView::DoubleClicked
                                      | QAbstractItemView::SelectedClicked
                                      | QAbstractItemView::EditKeyPressed);
@@ -298,11 +302,16 @@ void DocumentTemplateDialog::populateLines()
                       m_document.documentDate.toString(QStringLiteral("yyyy-MM-dd")),
                       line.materialCode, line.batchNo, line.materialName, line.specification,
                       line.unit, quantityText(line.quantity), line.notes};
+            if (m_document.kind == OfficeFormKind::RawMaterialInbound)
+                values.insert(8, line.supplier.trimmed().isEmpty()
+                                    ? m_document.fields.value(QStringLiteral("supplier"))
+                                    : line.supplier);
             break;
         }
         for (int column = 0; column < values.size(); ++column) {
             auto *item = new QTableWidgetItem(values.at(column));
-            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+            if (m_document.kind != OfficeFormKind::RawMaterialInbound || column != 8)
+                item->setFlags(item->flags() & ~Qt::ItemIsEditable);
             m_lineTable->setItem(row, column, item);
         }
     }
@@ -319,6 +328,13 @@ OfficeTemplateDocument DocumentTemplateDialog::document() const
     if (result.kind == OfficeFormKind::DeliveryConfirmation) {
         for (OfficeTemplateLine &line : result.lines)
             line.orderNumber = result.fields.value(QStringLiteral("salesOrderNumber"));
+    }
+    if (result.kind == OfficeFormKind::RawMaterialInbound) {
+        for (int row = 0; row < result.lines.size(); ++row) {
+            result.lines[row].supplier = m_lineTable->item(row, 8)->text().trimmed();
+            if (result.lines[row].supplier.isEmpty())
+                result.lines[row].supplier = result.fields.value(QStringLiteral("supplier"));
+        }
     }
     if (result.kind == OfficeFormKind::Inspection) {
         const QString orderNumber = result.fields.value(QStringLiteral("purchaseOrderNumber"));

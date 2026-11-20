@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "sheetName": "领料单",
+  "layoutColumns": 16,
+  "header": [
+    {"height": 27.0, "cells": [{"from": 1, "to": 16, "style": "title", "text": "领 料 单"}]},
+    {
+      "height": 21.0,
+      "cells": [
+        {"from": 1, "to": 2, "style": "label", "text": "领用部门"},
+        {"from": 3, "to": 3, "style": "label", "text": "{fields.receivingDepartment}"},
+        {"from": 4, "to": 5, "style": "tableHeader", "text": "领料单号"},
+        {"from": 6, "to": 9, "style": "tableHeader", "text": "{documentNumber}"},
+        {"from": 10, "to": 13, "style": "tableHeader", "text": "领用日期"},
+        {"from": 14, "to": 16, "style": "label2", "text": "{documentDate}"}
+      ]
+    },
+    {
+      "height": 21.0,
+      "cells": [
+        {"from": 1, "to": 2, "style": "label", "text": "产品名称"},
+        {"from": 3, "to": 3, "style": "label", "text": "{fields.productName}"},
+        {"from": 4, "to": 5, "style": "tableHeader", "text": "生产批号"},
+        {"from": 6, "to": 9, "style": "tableHeader", "text": "{fields.productionBatch}"},
+        {"from": 10, "to": 13, "style": "tableHeader", "text": "计划生产数量"},
+        {"from": 14, "to": 16, "style": "tableHeader", "text": "{fields.plannedQuantity}"}
+      ]
+    },
+    {
+      "height": 21.0,
+      "cells": [{"from": 1, "to": 2, "style": "label", "text": "产品型号"}, {"from": 3, "to": 16, "style": "tableHeader", "text": "{fields.productModel}"}]
+    }
+  ],
+  "details": {
+    "minRows": 40,
+    "headerHeight": 27.65,
+    "rowHeight": 13.5,
+    "columns": [
+      {"label": "编号", "field": "index", "width": 3.906},
+      {"label": "物料编码", "field": "line.code", "width": 12.18},
+      {"label": "名称", "field": "line.name", "width": 15.453},
+      {"label": "单台用量", "field": "line.unitUsage", "width": 5.0, "style": "number"},
+      {"label": "批号", "field": "line.batchNo", "width": 25.0, "span": 5},
+      {"label": "外发", "field": "line.externalQuantity", "width": 5.453, "style": "number", "blankZeroUnless": "fields.originalIssueNumber"},
+      {"label": "二次外发", "field": "line.reworkQuantity", "width": 5.453, "style": "number", "blankZeroUnless": "fields.originalIssueNumber"},
+      {"label": "损耗", "field": "line.lossQuantity", "width": 5.453, "style": "number", "blankZeroUnless": "fields.originalIssueNumber"},
+      {"label": "退库", "field": "line.returnQuantity", "width": 5.453, "style": "number", "blankZeroUnless": "fields.originalIssueNumber"},
+      {"label": "备注", "field": "line.notes", "width": 17.176, "span": 3, "fallback": "fields.notes"}
+    ]
+  },
+  "footer": [
+    {"height": 7.5, "cells": []},
+    {
+      "height": 21.0,
+      "cells": [
+        {"from": 1, "to": 2, "style": "tableHeader", "text": "首次领用人"},
+        {"from": 3, "to": 6, "style": "signature"},
+        {"from": 7, "to": 10, "style": "tableHeader", "text": "批准"},
+        {"from": 11, "to": 16, "style": "signature2"}
+      ]
+    },
+    {
+      "height": 21.0,
+      "cells": [
+        {"from": 1, "to": 2, "style": "tableHeader", "text": "二次领用"},
+        {"from": 3, "to": 6, "style": "signature"},
+        {"from": 7, "to": 10, "style": "tableHeader", "text": "批准"},
+        {"from": 11, "to": 16, "style": "signature"}
+      ]
+    },
+    {
+      "height": 21.0,
+      "cells": [
+        {"from": 1, "to": 2, "style": "tableHeader", "text": "退料人"},
+        {"from": 3, "to": 6, "style": "signature"},
+        {"from": 7, "to": 10, "style": "tableHeader", "text": "批准"},
+        {"from": 11, "to": 16, "style": "signature2"}
+      ]
+    }
+  ],
+  "styles": {
+    "default": {"font": "宋体", "size": 11.0},
+    "tableHeader": {"size": 11.0, "align": "center", "border": "all", "wrap": true},
+    "detail": {"size": 11.0, "align": "left", "border": "all", "wrap": true},
+    "number": {"size": 11.0, "align": "right", "border": "all", "wrap": true},
+    "title": {"size": 20.0, "bold": true, "align": "center", "wrap": true},
+    "label": {"size": 11.0, "align": "center", "border": "left top bottom", "wrap": true},
+    "label2": {"size": 12.0, "align": "center", "border": "all", "wrap": true},
+    "signature": {"size": 11.0, "align": "center", "border": "all"},
+    "signature2": {"size": 11.0, "align": "center", "border": "right top bottom"}
+  },
+  "print": {
+    "orientation": "portrait",
+    "paperSize": 9,
+    "fitToWidth": 1,
+    "repeatHeader": false,
+    "centerHorizontally": false,
+    "centerVertically": false,
+    "margins": {"left": 0.275, "right": 0.1569, "top": 0.6299, "bottom": 0.4326, "header": 0.3931, "footer": 0.1965},
+    "header": "&L上海冰美肌美容科技有限公司&R编号：BMJ-SMSP-17",
+    "footer": "&L版本所有，_x000a_未经允许不得修改及复制！&C&P/&N&R版本：A0"
+  }
+}

@@ -1,6 +1,7 @@
 #include "network/RemoteBackend.h"
 #include "network/BusinessWire.h"
 #include "services/InventoryService.h"
+#include "services/ProductionTask.h"
 
 #include <QDateTime>
 #include <QHash>
@@ -684,6 +685,14 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         return false;
     };
 
+    QMap<qlonglong, QString> originalSuppliers;
+    QSqlQuery purchaseSuppliers(m_database);
+    purchaseSuppliers.prepare(QStringLiteral("SELECT s.document_item_id,s.supplier FROM purchase_item_suppliers s "
+        "JOIN business_document_items i ON i.id=s.document_item_id WHERE i.document_id=?"));
+    purchaseSuppliers.addBindValue(document.documentId);
+    if (!purchaseSuppliers.exec()) return fail(errorMessage, purchaseSuppliers.lastError().text());
+    while (purchaseSuppliers.next()) originalSuppliers.insert(purchaseSuppliers.value(0).toLongLong(), purchaseSuppliers.value(1).toString());
+
     QSqlQuery exists(m_database);
     exists.prepare(QStringLiteral(
         "SELECT status,document_type FROM business_documents WHERE id=?"));
@@ -1074,6 +1083,14 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
                                           .arg(index + 1).arg(insertItem.lastError().text()));
         const qlonglong itemId = line.itemId > 0
             ? line.itemId : insertItem.lastInsertId().toLongLong();
+        if (document.documentType == QStringLiteral("CGRK")) {
+            QString supplier = document.supplier;
+            const auto original = originalItems.value(line.itemId);
+            if (document.supplier.trimmed() == before.supplier.trimmed()
+                && original.materialId == line.materialId && original.batchNo == line.batchNo
+                && originalSuppliers.contains(line.itemId)) supplier = originalSuppliers.value(line.itemId);
+            if (!savePurchaseSupplier(itemId, line.materialId, supplier, errorMessage)) { rollback(); return false; }
+        }
         StockMovementRequest lineOptions;
         lineOptions.externalDispatch = line.externalDispatch;
         lineOptions.secondaryDispatch = line.secondaryDispatch;
@@ -1178,7 +1195,22 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
                 "CASE WHEN excluded.supplier<>'' THEN excluded.supplier ELSE batches.supplier END"));
             batch.addBindValue(line.materialId);
             batch.addBindValue(normalized(line.batchNo));
-            batch.addBindValue(normalized(document.supplier));
+            // A comment/quantity edit must not replace different per-line suppliers
+            // with the document's common default. Only an explicit supplier change
+            // updates existing batches; a newly introduced batch still gets a default.
+            QString batchSupplier = document.supplier;
+            if (document.supplier.trimmed() == before.supplier.trimmed()) {
+                QSqlQuery existingBatch(m_database);
+                existingBatch.prepare(QStringLiteral(
+                    "SELECT supplier FROM batches WHERE material_id=? AND batch_no=?"));
+                existingBatch.addBindValue(line.materialId);
+                existingBatch.addBindValue(normalized(line.batchNo));
+                if (!existingBatch.exec())
+                    return fail(errorMessage, QStringLiteral("读取批次供应商失败：%1")
+                                                  .arg(existingBatch.lastError().text()));
+                if (existingBatch.next()) batchSupplier = existingBatch.value(0).toString();
+            }
+            batch.addBindValue(normalized(batchSupplier));
             batch.addBindValue(document.documentDate.toString(Qt::ISODate));
             if (!batch.exec())
                 return fail(errorMessage, QStringLiteral("更新批次资料失败：%1")
@@ -1272,6 +1304,31 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
                                               .arg(ledgerTimeOrder(QStringLiteral("l.occurred_at"))))) {
         return fail(errorMessage, QStringLiteral("重算批次首次入库日期失败：%1")
                                       .arg(refreshBatchDates.lastError().text()));
+    }
+    // Editing a reversal also changes the effective receipts of its source document.
+    if (!refreshPurchaseSuppliers(errorMessage)) { rollback(); return false; }
+    QSqlQuery stageLink(m_database);
+    stageLink.prepare(QStringLiteral("SELECT s.production_run_id,s.stage_key,p.product_material_id,p.planned_quantity "
+        "FROM production_document_stages s JOIN production_runs p ON p.id=s.production_run_id WHERE s.document_id=?"));
+    stageLink.addBindValue(document.documentId);
+    if (!stageLink.exec()) return fail(errorMessage, stageLink.lastError().text());
+    if (stageLink.next()) {
+        const auto runId = stageLink.value(0).toLongLong();
+        const auto key = stageLink.value(1).toString();
+        if (document.productionRunId != runId || document.documentType != before.documentType
+            || document.stockDirection != before.stockDirection)
+            return fail(errorMessage, QStringLiteral("此单关联生产阶段，不能改为其他任务或业务类型；可以修改本阶段的明细和数量。"));
+        ProductionTask task;
+        if (!ProductionTask::load(m_database, runId, stageLink.value(2).toLongLong(), task, errorMessage)) { rollback(); return false; }
+        QList<ProductionDemand> demands;
+        if (!task.demand(m_database, runId, key, stageLink.value(3).toDouble(), demands, errorMessage)) { rollback(); return false; }
+        for (const auto &line : document.lines) {
+            bool allowed = document.documentType == QStringLiteral("CPRK") && line.materialId == task.stage(key)->materialId;
+            if (document.documentType == QStringLiteral("SCLL")) for (const auto &d : demands) if (d.materialId == line.materialId) allowed = true;
+            if (!allowed) return fail(errorMessage, QStringLiteral("修改后的物料不属于该生产阶段。"));
+        }
+        if (document.documentType == QStringLiteral("SCLL")) for (const auto &d : demands)
+            if (d.issued > d.required + 0.0000001) return fail(errorMessage, QStringLiteral("修改后该阶段累计领用超过计划用量。"));
     }
     if (before.productionRunId > 0
         && !refreshProductionRunStatus(before.productionRunId, errorMessage)) {

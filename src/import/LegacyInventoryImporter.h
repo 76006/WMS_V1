@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include <QList>
 #include <QSqlDatabase>
 #include <QString>
@@ -130,12 +131,17 @@ public:
     static bool parseFile(const QString &filePath,
                           BomImportResult *result,
                           QString *errorMessage = nullptr);
+    static bool replaceHierarchyInTransaction(QSqlDatabase database, qlonglong productMaterialId,
+                                              const BomImportResult &result,
+                                              const QHash<QString, qlonglong> &materialIds,
+                                              QString *errorMessage);
     static bool importRows(QSqlDatabase database,
                            qlonglong operatorId,
                            const BomImportResult &result,
                            int *createdMaterialCount,
                            int *updatedMaterialCount,
-                           QString *errorMessage = nullptr);
+                           QString *errorMessage = nullptr,
+                           bool processBom = false);
 };
 
 struct SpreadsheetPreviewSheet

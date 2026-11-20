@@ -1,3 +1,4 @@
+#include "services/ProcessBom.h"
 #include "import/LegacyInventoryImporter.h"
 
 #include <QDir>
@@ -1305,12 +1306,64 @@ bool BomExcelImporter::parseFile(const QString &filePath,
     return true;
 }
 
+bool BomExcelImporter::replaceHierarchyInTransaction(QSqlDatabase database, qlonglong productMaterialId,
+                                                     const BomImportResult &result,
+                                                     const QHash<QString, qlonglong> &materialIds,
+                                                     QString *errorMessage)
+{
+    QSqlQuery removeOld(database);
+    removeOld.prepare(QStringLiteral(
+        "DELETE FROM material_bom_items WHERE product_material_id=?"));
+    removeOld.addBindValue(productMaterialId);
+    if (!removeOld.exec()) {
+        setImportError(errorMessage,
+                       QStringLiteral("清理原BOM失败：%1").arg(removeOld.lastError().text()));
+        return false;
+    }
+
+    QHash<int, qlonglong> itemIds;
+    for (int index = 1; index < result.rows.size(); ++index) {
+        const BomImportRow &row = result.rows.at(index);
+        QVariant parentItemId;
+        if (row.parentIndex > 0) {
+            if (!itemIds.contains(row.parentIndex)) {
+                setImportError(errorMessage,
+                               QStringLiteral("第%1行的上级BOM节点无效。")
+                                   .arg(row.sourceRow));
+                return false;
+            }
+            parentItemId = itemIds.value(row.parentIndex);
+        }
+        QSqlQuery insert(database);
+        insert.prepare(QStringLiteral(
+            "INSERT INTO material_bom_items(product_material_id,parent_item_id,"
+            "component_material_id,quantity,sort_order,source_sheet,source_row) "
+            "VALUES(?,?,?,?,?,?,?)"));
+        insert.addBindValue(productMaterialId);
+        insert.addBindValue(parentItemId);
+        insert.addBindValue(materialIds.value(row.materialCode));
+        insert.addBindValue(row.quantity);
+        insert.addBindValue(index);
+        insert.addBindValue(result.sourceSheet);
+        insert.addBindValue(row.sourceRow);
+        if (!insert.exec()) {
+            setImportError(errorMessage,
+                           QStringLiteral("导入第%1行BOM关系失败：%2")
+                               .arg(row.sourceRow).arg(insert.lastError().text()));
+            return false;
+        }
+        itemIds.insert(index, insert.lastInsertId().toLongLong());
+    }
+    return true;
+}
+
 bool BomExcelImporter::importRows(QSqlDatabase database,
                                   qlonglong operatorId,
                                   const BomImportResult &result,
                                   int *createdMaterialCount,
                                   int *updatedMaterialCount,
-                                  QString *errorMessage)
+                                  QString *errorMessage,
+                                  bool processBom)
 {
     if (!database.isOpen() || operatorId <= 0 || result.rows.size() < 2) {
         setImportError(errorMessage, QStringLiteral("数据库、当前用户或BOM数据无效。"));
@@ -1379,58 +1432,44 @@ bool BomExcelImporter::importRows(QSqlDatabase database,
     }
 
     const qlonglong productMaterialId = materialIds.value(result.productCode);
-    QSqlQuery removeOld(database);
-    removeOld.prepare(QStringLiteral(
-        "DELETE FROM material_bom_items WHERE product_material_id=?"));
-    removeOld.addBindValue(productMaterialId);
-    if (!removeOld.exec()) {
-        setImportError(errorMessage,
-                       QStringLiteral("清理原BOM失败：%1").arg(removeOld.lastError().text()));
-        database.rollback();
-        return false;
-    }
-
-    QHash<int, qlonglong> itemIds;
-    for (int index = 1; index < result.rows.size(); ++index) {
-        const BomImportRow &row = result.rows.at(index);
-        QVariant parentItemId;
-        if (row.parentIndex > 0) {
-            if (!itemIds.contains(row.parentIndex)) {
-                setImportError(errorMessage,
-                               QStringLiteral("第%1行的上级BOM节点无效。")
-                                   .arg(row.sourceRow));
+    if (processBom) {
+        // The worksheet is in parent-before-child order. Assemble subtrees from the bottom up.
+        QList<ProcessBomItem> nodes(result.rows.size());
+        for (int i = result.rows.size() - 1; i > 0; --i) {
+            const auto &row = result.rows.at(i);
+            if (row.parentIndex < 0 || row.parentIndex >= i) {
+                setImportError(errorMessage, QStringLiteral("第 %1 行的上级节点无效。").arg(row.sourceRow));
                 database.rollback();
                 return false;
             }
-            parentItemId = itemIds.value(row.parentIndex);
+            auto &node = nodes[i];
+            node.code = row.materialCode;
+            node.name = row.materialName;
+            node.quantity = row.quantity;
+            nodes[row.parentIndex].items.prepend(std::move(node));
         }
-        QSqlQuery insert(database);
-        insert.prepare(QStringLiteral(
-            "INSERT INTO material_bom_items(product_material_id,parent_item_id,"
-            "component_material_id,quantity,sort_order,source_sheet,source_row) "
-            "VALUES(?,?,?,?,?,?,?)"));
-        insert.addBindValue(productMaterialId);
-        insert.addBindValue(parentItemId);
-        insert.addBindValue(materialIds.value(row.materialCode));
-        insert.addBindValue(row.quantity);
-        insert.addBindValue(index);
-        insert.addBindValue(result.sourceSheet);
-        insert.addBindValue(row.sourceRow);
-        if (!insert.exec()) {
-            setImportError(errorMessage,
-                           QStringLiteral("导入第%1行BOM关系失败：%2")
-                               .arg(row.sourceRow).arg(insert.lastError().text()));
+        ProcessBom bom;
+        bom.productCode = result.productCode;
+        bom.groups = std::move(nodes[0].items);
+        QString error;
+        if (!bom.store(database, productMaterialId, nullptr, error)) {
+            setImportError(errorMessage, error);
             database.rollback();
             return false;
         }
-        itemIds.insert(index, insert.lastInsertId().toLongLong());
+    } else {
+        if (!replaceHierarchyInTransaction(database, productMaterialId, result, materialIds, errorMessage)) {
+            database.rollback();
+            return false;
+        }
     }
 
     QSqlQuery audit(database);
     audit.prepare(QStringLiteral(
         "INSERT INTO audit_logs(user_id,action,entity_type,entity_id,detail) "
-        "VALUES(?,'MATERIAL_BOM_IMPORT','material',?,?)"));
+        "VALUES(?,?,'material',?,?)"));
     audit.addBindValue(operatorId);
+    audit.addBindValue(processBom ? QStringLiteral("PROCESS_BOM_IMPORT") : QStringLiteral("MATERIAL_BOM_IMPORT"));
     audit.addBindValue(productMaterialId);
     audit.addBindValue(QStringLiteral("%1：导入%2个BOM节点")
                            .arg(result.productCode).arg(result.rows.size() - 1));

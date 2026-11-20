@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QList>
+#include <QMap>
 #include <QString>
 #include <QVariant>
 
@@ -13,6 +14,9 @@ public:
         QList<QList<QVariant>> rows;
     };
 
+    static bool writeForm(const QString &filePath, const QString &sheetName,
+                          const QByteArray &worksheet, const QByteArray &styles,
+                          const QMap<QString, QString> &printNames, QString *errorMessage);
     static bool writeSingleSheet(const QString &filePath,
                                  const QString &sheetName,
                                  const QStringList &headers,

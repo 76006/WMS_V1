@@ -191,7 +191,7 @@ void MainWindow::buildUi()
     add(QStringLiteral("发货查询"), m_shipmentQueryPage, m_session.canViewInventory());
     add(QStringLiteral("领料管理"), m_productionIssuePage, m_session.canPostProduction());
     add(QStringLiteral("生产退料"), m_productionReturnPage, m_session.canPostProduction());
-    add(QStringLiteral("成品入库"), m_finishedGoodsInPage, m_session.canPostProduction());
+    add(QStringLiteral("成品/半成品入库"), m_finishedGoodsInPage, m_session.canPostProduction());
     add(QStringLiteral("库存查询"), m_inventoryPage, m_session.canViewInventory());
     add(QStringLiteral("出入库统计"), m_inventoryReportPage, m_session.canViewInventory());
     add(QStringLiteral("库存流水"), m_ledgerPage, m_session.canViewInventory());

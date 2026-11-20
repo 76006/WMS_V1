@@ -198,6 +198,15 @@ void UserManagementPage::refresh()
     updateActions();
 }
 
+QString UserManagementPage::promptPassword(const QString &title, const QString &field, bool *accepted)
+{
+    const QString hint = m_session.testPasswordDefaults
+        ? QStringLiteral("%1（测试默认 123456，可自定义至少 8 位的密码）").arg(field)
+        : QStringLiteral("%1（至少8位）").arg(field);
+    const QString initial = m_session.testPasswordDefaults ? QStringLiteral("123456") : QString();
+    return QInputDialog::getText(this, title, hint, QLineEdit::Password, initial, accepted);
+}
+
 void UserManagementPage::addUser()
 {
     bool ok = false;
@@ -212,8 +221,7 @@ void UserManagementPage::addUser()
     const QString role = QInputDialog::getItem(this, QStringLiteral("新增用户"),
                                                 QStringLiteral("角色"), roles, 1, false, &ok);
     if (!ok) return;
-    const QString password = QInputDialog::getText(this, QStringLiteral("新增用户"),
-        QStringLiteral("初始密码（至少8位）"), QLineEdit::Password, {}, &ok);
+    const QString password = promptPassword(QStringLiteral("新增用户"), QStringLiteral("初始密码"), &ok);
     if (!ok) return;
     UserService service(m_database, m_session.userId);
     QString error;
@@ -256,8 +264,7 @@ void UserManagementPage::editUser()
 void UserManagementPage::resetPassword()
 {
     bool ok = false;
-    const QString password = QInputDialog::getText(this, QStringLiteral("重置密码"),
-        QStringLiteral("新密码（至少8位）"), QLineEdit::Password, {}, &ok);
+    const QString password = promptPassword(QStringLiteral("重置密码"), QStringLiteral("新密码"), &ok);
     if (!ok) return;
     UserService service(m_database, m_session.userId);
     QString error;

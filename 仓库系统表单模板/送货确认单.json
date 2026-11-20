@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "sheetName": "送货确认单",
+  "layoutColumns": 9,
+  "header": [
+    {"height": 34.9, "cells": [{"from": 1, "to": 9, "style": "title", "text": "上海冰美肌美容科技有限公司"}]},
+    {"height": 33.75, "cells": [{"from": 1, "to": 9, "style": "title", "text": " 送货确认单"}]},
+    {
+      "height": 30.0,
+      "cells": [
+        {"from": 1, "to": 2, "style": "label", "text": "发往单位：{fields.customerCompany}"},
+        {"from": 3, "to": 6, "style": "label2", "text": "　送货日期：{documentDate}"},
+        {"from": 7, "to": 9, "style": "label3", "text": "　单号：{documentNumber}"}
+      ]
+    }
+  ],
+  "details": {
+    "minRows": 3,
+    "headerHeight": 30.0,
+    "rowHeight": 42.0,
+    "columns": [
+      {"label": "序号", "field": "index", "width": 8.664},
+      {"label": "客户合同号/订单号", "field": "line.orderNumber", "width": 15.082, "fallback": "fields.salesOrderNumber"},
+      {"label": "产品名称", "field": "line.name", "width": 9.832},
+      {"label": "规格型号", "field": "line.specification", "width": 9.082},
+      {"label": "单位", "field": "line.unit", "width": 8.664},
+      {"label": "数量", "field": "line.quantity", "width": 8.664, "style": "number"},
+      {"label": "生产批号", "field": "line.batchNo", "width": 8.664},
+      {"label": "序列号", "field": "line.serialNumbers", "width": 8.664},
+      {"label": "备注", "field": "line.notes", "width": 8.664, "fallback": "fields.notes"}
+    ]
+  },
+  "footer": [
+    {"height": 35.0, "cells": [{"from": 1, "to": 9, "style": "detail", "text": "收货地址：{fields.destination}"}]},
+    {
+      "height": 30.0,
+      "cells": [{"from": 1, "to": 5, "style": "signature", "text": "收货人："}, {"from": 6, "to": 9, "style": "signature", "text": "日期："}]
+    }
+  ],
+  "styles": {
+    "default": {"font": "宋体", "size": 12.0},
+    "tableHeader": {"size": 11.0, "align": "center", "border": "all", "wrap": true},
+    "detail": {"size": 12.0, "align": "left", "border": "all", "wrap": true},
+    "number": {"size": 12.0, "align": "right", "border": "all", "wrap": true},
+    "title": {"size": 16.0, "bold": true, "align": "center", "wrap": true},
+    "label": {"size": 11.0, "align": "left", "border": "left top bottom", "wrap": true},
+    "label2": {"size": 11.0, "align": "center", "border": "top bottom", "wrap": true},
+    "label3": {"size": 11.0, "align": "right", "border": "right top bottom", "wrap": true},
+    "signature": {"size": 11.0, "align": "left", "border": "all", "wrap": true}
+  },
+  "print": {
+    "orientation": "portrait",
+    "paperSize": 9,
+    "fitToWidth": 1,
+    "repeatHeader": false,
+    "centerHorizontally": false,
+    "centerVertically": false,
+    "margins": {"left": 0.75, "right": 0.75, "top": 1.0, "bottom": 1.0, "header": 0.5, "footer": 0.5},
+    "header": "",
+    "footer": ""
+  }
+}

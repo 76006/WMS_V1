@@ -1,6 +1,7 @@
 #include "network/RemoteBackend.h"
 #include "network/BusinessWire.h"
 #include "services/InventoryService.h"
+#include "services/ProductionTask.h"
 
 #include <QDateTime>
 #include <QSet>
@@ -152,7 +153,7 @@ qlonglong InventoryService::ensureProductionRun(const ProductionRunRequest &run,
 {
     const QString batchNo = run.batchNo.trimmed().toUpper();
     if (batchNo.isEmpty() || run.productMaterialId <= 0
-        || run.plannedQuantity <= ProductionQuantityTolerance) {
+        || !std::isfinite(run.plannedQuantity) || run.plannedQuantity <= ProductionQuantityTolerance) {
         setProductionError(errorMessage, QStringLiteral("成品物料、生产批次和计划数量不能为空。"));
         return 0;
     }
@@ -205,6 +206,77 @@ qlonglong InventoryService::ensureProductionRun(const ProductionRunRequest &run,
     return insert.lastInsertId().toLongLong();
 }
 
+bool InventoryService::saveProductionStage(qlonglong documentId, qlonglong runId,
+                                           const StockDocumentRequest &document, bool inbound,
+                                           QString *errorMessage)
+{
+    if (document.productionStageKey.isEmpty()) {
+        if (runId > 0) {
+            QSqlQuery tracked(m_database);
+            tracked.prepare(QStringLiteral("SELECT 1 FROM production_task_boms WHERE production_run_id=?"));
+            tracked.addBindValue(runId);
+            if (!tracked.exec()) { setProductionError(errorMessage, tracked.lastError().text()); return false; }
+            if (tracked.next()) {
+                setProductionError(errorMessage, QStringLiteral("此生产批次已按半成品分阶段管理，请选择本次领料或完工阶段。")); return false;
+            }
+        }
+        return true;
+    }
+    QSqlQuery run(m_database);
+    run.prepare(QStringLiteral("SELECT product_material_id,planned_quantity FROM production_runs WHERE id=?"));
+    run.addBindValue(runId);
+    if (!run.exec() || !run.next()) {
+        setProductionError(errorMessage, QStringLiteral("找不到整机生产批次。")); return false;
+    }
+    ProductionTask task;
+    if (!ProductionTask::load(m_database, runId, run.value(0).toLongLong(), task, errorMessage)) return false;
+    if (document.productionBomFingerprint != task.fingerprint()) {
+        setProductionError(errorMessage, QStringLiteral("BOM已发生变化，请重新选择任务并带入用料。")); return false;
+    }
+    QSqlQuery legacy(m_database);
+    legacy.prepare(QStringLiteral("SELECT 1 FROM business_documents d WHERE d.production_run_id=? "
+        "AND d.document_type='SCLL' AND d.status IN ('POSTED','PARTIALLY_REVERSED','REVERSED') "
+        "AND EXISTS(SELECT 1 FROM business_document_items i WHERE i.document_id=d.id "
+        "AND i.quantity-i.returned_quantity-i.reversed_quantity>0.0000001 "
+        "AND EXISTS(SELECT 1 FROM inventory_ledger l WHERE l.document_item_id=i.id AND l.business_type='SCLL')) "
+        "AND NOT EXISTS(SELECT 1 FROM production_document_stages s WHERE s.document_id=d.id)"));
+    legacy.addBindValue(runId);
+    if (!legacy.exec()) { setProductionError(errorMessage, legacy.lastError().text()); return false; }
+    if (legacy.next()) {
+        setProductionError(errorMessage, QStringLiteral("此批次有旧版未区分半成品的领料记录，无法自动分摊。请为分阶段生产建立新的生产批次。"));
+        return false;
+    }
+    QList<ProductionDemand> demands;
+    if (!task.demand(m_database, runId, document.productionStageKey, run.value(1).toDouble(), demands, errorMessage)) return false;
+    const auto *stage = task.stage(document.productionStageKey);
+    if (inbound) {
+        for (const auto &line : document.lines) if (line.materialId != stage->materialId) {
+            setProductionError(errorMessage, QStringLiteral("完工入库物料与所选半成品/整机工序不一致。")); return false;
+        }
+    } else {
+        QMap<qlonglong, double> remaining;
+        for (const auto &d : demands) remaining.insert(d.materialId, d.remaining());
+        for (const auto &line : document.lines) {
+            if (!std::isfinite(line.quantity) || line.quantity <= 0 || !remaining.contains(line.materialId)
+                || line.quantity > remaining.value(line.materialId) + ProductionQuantityTolerance) {
+                setProductionError(errorMessage, QStringLiteral("物料不属于该工序或数量超过剩余未领数量，请刷新用料进度；可删行或减少数量分次领取。"));
+                return false;
+            }
+            remaining[line.materialId] -= line.quantity;
+        }
+    }
+    QSqlQuery snapshot(m_database);
+    snapshot.prepare(QStringLiteral("INSERT INTO production_task_boms(production_run_id,payload) VALUES(?,?) "
+                                    "ON CONFLICT(production_run_id) DO NOTHING"));
+    snapshot.addBindValue(runId); snapshot.addBindValue(task.payload());
+    if (!snapshot.exec()) { setProductionError(errorMessage, snapshot.lastError().text()); return false; }
+    QSqlQuery link(m_database);
+    link.prepare(QStringLiteral("INSERT INTO production_document_stages(document_id,production_run_id,stage_key) VALUES(?,?,?)"));
+    link.addBindValue(documentId); link.addBindValue(runId); link.addBindValue(document.productionStageKey);
+    if (!link.exec()) { setProductionError(errorMessage, link.lastError().text()); return false; }
+    return true;
+}
+
 bool InventoryService::postProductionIssue(const ProductionRunRequest &run,
                                             const StockDocumentRequest &document,
                                             PostedDocument *postedDocument,
@@ -249,6 +321,10 @@ bool InventoryService::postProductionIssue(const ProductionRunRequest &run,
         return false;
     }
 
+    if (!saveProductionStage(documentId, runId, document, false, errorMessage)) {
+        rollback();
+        return false;
+    }
     QSet<QString> identities;
     for (int index = 0; index < document.lines.size(); ++index) {
         StockMovementRequest movement = document.lines.at(index);
@@ -561,142 +637,9 @@ bool InventoryService::postFinishedGoodsInbound(const StockDocumentRequest &docu
         return BusinessWire::Codec<bool>::get(reply.value("result"));
     }
 
-    if (!m_database.isOpen() || m_operatorId <= 0
-        || !document.documentDate.isValid() || document.lines.size() != 1
-        || document.submissionToken.trimmed().isEmpty()) {
-        setProductionError(errorMessage, QStringLiteral("成品入库单头、明细或当前用户无效。"));
-        return false;
-    }
-    if (!beginImmediate(errorMessage)) {
-        return false;
-    }
-
-    StockMovementRequest movement = document.lines.first();
-    movement.documentType = QStringLiteral("CPRK");
-    movement.documentDate = document.documentDate;
-    QString productionBatch = movement.batchNo.trimmed();
-    if (document.productionRunId > 0) {
-        QSqlQuery run(m_database);
-        run.prepare(QStringLiteral(
-            "SELECT product_material_id, batch_no FROM production_runs WHERE id=?"));
-        run.addBindValue(document.productionRunId);
-        if (!run.exec() || !run.next()) {
-            setProductionError(errorMessage, QStringLiteral("找不到生产批次。"));
-            rollback();
-            return false;
-        }
-        const qlonglong productMaterialId = run.value(0).toLongLong();
-        productionBatch = run.value(1).toString();
-        movement.batchNo = productionBatch;
-        if (movement.materialId != productMaterialId) {
-            setProductionError(errorMessage, QStringLiteral("入库成品与生产批次中的成品不一致。"));
-            rollback();
-            return false;
-        }
-    } else {
-        // 外部生产成品没有本系统的 production_runs 记录，只校验物料档案。
-        // 若物料启用了批次管理，后续 validateMovement 仍会要求填写库存批号。
-        QSqlQuery product(m_database);
-        product.prepare(QStringLiteral(
-            "SELECT 1 FROM materials m JOIN material_categories c ON c.id=m.category_id "
-            "WHERE m.id=? AND m.is_active=1 AND c.code='FINISHED'"));
-        product.addBindValue(movement.materialId);
-        if (!product.exec() || !product.next()) {
-            setProductionError(errorMessage,
-                               QStringLiteral("所选物料不存在、已停用或不属于成品分类。"));
-            rollback();
-            return false;
-        }
-        movement.batchNo = productionBatch;
-    }
-
-    QString detail;
-    const MaterialRules rules = materialRules(movement.materialId, &detail);
-    if (!rules.valid || !validateMovement(movement, rules, &detail)
-        || !validateLocation(movement.warehouseId, movement.locationId, &detail)) {
-        setProductionError(errorMessage, detail);
-        rollback();
-        return false;
-    }
-
-    const QString number = nextDocumentNumber(QStringLiteral("CPRK"), document.documentDate, errorMessage);
-    const qlonglong documentId = number.isEmpty()
-        ? 0
-        : createDocument(number, QStringLiteral("CPRK"), QStringLiteral("IN"),
-                         document.documentDate, document.handlerName, document.purpose,
-                         document.notes, QVariant(), errorMessage);
-    const bool contextSaved = documentId > 0
-        && (document.productionRunId > 0
-                ? setDocumentProductionContext(documentId, document.productionRunId,
-                                               document.submissionToken, errorMessage)
-                : setDocumentSubmissionToken(documentId, document.submissionToken,
-                                             errorMessage));
-    if (!contextSaved) {
-        rollback();
-        return false;
-    }
-    const qlonglong itemId = createDocumentItem(documentId, 1, movement, QVariant(), &detail);
-    double before = 0.0;
-    double after = 0.0;
-    if (itemId <= 0
-        || !changeBalance(movement.materialId, movement.warehouseId, movement.locationId,
-                          productionBatch, movement.quantity, &before, &after, &detail)) {
-        setProductionError(errorMessage, detail);
-        rollback();
-        return false;
-    }
-    const qlonglong ledgerId = createLedger(documentId, itemId, QStringLiteral("CPRK"),
-                                             movement.materialId, productionBatch,
-                                             movement.quantity, 0.0, before, after,
-                                             movement.warehouseId, movement.locationId,
-                                             movement.notes, &detail);
-    if (ledgerId <= 0
-        || !attachSerialsToInbound(movement, documentId, ledgerId, &detail)) {
-        setProductionError(errorMessage, detail);
-        rollback();
-        return false;
-    }
-    if (document.productionRunId > 0 && !movement.serialNumbers.isEmpty()) {
-        QSqlQuery serialBatch(m_database);
-        serialBatch.prepare(QStringLiteral(
-            "UPDATE serial_numbers SET production_batch=? WHERE last_document_id=?"));
-        serialBatch.addBindValue(productionBatch);
-        serialBatch.addBindValue(documentId);
-        if (!serialBatch.exec()) {
-            setProductionError(errorMessage, serialBatch.lastError().text());
-            rollback();
-            return false;
-        }
-    }
-    bool batchSaved = true;
-    QString batchError;
-    if (!productionBatch.isEmpty()) {
-        QSqlQuery batch(m_database);
-        batch.prepare(QStringLiteral(
-            "INSERT OR IGNORE INTO batches(material_id, batch_no, first_in_at) VALUES(?, ?, ?)"));
-        batch.addBindValue(movement.materialId);
-        batch.addBindValue(productionBatch);
-        batch.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
-        batchSaved = batch.exec();
-        if (!batchSaved) batchError = batch.lastError().text();
-    }
-    if (!batchSaved || !finalizeDocument(documentId, errorMessage)
-        || (document.productionRunId > 0
-            && !refreshProductionRunStatus(document.productionRunId, errorMessage))
-        || !writeAudit(QStringLiteral("POST"), QStringLiteral("business_document"),
-                       documentId, number, errorMessage)
-        || !commit(errorMessage)) {
-        if (errorMessage && errorMessage->isEmpty()) {
-            *errorMessage = batchError;
-        }
-        rollback();
-        return false;
-    }
-    if (postedDocument) {
-        postedDocument->documentId = documentId;
-        postedDocument->documentNumber = number;
-    }
-    return true;
+    StockDocumentRequest inbound = document;
+    inbound.documentType = QStringLiteral("CPRK");
+    return postStockDocument(inbound, true, postedDocument, errorMessage);
 }
 
 double InventoryService::productionRunReceivedQuantity(qlonglong productionRunId,
@@ -716,7 +659,9 @@ double InventoryService::productionRunReceivedQuantity(qlonglong productionRunId
         "SELECT COALESCE(SUM(i.quantity-i.reversed_quantity),0) "
         "FROM business_documents d JOIN business_document_items i ON i.document_id=d.id "
         "WHERE d.production_run_id=? AND d.document_type='CPRK' "
-        "AND d.status IN ('POSTED','PARTIALLY_REVERSED')"));
+        "AND d.status IN ('POSTED','PARTIALLY_REVERSED') "
+        "AND i.material_id=(SELECT product_material_id FROM production_runs WHERE id=d.production_run_id) "
+        "AND NOT EXISTS(SELECT 1 FROM production_document_stages s WHERE s.document_id=d.id AND s.stage_key<>'0')"));
     query.addBindValue(productionRunId);
     if (!query.exec() || !query.next()) {
         setProductionError(errorMessage,

@@ -1,4 +1,6 @@
 #include "ui/pages/FinishedGoodsInPage.h"
+#include "services/ProductionTask.h"
+#include "services/InspectionService.h"
 
 #include "services/InventoryService.h"
 #include "services/OfficeTemplateService.h"
@@ -22,6 +24,8 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSignalBlocker>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -70,7 +74,7 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     panel->setMaximumWidth(980);
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(22, 20, 22, 22);
-    auto *heading = new QLabel(QStringLiteral("成品入库"), panel);
+    auto *heading = new QLabel(QStringLiteral("完工入库（成品 / 半成品）"), panel);
     heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
     panelLayout->addWidget(heading);
 
@@ -109,10 +113,14 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     serialLayout->addWidget(m_generateButton, 0, Qt::AlignLeft);
     m_notesEdit = new QTextEdit(panel);
     m_notesEdit->setMaximumHeight(70);
+    m_stageCombo = new QComboBox(panel);
+    m_inspectionCombo = new QComboBox(panel);
     form->addRow(QStringLiteral("入库成品/生产批次 *"), m_runCombo);
+    form->addRow(QStringLiteral("完工阶段"), m_stageCombo);
     form->addRow(QStringLiteral("成品资料"), m_productLabel);
     form->addRow(QStringLiteral("生产进度"), m_progressLabel);
     form->addRow(QStringLiteral("库存批号"), m_batchEdit);
+    form->addRow(QStringLiteral("是否送检"), m_inspectionCombo);
     form->addRow(QStringLiteral("生产日期 *"), m_dateEdit);
     form->addRow(QStringLiteral("本次入库数量 *"), m_quantitySpin);
     form->addRow(QStringLiteral("仓库 *"), m_warehouseCombo);
@@ -123,7 +131,7 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
     panelLayout->addLayout(form);
     auto *actions = new QHBoxLayout;
     actions->addStretch();
-    m_submitButton = new QPushButton(QStringLiteral("确认成品入库"), panel);
+    m_submitButton = new QPushButton(QStringLiteral("确认完工入库"), panel);
     m_submitButton->setProperty("primary", true);
     actions->addWidget(m_submitButton);
     panelLayout->addLayout(actions);
@@ -169,6 +177,8 @@ FinishedGoodsInPage::FinishedGoodsInPage(QSqlDatabase database,
             this, &FinishedGoodsInPage::loadLocations);
     connect(m_generateButton, &QPushButton::clicked,
             this, &FinishedGoodsInPage::generateSerialNumbers);
+    connect(m_stageCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { loadRunDetails(); });
+    connect(m_inspectionCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { selectInspection(); });
     connect(m_submitButton, &QPushButton::clicked, this, &FinishedGoodsInPage::submit);
     resetSubmissionToken();
     refreshReferenceData();
@@ -214,7 +224,7 @@ void FinishedGoodsInPage::refreshReferenceData()
         "SELECT m.id,m.code,m.name,m.specification,m.default_warehouse_id,"
         "m.default_location_id,m.require_serial,m.require_batch "
         "FROM materials m JOIN material_categories c ON c.id=m.category_id "
-        "WHERE m.is_active=1 AND c.code='FINISHED' ORDER BY m.code"));
+        "WHERE m.is_active=1 AND c.code IN ('FINISHED','SEMI') ORDER BY m.code"));
     while (externalProducts.next()) {
         const qlonglong materialId = externalProducts.value(0).toLongLong();
         const int index = m_runCombo->count();
@@ -271,30 +281,68 @@ void FinishedGoodsInPage::loadRunDetails()
         return;
     }
     const qlonglong sourceKey = m_runCombo->currentData().toLongLong();
-    const qlonglong productMaterialId = m_runCombo->itemData(index, ProductMaterialRole).toLongLong();
-    const bool sourceChanged = m_currentSourceKey != sourceKey;
+    qlonglong productMaterialId = m_runCombo->itemData(index, ProductMaterialRole).toLongLong();
+    const bool runChanged = m_currentSourceKey != sourceKey;
+    const QString selectedStage = runChanged ? QStringLiteral("0") : m_stageCombo->currentData().toString();
+    QString stageName, stageModel;
+    double stagePlanned = 0;
+    qlonglong stageWarehouse = 0, stageLocation = 0;
+    bool stageSerial = false, stageBatch = false;
+    {
+        const QSignalBlocker block(m_stageCombo);
+        m_stageCombo->clear(); m_bomFingerprint.clear();
+        QSqlQuery snapshot(m_database);
+        snapshot.prepare(QStringLiteral("SELECT 1 FROM production_task_boms WHERE production_run_id=?"));
+        snapshot.addBindValue(sourceKey);
+        if (!snapshot.exec()) { m_progressLabel->setText(snapshot.lastError().text()); m_submitButton->setEnabled(false); return; }
+        if (sourceKey > 0 && snapshot.next()) {
+            ProductionTask task; QString error;
+            if (!ProductionTask::load(m_database, sourceKey, productMaterialId, task, &error)) {
+                m_progressLabel->setText(error); m_submitButton->setEnabled(false); return;
+            }
+            m_bomFingerprint = task.fingerprint();
+            for (const auto &s : task.stages()) m_stageCombo->addItem(s.code + QStringLiteral(" - ") + task.stagePath(s.key), s.key);
+            const int found = m_stageCombo->findData(selectedStage);
+            m_stageCombo->setCurrentIndex(found >= 0 ? found : 0);
+            const auto *stage = task.stage(m_stageCombo->currentData().toString());
+            if (stage) {
+                productMaterialId = stage->materialId; stageName = stage->name; stageModel = stage->model;
+                stagePlanned = stage->perMachine * m_runCombo->itemData(index, PlannedRole).toDouble();
+                QSqlQuery material(m_database);
+                material.prepare(QStringLiteral("SELECT code,default_warehouse_id,default_location_id,require_serial,require_batch FROM materials WHERE id=? AND is_active=1"));
+                material.addBindValue(productMaterialId);
+                if (!material.exec() || !material.next()) { m_progressLabel->setText(QStringLiteral("完工物料已停用或不存在。")); m_submitButton->setEnabled(false); return; }
+                m_productCode = material.value(0).toString(); stageWarehouse = material.value(1).toLongLong(); stageLocation = material.value(2).toLongLong();
+                stageSerial = material.value(3).toBool(); stageBatch = material.value(4).toBool();
+            }
+        } else m_stageCombo->addItem(QStringLiteral("整机 / 外部生产物料"), QString());
+    }
+    const QString stageKey = m_stageCombo->currentData().toString();
+    const bool sourceChanged = runChanged || m_currentStageKey != stageKey;
+    m_currentStageKey = stageKey;
     if (sourceChanged) {
         m_serialEdit->clear();
         m_batchEdit->clear();
     }
     m_currentSourceKey = sourceKey;
     m_productMaterialId = productMaterialId;
-    m_productCode = m_runCombo->itemData(index, ProductCodeRole).toString();
-    m_plannedQuantity = m_runCombo->itemData(index, PlannedRole).toDouble();
-    m_requireSerial = m_runCombo->itemData(index, RequireSerialRole).toBool();
-    m_requireBatch = m_runCombo->itemData(index, RequireBatchRole).toBool();
+    if (stageKey.isEmpty()) m_productCode = m_runCombo->itemData(index, ProductCodeRole).toString();
+    m_plannedQuantity = stageKey.isEmpty() ? m_runCombo->itemData(index, PlannedRole).toDouble() : stagePlanned;
+    m_requireSerial = stageKey.isEmpty() ? m_runCombo->itemData(index, RequireSerialRole).toBool() : stageSerial;
+    m_requireBatch = stageKey.isEmpty() ? m_runCombo->itemData(index, RequireBatchRole).toBool() : stageBatch;
     const bool externalProduction = m_runCombo->itemData(index, ExternalProductionRole).toBool();
     if (externalProduction) {
         m_receivedQuantity = 0.0;
     } else {
         InventoryService service(m_database, m_session.userId);
         QString error;
-        m_receivedQuantity = service.productionRunReceivedQuantity(sourceKey, &error);
-        if (m_receivedQuantity < 0.0) m_receivedQuantity = 0.0;
+        m_receivedQuantity = stageKey.isEmpty() ? service.productionRunReceivedQuantity(sourceKey, &error)
+            : ProductionTask::received(m_database, sourceKey, stageKey, &error);
+        if (m_receivedQuantity < 0.0) { m_progressLabel->setText(error); m_submitButton->setEnabled(false); return; }
     }
     m_productLabel->setText(QStringLiteral("%1    型号：%2")
-                                .arg(m_runCombo->itemData(index, ProductNameRole).toString(),
-                                     m_runCombo->itemData(index, ProductModelRole).toString()));
+                                .arg(stageKey.isEmpty() ? m_runCombo->itemData(index, ProductNameRole).toString() : stageName,
+                                     stageKey.isEmpty() ? m_runCombo->itemData(index, ProductModelRole).toString() : stageModel));
     if (externalProduction) {
         m_progressLabel->setText(QStringLiteral("外部生产成品：不关联内部生产计划和生产批次"));
         m_batchEdit->setReadOnly(false);
@@ -308,15 +356,15 @@ void FinishedGoodsInPage::loadRunDetails()
                                      .arg(m_receivedQuantity, 0, 'g', 12)
                                      .arg(qMax(0.0, m_plannedQuantity - m_receivedQuantity), 0, 'g', 12));
         m_batchEdit->setEnabled(true);
-        m_batchEdit->setReadOnly(true);
-        m_batchEdit->setText(m_runCombo->itemData(index, ProductionBatchRole).toString());
+        m_batchEdit->setReadOnly(false);
+        if (sourceChanged || m_batchEdit->text().isEmpty()) m_batchEdit->setText(m_requireBatch ? m_runCombo->itemData(index, ProductionBatchRole).toString() : QString());
         m_batchEdit->setPlaceholderText(QString());
     }
-    const qlonglong defaultWarehouse = m_runCombo->itemData(index, DefaultWarehouseRole).toLongLong();
+    const qlonglong defaultWarehouse = stageKey.isEmpty() ? m_runCombo->itemData(index, DefaultWarehouseRole).toLongLong() : stageWarehouse;
     const int warehouseIndex = m_warehouseCombo->findData(defaultWarehouse);
     if (warehouseIndex >= 0) m_warehouseCombo->setCurrentIndex(warehouseIndex);
     m_locationCombo->setProperty("preferredLocation",
-                                 m_runCombo->itemData(index, DefaultLocationRole));
+                                 stageKey.isEmpty() ? m_runCombo->itemData(index, DefaultLocationRole) : QVariant(stageLocation));
     loadLocations();
     m_serialEdit->setEnabled(m_requireSerial);
     m_generateButton->setEnabled(m_requireSerial);
@@ -324,6 +372,61 @@ void FinishedGoodsInPage::loadRunDetails()
     m_submitButton->setEnabled(m_session.canPostProduction()
                                && m_warehouseCombo->count() > 0
                                && m_locationCombo->count() > 0);
+    if (sourceChanged) { const QSignalBlocker block(m_inspectionCombo); m_inspectionCombo->setCurrentIndex(0); }
+    refreshInspectionChoices();
+}
+
+void FinishedGoodsInPage::refreshInspectionChoices()
+{
+    const auto previous = m_inspectionCombo->currentData().toLongLong();
+    const QSignalBlocker blocker(m_inspectionCombo);
+    m_inspectionCombo->clear();
+    m_inspectionCombo->addItem(QStringLiteral("否（无需送检，直接入库）"), qlonglong(0));
+    InspectionService service(m_database, m_session.userId);
+    QList<InspectionNotice> notices; QString error;
+    if (!service.listQualifiedUnused(&notices, &error)) {
+        m_progressLabel->setText(error); m_submitButton->setEnabled(false); return;
+    }
+    for (const auto &summary : notices) {
+        InspectionNotice notice;
+        if (!service.readNotice(summary.id, &notice, &error)) {
+            m_progressLabel->setText(error); m_submitButton->setEnabled(false); return;
+        }
+        bool compatible = true; double count = 0;
+        for (const auto &line : notice.lines) {
+            const double available = line.qualifiedQuantity - line.inboundQuantity;
+            if (available <= 0.0000001) continue;
+            if (line.materialId != m_productMaterialId) compatible = false;
+            count += available;
+        }
+        if (compatible && count > 0) m_inspectionCombo->addItem(
+            QStringLiteral("是 | %1 | 可入库 %2").arg(notice.inspectionNumber).arg(count,0,'g',12), notice.id);
+    }
+    const int selected = m_inspectionCombo->findData(previous);
+    m_inspectionCombo->setCurrentIndex(selected >= 0 ? selected : 0);
+    selectInspection();
+}
+
+void FinishedGoodsInPage::selectInspection()
+{
+    const auto noticeId = m_inspectionCombo->currentData().toLongLong();
+    m_quantitySpin->setReadOnly(noticeId > 0);
+    m_batchEdit->setReadOnly(noticeId > 0);
+    if (noticeId <= 0) {
+        if (m_batchEdit->text().contains(QStringLiteral("、"))) m_batchEdit->clear();
+        return;
+    }
+    InspectionService service(m_database, m_session.userId); InspectionNotice notice; QString error;
+    if (!service.readNotice(noticeId, &notice, &error)) {
+        QMessageBox::warning(this, QStringLiteral("读取送检通知失败"), error); return;
+    }
+    double count = 0; QStringList batches;
+    for (const auto &line : notice.lines) if (line.qualifiedQuantity > line.inboundQuantity + 0.0000001) {
+        count += line.qualifiedQuantity - line.inboundQuantity;
+        if (!batches.contains(line.batchNumber)) batches.append(line.batchNumber);
+    }
+    m_quantitySpin->setValue(count);
+    m_batchEdit->setText(batches.join(QStringLiteral("、")));
 }
 
 void FinishedGoodsInPage::loadLocations()
@@ -437,6 +540,39 @@ void FinishedGoodsInPage::submit()
     line.serialNumbers = serials;
     line.notes = m_notesEdit->toPlainText().trimmed();
 
+    QList<StockMovementRequest> receiptLines{line};
+    const auto noticeId = m_inspectionCombo->currentData().toLongLong();
+    if (noticeId > 0) {
+        InspectionService inspections(m_database, m_session.userId); InspectionNotice notice; QString error;
+        if (!inspections.readNotice(noticeId, &notice, &error)) {
+            QMessageBox::warning(this, QStringLiteral("读取送检通知失败"), error); return;
+        }
+        QMap<QString, double> batches;
+        for (const auto &source : notice.lines) {
+            const double available = source.qualifiedQuantity - source.inboundQuantity;
+            if (available <= 0.0000001) continue;
+            if (source.materialId != m_productMaterialId) {
+                QMessageBox::warning(this, QStringLiteral("送检物料不一致"), QStringLiteral("通知单合格物料发生变化，请刷新后重选。")); return;
+            }
+            batches[source.batchNumber] += available;
+        }
+        receiptLines.clear(); int serialOffset = 0; double received = 0;
+        for (auto it = batches.cbegin(); it != batches.cend(); ++it) {
+            auto part = line; part.batchNo = it.key(); part.quantity = it.value();
+            if (m_requireSerial) {
+                if (std::abs(part.quantity-std::round(part.quantity)) > 0.0000001) {
+                    QMessageBox::warning(this, QStringLiteral("送检数量有误"), QStringLiteral("SN物料每个批号的合格数量必须为整数。")); return;
+                }
+                part.serialNumbers = serials.mid(serialOffset, static_cast<int>(std::round(part.quantity)));
+                serialOffset += part.serialNumbers.size();
+            }
+            receiptLines.append(part); received += part.quantity;
+        }
+        if (std::abs(received-line.quantity) > 0.0000001 || receiptLines.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("合格数量已变化"), QStringLiteral("请重新选择送检单后再入库。")); return;
+        }
+    }
+
     OfficeTemplateDocument inboundForm;
     inboundForm.kind = OfficeFormKind::FinishedGoodsInbound;
     inboundForm.documentNumber = QStringLiteral("提交后自动生成");
@@ -444,7 +580,7 @@ void FinishedGoodsInPage::submit()
     inboundForm.fields.insert(QStringLiteral("handler"), m_handlerEdit->text().trimmed());
     inboundForm.fields.insert(QStringLiteral("notes"), m_notesEdit->toPlainText().trimmed());
     QString formError;
-    inboundForm.lines = OfficeTemplateService::materialLines(m_database, {line}, &formError);
+    inboundForm.lines = OfficeTemplateService::materialLines(m_database, receiptLines, &formError);
     if (inboundForm.lines.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("无法填写成品入库单模板"), formError);
         return;
@@ -472,7 +608,10 @@ void FinishedGoodsInPage::submit()
     document.notes = m_notesEdit->toPlainText().trimmed();
     document.submissionToken = m_submissionToken;
     document.productionRunId = qMax<qlonglong>(0, m_runCombo->currentData().toLongLong());
-    document.lines = {line};
+    document.productionStageKey = m_currentStageKey;
+    document.productionBomFingerprint = m_bomFingerprint;
+    document.inspectionNoticeId = noticeId;
+    document.lines = receiptLines;
 
     m_submitButton->setEnabled(false);
     InventoryService service(m_database, m_session.userId);

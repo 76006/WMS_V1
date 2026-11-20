@@ -133,6 +133,30 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     if (!applyTwoDigitNumberRulesMigration(database, errorMessage)) {
         return false;
     }
+    QSqlQuery processBomVersion(database);
+    if (!processBomVersion.exec(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=22"))) {
+        if (errorMessage) *errorMessage = processBomVersion.lastError().text();
+        return false;
+    }
+    if (!processBomVersion.next() &&
+        !executeSqlResource(database, QStringLiteral(":/database/migrations/022_process_boms.sql"),
+                            QStringLiteral("升级工艺BOM表"), errorMessage)) return false;
+    QSqlQuery stageVersion(database);
+    if (!stageVersion.exec(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=23"))) {
+        if (errorMessage) *errorMessage = stageVersion.lastError().text();
+        return false;
+    }
+    if (!stageVersion.next() && !executeSqlResource(database,
+            QStringLiteral(":/database/migrations/023_production_stages.sql"),
+            QStringLiteral("升级分阶段生产领料"), errorMessage)) return false;
+    QSqlQuery supplierVersion(database);
+    if (!supplierVersion.exec(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=24"))) {
+        if (errorMessage) *errorMessage = supplierVersion.lastError().text();
+        return false;
+    }
+    if (!supplierVersion.next() && !executeSqlResource(database,
+            QStringLiteral(":/database/migrations/024_purchase_suppliers.sql"),
+            QStringLiteral("升级采购供应商记录"), errorMessage)) return false;
     if (!ensureSystemIdentity(database, errorMessage)) {
         return false;
     }

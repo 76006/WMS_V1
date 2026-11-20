@@ -132,7 +132,13 @@
     "ALTER TABLE \"inspection_results\" ADD FOREIGN KEY (\"attachment_id\") REFERENCES \"attachments\"(\"id\") ON UPDATE NO ACTION ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED",
     "ALTER TABLE \"inspection_results\" ADD FOREIGN KEY (\"notice_id\") REFERENCES \"inspection_notices\"(\"id\") ON UPDATE NO ACTION ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED",
     "ALTER TABLE \"inspection_result_items\" ADD FOREIGN KEY (\"material_id\") REFERENCES \"materials\"(\"id\") ON UPDATE NO ACTION ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
-    "ALTER TABLE \"inspection_result_items\" ADD FOREIGN KEY (\"result_id\") REFERENCES \"inspection_results\"(\"id\") ON UPDATE NO ACTION ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
+    "ALTER TABLE \"inspection_result_items\" ADD FOREIGN KEY (\"result_id\") REFERENCES \"inspection_results\"(\"id\") ON UPDATE NO ACTION ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED",
+    "CREATE TABLE process_boms (\n    product_material_id INTEGER NOT NULL PRIMARY KEY REFERENCES materials(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,\n    payload TEXT NOT NULL\n)",
+    "CREATE TABLE production_task_boms (\n    production_run_id INTEGER PRIMARY KEY REFERENCES production_runs(id) ON DELETE CASCADE,\n    payload TEXT NOT NULL\n)",
+    "CREATE TABLE production_document_stages (\n    document_id INTEGER PRIMARY KEY REFERENCES business_documents(id) ON DELETE CASCADE,\n    production_run_id INTEGER NOT NULL REFERENCES production_runs(id) ON DELETE CASCADE,\n    stage_key TEXT NOT NULL\n)",
+    "CREATE INDEX idx_production_document_stage ON production_document_stages(production_run_id, stage_key)",
+    "CREATE TABLE purchase_item_suppliers (\n    document_item_id INTEGER PRIMARY KEY REFERENCES business_document_items(id) ON DELETE CASCADE,\n    supplier TEXT NOT NULL DEFAULT ''\n)",
+    "CREATE TABLE material_supplier_defaults (\n    material_id INTEGER PRIMARY KEY REFERENCES materials(id) ON DELETE CASCADE,\n    original_brand TEXT NOT NULL DEFAULT ''\n)"
   ],
   "seeds": [
     {
@@ -280,6 +286,12 @@
       "values": {
         "version": 21,
         "applied_at": "2026-11-16 10:23:07.150"
+      }
+    },
+    {
+      "table": "schema_migrations",
+      "values": {
+        "version": 22
       }
     },
     {
@@ -746,6 +758,20 @@
         "sequence_date": "",
         "current_sequence": 0,
         "sequence_width": 4
+      }
+    },
+    {
+      "table": "schema_migrations",
+      "values": {
+        "version": 23,
+        "applied_at": "2026-11-16 10:23:07.086"
+      }
+    },
+    {
+      "table": "schema_migrations",
+      "values": {
+        "version": 24,
+        "applied_at": "2026-11-16 10:23:07.086"
       }
     }
   ]

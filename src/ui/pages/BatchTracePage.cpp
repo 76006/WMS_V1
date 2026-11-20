@@ -33,7 +33,7 @@ BatchTracePage::BatchTracePage(QSqlDatabase database, QWidget *parent)
     summaryLayout->addWidget(new QLabel(QStringLiteral("批次库存与追溯"), summaryPanel));
     auto *filters = new QHBoxLayout;
     m_keywordEdit = new QLineEdit(summaryPanel);
-    m_keywordEdit->setPlaceholderText(QStringLiteral("物料编码、名称或批次号"));
+    m_keywordEdit->setPlaceholderText(QStringLiteral("物料编码、名称、批号或供应商"));
     m_warehouseCombo = new QComboBox(summaryPanel);
     auto *search = new QPushButton(QStringLiteral("查询"), summaryPanel);
     filters->addWidget(m_keywordEdit, 1);
@@ -59,12 +59,12 @@ BatchTracePage::BatchTracePage(QSqlDatabase database, QWidget *parent)
     historyPanel->setObjectName(QStringLiteral("panel"));
     auto *historyLayout = new QVBoxLayout(historyPanel);
     historyLayout->addWidget(new QLabel(QStringLiteral("所选批次库存流水"), historyPanel));
-    m_historyTable = new QTableWidget(0, 10, historyPanel);
+    m_historyTable = new QTableWidget(0, 11, historyPanel);
     m_historyTable->setHorizontalHeaderLabels({QStringLiteral("时间"), QStringLiteral("单据号"),
                                                QStringLiteral("业务类型"), QStringLiteral("入库"),
                                                QStringLiteral("出库"), QStringLiteral("变动前"),
                                                QStringLiteral("变动后"), QStringLiteral("仓库/库位"),
-                                               QStringLiteral("生产批次"), QStringLiteral("操作人")});
+                                               QStringLiteral("生产批次"), QStringLiteral("操作人"), QStringLiteral("本次采购供应商")});
     m_historyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_historyTable->verticalHeader()->setVisible(false);
     m_historyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -120,7 +120,7 @@ void BatchTracePage::loadBatches()
         "WHERE i.material_id=b.material_id AND i.batch_no=b.batch_no AND d.document_type='SCLL' "
         "AND (?=0 OR i.warehouse_id=?)),'') "
         "FROM batches b JOIN materials m ON m.id=b.material_id "
-        "WHERE (m.code LIKE ? OR m.name LIKE ? OR b.batch_no LIKE ?) "
+        "WHERE (m.code LIKE ? OR m.name LIKE ? OR b.batch_no LIKE ? OR b.supplier LIKE ?) "
         "ORDER BY m.code,b.batch_no"));
     query.addBindValue(warehouseId);
     query.addBindValue(warehouseId);
@@ -130,6 +130,7 @@ void BatchTracePage::loadBatches()
     query.addBindValue(warehouseId);
     query.addBindValue(warehouseId);
     query.addBindValue(warehouseId);
+    query.addBindValue(keyword);
     query.addBindValue(keyword);
     query.addBindValue(keyword);
     query.addBindValue(keyword);
@@ -165,10 +166,11 @@ void BatchTracePage::loadHistory()
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT l.occurred_at,d.document_no,l.business_type,l.quantity_in,l.quantity_out,"
-        "l.quantity_before,l.quantity_after,w.code||' / '||loc.code,COALESCE(pr.batch_no,''),u.display_name "
+        "l.quantity_before,l.quantity_after,w.code||' / '||loc.code,COALESCE(pr.batch_no,''),u.display_name,COALESCE(ps.supplier,'') "
         "FROM inventory_ledger l JOIN business_documents d ON d.id=l.document_id "
         "JOIN warehouses w ON w.id=l.warehouse_id JOIN locations loc ON loc.id=l.location_id "
         "JOIN users u ON u.id=l.operator_id LEFT JOIN production_runs pr ON pr.id=d.production_run_id "
+        "LEFT JOIN purchase_item_suppliers ps ON ps.document_item_id=l.document_item_id "
         "WHERE l.material_id=? AND l.batch_no=? "
         "AND (?=0 OR l.warehouse_id=?) ORDER BY l.id DESC"));
     query.addBindValue(code->data(MaterialIdRole));
@@ -179,7 +181,7 @@ void BatchTracePage::loadHistory()
     while (query.next()) {
         const int target = m_historyTable->rowCount();
         m_historyTable->insertRow(target);
-        for (int column = 0; column < 10; ++column)
+        for (int column = 0; column < 11; ++column)
             m_historyTable->setItem(target, column,
                                     new QTableWidgetItem(query.value(column).toString()));
     }

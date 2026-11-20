@@ -37,10 +37,16 @@ private:
     QStringList enteredSerialNumbers() const;
     void refreshRecentDocuments();
     void resetSubmissionToken();
+    void refreshInspectionChoices();
+    void selectInspection();
 
     QSqlDatabase m_database;
     Session m_session;
     QComboBox *m_runCombo = nullptr;
+    QComboBox *m_stageCombo = nullptr;
+    QComboBox *m_inspectionCombo = nullptr;
+    QString m_currentStageKey;
+    QString m_bomFingerprint;
     QLineEdit *m_batchEdit = nullptr;
     QLabel *m_productLabel = nullptr;
     QLabel *m_progressLabel = nullptr;

@@ -4,7 +4,7 @@
 
 设计重点：库存准确、操作简单、方便追溯，不包含金额、审批流、扫码和大型 ERP 功能。
 
-局域网版已接入原有完整桌面主窗口：出入库、送检、生产领退料、成品入库、调拨盘点、查询统计、基础资料、附件和用户管理统一访问 PostgreSQL 后台。双击根目录的“启动冰美肌联网测试.cmd”或“启动美鲸灵联网测试.cmd”，即可启动本机后台并打开登录界面。使用独立测试库，正式单机数据尚未迁移；详见 [局域网开发说明](docs/LAN_DEVELOPMENT.md)。
+局域网版已接入原有完整桌面主窗口：出入库、送检、生产领退料、成品入库、调拨盘点、查询统计、基础资料、附件和用户管理统一访问 PostgreSQL 后台。双击根目录的“启动冰美肌.cmd”或“启动美鲸灵.cmd”，即可启动本机后台并打开登录界面。使用独立测试库，正式单机数据尚未迁移；详见 [局域网开发说明](docs/LAN_DEVELOPMENT.md)。
 
 ## 技术方案
 
@@ -66,6 +66,21 @@
 - 选择销售出库时显示客户公司、目的地、联系人、电话、销售订单、物流公司和运单号；客户公司与目的地必填，其他出库类型不显示也不校验这些字段。
 - 销售信息与出库单一对一保存在 SQLite 中，近期出库列表显示客户和目的地，双击销售出库可查看完整资料。
 
+## 业务单据的 JSON 模板
+
+冰美肌使用 `仓库系统表单模板`，美鲸灵使用 `美鲸灵仓库系统表单模板`。每个目录各有六份以单据名称命名的 UTF-8 JSON。程序在每次预览、生成或重新生成时读取对应文件，输出带格式的 `.xlsx`。发布包内的模板位于客户端程序旁；多台客户端需要使用相同版本的模板。
+
+以 `原材料入库单.json` 为例，`details.columns` 中每一项是一列。调整数组顺序即可调换列，删除一项即可隐藏该列。增加已有数据字段时，可以参照下面的供应商列。重复明细、签字栏位置和打印区域会随实际行数调整。
+
+```json
+{"label": "供应商", "field": "line.supplier", "fallback": "fields.supplier", "width": 22}
+```
+
+- `field` 可以引用明细字段（如 `line.code`、`line.name`、`line.batchNo`、`line.quantity`）、单据日期 `documentDate` 或序号 `index`。`fallback` 指定逐行字段为空时取用的单据字段。新增采集项需要先接入业务数据。
+- `header` 和 `footer` 分别控制明细前后的行。每行可以设置 `height`，每个单元格的 `from`、`to` 使用 `layoutColumns` 定义的版面网格，`rows` 可以纵向合并。`text` 支持固定文字和占位符，如 `单号：{documentNumber}`。
+- `details.minRows` 指定预留的最少明细行数。`styles` 控制字体、字号、对齐、换行和边框。`print` 控制纸张、方向、边距（英寸）、页眉页脚、打印宽度和跨页重复表头。
+- 改好后在单据窗口点预览，可分别用短单和跨页长单核对。已保存的文件保留生成时的样式。美鲸灵送货确认单依据现有送货字段建立，可在收到正式样稿后更新独立 JSON。
+
 ## 物料档案 Excel 导入
 
 “物料管理”的 Excel 导入兼容标准模板和现有 `物料档案.xlsx`：表头可按名称识别，“物料类别”既可填写分类编码，也可直接填写原材料、半成品、成品、辅料耗材等中文名称。
@@ -116,19 +131,15 @@ cmake --build build
 
 ## Windows 发布
 
-发布脚本必须明确选择产品，两个发布包不会混装：
+唯一外发文件是 `dist/WMS仓库系统.zip`。包内包含冰美肌、美鲸灵、主机后台和客户端。主机和其他电脑使用同一个 ZIP。业务数据保存在各自配置的数据库中。
 
 ```powershell
-# 冰美肌免安装包
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Product IceBeauty -ZipOnly
-
-# 美鲸灵免安装包
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Product MeiJingLing -ZipOnly
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 ```
 
-不传 `-Product` 时默认生成冰美肌版本；去掉 `-ZipOnly` 才会生成对应安装程序。脚本会检查 Windows 平台插件与 SQLite 驱动并执行独立启动验证，也可通过 `-QtRoot` 显式指定 Qt 路径。安装位置和数据库目录均按产品名称分开，不会互相覆盖。
+脚本从当前源码构建 Release，将完整包逐文件校验后替换同名 ZIP，并清理临时目录。可用 `-ServerAddress` 预填局域网主机地址。
 
-项目约定：开发阶段不自动执行发布脚本；仅在 Debug 人工调试完成且用户明确要求后生成安装程序和 ZIP。
+本机开发时双击根目录的 **启动冰美肌.cmd** 或 **启动美鲸灵.cmd**。两个入口分别构建并打开 Qt Creator 默认 Debug 目录中的对应程序。
 
 ## 数据安全
 

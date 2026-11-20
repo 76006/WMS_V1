@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "sheetName": "Sheet1",
+  "layoutColumns": 9,
+  "header": [
+    {"height": 43.5, "cells": [{"from": 1, "to": 9, "style": "title", "text": "材料检验通知单"}]},
+    {"height": 38.25, "cells": [{"from": 1, "to": 1, "style": "label"}, {"from": 7, "to": 9, "style": "label2", "text": "编号："}]},
+    {
+      "height": 28.5,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label3", "text": "委托人员："},
+        {"from": 2, "to": 3, "style": "label4", "text": "{fields.entrustedBy}"},
+        {"from": 9, "to": 9, "style": "label5"}
+      ]
+    },
+    {
+      "height": 28.5,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label3", "text": "通知单位："},
+        {"from": 2, "to": 3, "style": "label4", "text": "{fields.notificationDepartment}"},
+        {"from": 8, "to": 9, "style": "label6"}
+      ]
+    },
+    {
+      "height": 28.5,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label3", "text": "到货日期："},
+        {"from": 2, "to": 3, "style": "label7", "text": "{fields.arrivalDate}"},
+        {"from": 9, "to": 9, "style": "label5"}
+      ]
+    },
+    {
+      "height": 28.5,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label3", "text": "通知日期："},
+        {"from": 2, "to": 3, "style": "label8", "text": "{documentDate}"},
+        {"from": 9, "to": 9, "style": "label5"}
+      ]
+    },
+    {
+      "height": 28.5,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label3", "text": "待检状态："},
+        {"from": 2, "to": 4, "style": "label9", "text": "加急  {expeditedMark}（1-3天）"},
+        {"from": 5, "to": 7, "style": "label4", "text": "急  {urgentMark}（7天内）"},
+        {"from": 8, "to": 9, "style": "label2", "text": "正常  {normalMark}（7-15天）"}
+      ]
+    },
+    {
+      "height": 28.5,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label3", "text": "检验数量："},
+        {"from": 2, "to": 3, "style": "label7", "text": "{totalQuantity}"},
+        {"from": 9, "to": 9, "style": "label5"}
+      ]
+    },
+    {
+      "height": 28.5,
+      "cells": [{"from": 1, "to": 1, "style": "label3", "text": "检验日期："}, {"from": 2, "to": 3, "style": "label10"}, {"from": 9, "to": 9, "style": "label5"}]
+    },
+    {"height": 15.0, "cells": [{"from": 1, "to": 1, "style": "label"}, {"from": 9, "to": 9, "style": "label5"}]}
+  ],
+  "details": {
+    "minRows": 15,
+    "headerHeight": 18.75,
+    "rowHeight": 18.75,
+    "columns": [
+      {"label": "物料号", "field": "line.code", "width": 16.909},
+      {"label": "物料名称", "field": "line.name", "width": 15.909, "span": 2},
+      {"label": "数量", "field": "line.quantity", "width": 8.636, "style": "number"},
+      {"label": "对应采购单号", "field": "line.orderNumber", "width": 14.909},
+      {"label": "批号", "field": "line.batchNo", "width": 17.636, "span": 2},
+      {"label": "供应商", "field": "line.supplier", "width": 25.909, "span": 2}
+    ]
+  },
+  "footer": [
+    {"height": 15.0, "cells": [{"from": 1, "to": 1, "style": "label"}, {"from": 9, "to": 9, "style": "label5"}]},
+    {"height": 15.0, "cells": [{"from": 1, "to": 9, "style": "signature", "text": "检验结果："}]},
+    {"height": 15.0, "cells": [{"from": 1, "to": 1, "style": "label"}, {"from": 9, "to": 9, "style": "label5"}]},
+    {"height": 15.0, "cells": [{"from": 1, "to": 1, "style": "label"}, {"from": 9, "to": 9, "style": "label5"}]},
+    {"height": 15.0, "cells": [{"from": 1, "to": 1, "style": "label"}, {"from": 9, "to": 9, "style": "label5"}]},
+    {
+      "height": 15.0,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label"},
+        {"from": 4, "to": 6, "style": "label9", "text": "检验者："},
+        {"from": 8, "to": 9, "style": "label2", "text": "委托人员："}
+      ]
+    },
+    {"height": 15.0, "cells": [{"from": 1, "to": 1, "style": "label"}, {"from": 9, "to": 9, "style": "label5"}]},
+    {
+      "height": 15.0,
+      "cells": [
+        {"from": 1, "to": 1, "style": "label"},
+        {"from": 4, "to": 6, "style": "label9", "text": "部门负责人："},
+        {"from": 7, "to": 9, "style": "signature2", "text": "□合格入库 □不入库，需处理"}
+      ]
+    },
+    {
+      "height": 15.0,
+      "cells": [
+        {"from": 1, "to": 1, "style": "signature3"},
+        {"from": 2, "to": 2, "style": "signature4"},
+        {"from": 3, "to": 3, "style": "signature4"},
+        {"from": 4, "to": 4, "style": "signature4"},
+        {"from": 5, "to": 5, "style": "signature4"},
+        {"from": 6, "to": 6, "style": "signature4"},
+        {"from": 7, "to": 7, "style": "signature4"},
+        {"from": 8, "to": 8, "style": "signature4"},
+        {"from": 9, "to": 9, "style": "signature5"}
+      ]
+    }
+  ],
+  "styles": {
+    "default": {"font": "宋体", "size": 11.0},
+    "tableHeader": {"size": 12.0, "align": "center", "border": "all", "wrap": true},
+    "detail": {"size": 12.0, "align": "left", "border": "all", "wrap": true},
+    "number": {"size": 12.0, "align": "right", "border": "all", "wrap": true},
+    "title": {"size": 18.0, "align": "center", "border": "all", "wrap": true},
+    "label": {"size": 12.0, "align": "left", "border": "left"},
+    "label2": {"size": 12.0, "align": "left", "border": "right", "wrap": true},
+    "label3": {"size": 12.0, "align": "left", "border": "left", "wrap": true},
+    "label4": {"size": 12.0, "align": "center", "wrap": true},
+    "label5": {"size": 12.0, "align": "left", "border": "right"},
+    "label6": {"size": 12.0, "align": "center", "border": "right"},
+    "label7": {"size": 12.0, "align": "center", "border": "bottom", "wrap": true},
+    "label8": {"size": 12.0, "align": "center", "border": "top bottom", "wrap": true},
+    "label9": {"size": 12.0, "align": "left", "wrap": true},
+    "label10": {"size": 12.0, "align": "center", "border": "top bottom"},
+    "signature": {"size": 12.0, "align": "left", "border": "left right", "wrap": true},
+    "signature2": {"size": 12.0, "align": "center", "border": "right", "wrap": true},
+    "signature3": {"size": 12.0, "align": "left", "border": "left bottom"},
+    "signature4": {"size": 12.0, "align": "left", "border": "bottom"},
+    "signature5": {"size": 12.0, "align": "left", "border": "right bottom"}
+  },
+  "print": {
+    "orientation": "portrait",
+    "paperSize": 9,
+    "fitToWidth": 1,
+    "repeatHeader": false,
+    "centerHorizontally": true,
+    "centerVertically": false,
+    "margins": {"left": 0.7514, "right": 0.7514, "top": 1.0, "bottom": 1.0, "header": 0.5, "footer": 0.5},
+    "header": "&L上海美鲸灵医疗科技有限公司&R编号：MG-JL13-07",
+    "footer": "&L版本所有，_x000a_未经允许不得修改及复制！&C&P/&N&R版本：A0"
+  }
+}

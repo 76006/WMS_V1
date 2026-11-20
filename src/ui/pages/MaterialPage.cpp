@@ -1,4 +1,6 @@
 #include "ui/pages/MaterialPage.h"
+#include <QStackedWidget>
+#include <QTabBar>
 
 #include "core/SystemProfile.h"
 
@@ -36,11 +38,15 @@
 #include <QLineEdit>
 #include <QInputDialog>
 #include <QItemSelectionModel>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMessageBox>
 #include <QMap>
 #include <QPushButton>
 #include <QPixmap>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QScreen>
 #include <QSet>
 #include <QSignalBlocker>
@@ -74,6 +80,22 @@ constexpr int BomLookupCategoryRole = Qt::UserRole + 23;
 constexpr int BomLookupUnitRole = Qt::UserRole + 24;
 constexpr int BomLookupProcessingRole = Qt::UserRole + 25;
 constexpr int BomLookupActiveRole = Qt::UserRole + 26;
+
+QJsonArray materialBomNodes(const QTreeWidgetItem &parent)
+{
+    QJsonArray nodes;
+    for (int i = 0; i < parent.childCount(); ++i) {
+        const auto *child = parent.child(i);
+        QJsonObject node{
+            {"code", child->data(0, BomLookupCodeRole).toString()},
+            {"name", child->data(0, BomLookupNameRole).toString()},
+            {"quantity", child->data(4, Qt::UserRole).toDouble()}
+        };
+        if (child->childCount() > 0) node.insert("items", materialBomNodes(*child));
+        nodes.append(node);
+    }
+    return nodes;
+}
 
 void loadBomMaterialOptions(QSqlDatabase database, QComboBox *comboBox,
                             qlonglong productId, qlonglong currentMaterialId = 0)
@@ -279,7 +301,8 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     bomLayout->setContentsMargins(12, 12, 12, 12);
     // 成品名称与操作按钮分成两行，避免按钮较多时把成品名称压缩遮挡。
     auto *bomSelectorRow = new QHBoxLayout;
-    bomSelectorRow->addWidget(new QLabel(QStringLiteral("成品BOM"), bomPanel));
+    auto *bomSelectorLabel = new QLabel(QStringLiteral("成品BOM"), bomPanel);
+    bomSelectorRow->addWidget(bomSelectorLabel);
     m_bomProductCombo = new QComboBox(bomPanel);
     m_bomProductCombo->setMinimumWidth(320);
     m_bomProductCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -306,6 +329,18 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     }
     auto *bomActionRow = new QHBoxLayout;
     bomActionRow->setSpacing(8);
+    auto *materialJson = new QPushButton(QStringLiteral("导入成品 BOM JSON"), bomPanel);
+    auto *processJson = new QPushButton(QStringLiteral("导入工艺 BOM JSON"), bomPanel);
+    for (auto *button : {materialJson, processJson}) {
+        button->setEnabled(canEdit);
+        bomSelectorRow->addWidget(button);
+    }
+    processJson->hide();
+    connect(materialJson, &QPushButton::clicked, this, [this] { importBomJson(false); });
+    connect(processJson, &QPushButton::clicked, this, [this] { importBomJson(true); });
+    m_exportBomJsonButton = new QPushButton(QStringLiteral("导出 JSON"), bomPanel);
+    bomSelectorRow->addWidget(m_exportBomJsonButton);
+    connect(m_exportBomJsonButton, &QPushButton::clicked, this, &MaterialPage::exportBomJson);
     bomActionRow->addWidget(m_importBomButton);
     bomActionRow->addWidget(m_viewBomMaterialButton);
     bomActionRow->addWidget(m_addBomChildButton);
@@ -343,10 +378,24 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
     m_bomTree->setMinimumHeight(280);
     bomLayout->addWidget(m_bomTree, 1);
 
-    m_viewTabs = new QTabWidget(this);
-    m_viewTabs->addTab(bomPanel, QStringLiteral("BOM层级"));
-    m_viewTabs->addTab(panel, QStringLiteral("全部物料"));
-    root->addWidget(m_viewTabs, 1);
+    m_viewTabs = new QTabBar(this);
+    m_viewTabs->setExpanding(false);
+    m_viewTabs->addTab(QStringLiteral("BOM层级"));
+    m_viewTabs->addTab(QStringLiteral("工艺BOM"));
+    m_viewTabs->addTab(QStringLiteral("全部物料"));
+    auto *views = new QStackedWidget(this);
+    views->addWidget(bomPanel);
+    views->addWidget(panel);
+    root->addWidget(m_viewTabs);
+    root->addWidget(views, 1);
+    connect(m_viewTabs, &QTabBar::currentChanged, this,
+            [this, views, bomPanel, panel, materialJson, processJson, bomSelectorLabel](int index) {
+        views->setCurrentWidget(index == 2 ? panel : bomPanel);
+        materialJson->setVisible(index == 0);
+        processJson->setVisible(processView());
+        bomSelectorLabel->setText(processView() ? QStringLiteral("工艺BOM") : QStringLiteral("成品BOM"));
+        if (index != 2) refreshBomTree();
+    });
 
     connect(searchButton, &QPushButton::clicked, this, &MaterialPage::refresh);
     connect(m_searchEdit, &QLineEdit::returnPressed, this, &MaterialPage::refresh);
@@ -376,10 +425,12 @@ MaterialPage::MaterialPage(QSqlDatabase database, Session session, QWidget *pare
         if (m_session.canManageMaterials()) editMaterial();
     });
     connect(m_bomTree, &QTreeWidget::itemDoubleClicked, this,
-            [this](QTreeWidgetItem *, int) { viewBomMaterialDetails(); });
+            [this](QTreeWidgetItem *row, int) {
+                if (row->data(0, BomMaterialIdRole).toLongLong() > 0) viewBomMaterialDetails();
+            });
     connect(m_bomTree, &QTreeWidget::itemSelectionChanged, this, [this, canEdit] {
         const QTreeWidgetItem *item = m_bomTree->currentItem();
-        m_viewBomMaterialButton->setEnabled(item);
+        m_viewBomMaterialButton->setEnabled(item && item->data(0, BomMaterialIdRole).toLongLong() > 0);
         m_addBomChildButton->setEnabled(canEdit && item);
         m_editBomQuantityButton->setEnabled(canEdit && item);
         m_removeBomItemButton->setEnabled(canEdit && item);
@@ -438,7 +489,7 @@ void MaterialPage::refresh()
 
     const QStringList headers = {QStringLiteral("ID"), QStringLiteral("物料编码"), QStringLiteral("物料名称"),
         QStringLiteral("规格型号"), QStringLiteral("物料类别"), QStringLiteral("加工方式"),
-        QStringLiteral("品牌"), QStringLiteral("单位"), QStringLiteral("单台用量"),
+        QStringLiteral("品牌/最新供应商"), QStringLiteral("单位"), QStringLiteral("单台用量"),
         QStringLiteral("当前库存"), QStringLiteral("最低库存"), QStringLiteral("库存提示"),
         QStringLiteral("物料状态"), QStringLiteral("批次管理"), QStringLiteral("SN管理"),
         QStringLiteral("默认仓库"), QStringLiteral("默认库位"), QStringLiteral("备注")};
@@ -490,6 +541,7 @@ void MaterialPage::refreshBomTree()
     m_editBomQuantityButton->setEnabled(false);
     m_removeBomItemButton->setEnabled(false);
     m_clearBomButton->setEnabled(false);
+    m_exportBomJsonButton->setEnabled(false);
     if (productId <= 0) return;
 
     QSqlQuery product(m_database);
@@ -517,38 +569,50 @@ void MaterialPage::refreshBomTree()
     rootFont.setBold(true);
     rootItem->setFont(0, rootFont);
 
-    QHash<qlonglong, QTreeWidgetItem *> itemById;
-    QSqlQuery items(m_database);
-    items.prepare(QStringLiteral(
-        "SELECT b.id,b.parent_item_id,b.component_material_id,b.quantity,"
-        "m.code,m.name,m.specification,c.name,m.unit,m.processing_method,"
-        "COALESCE((SELECT SUM(s.quantity) FROM stock_balances s WHERE s.material_id=m.id),0) "
-        "FROM material_bom_items b JOIN materials m ON m.id=b.component_material_id "
-        "LEFT JOIN material_categories c ON c.id=m.category_id "
-        "WHERE b.product_material_id=? ORDER BY b.id"));
-    items.addBindValue(productId);
-    if (items.exec()) {
-        while (items.next()) {
-            const qlonglong itemId = items.value(0).toLongLong();
-            const qlonglong parentId = items.value(1).toLongLong();
-            QTreeWidgetItem *parent = parentId > 0 ? itemById.value(parentId, rootItem) : rootItem;
-            auto *item = new QTreeWidgetItem(parent);
-            const double nodeQuantity = items.value(3).toDouble();
-            const double cumulative = parent->data(0, BomCumulativeQuantityRole).toDouble()
-                * nodeQuantity;
-            item->setText(0, QStringLiteral("%1 - %2")
-                                 .arg(items.value(4).toString(), items.value(5).toString()));
-            item->setText(1, items.value(6).toString());
-            item->setText(2, items.value(7).toString());
-            item->setText(3, items.value(8).toString());
-            item->setText(4, QString::number(nodeQuantity, 'g', 12));
-            item->setText(5, QString::number(cumulative, 'g', 12));
-            item->setText(6, items.value(9).toString());
-            item->setText(7, QString::number(items.value(10).toDouble(), 'g', 12));
-            item->setData(0, BomMaterialIdRole, items.value(2));
-            item->setData(0, BomItemIdRole, itemId);
-            item->setData(0, BomCumulativeQuantityRole, cumulative);
-            itemById.insert(itemId, item);
+    if (processView()) {
+        QString error;
+        if (!showProcessNodes(rootItem, error)) {
+            m_bomTree->clear();
+            QMessageBox::warning(this, QStringLiteral("读取工艺 BOM 失败"), error);
+            return;
+        }
+    } else {
+        QHash<qlonglong, QTreeWidgetItem *> itemById;
+        QSqlQuery items(m_database);
+        items.prepare(QStringLiteral(
+            "SELECT b.id,b.parent_item_id,b.component_material_id,b.quantity,"
+            "m.code,m.name,m.specification,c.name,m.unit,m.processing_method,"
+            "COALESCE((SELECT SUM(s.quantity) FROM stock_balances s WHERE s.material_id=m.id),0) "
+            "FROM material_bom_items b JOIN materials m ON m.id=b.component_material_id "
+            "LEFT JOIN material_categories c ON c.id=m.category_id "
+            "WHERE b.product_material_id=? ORDER BY b.id"));
+        items.addBindValue(productId);
+        if (items.exec()) {
+            while (items.next()) {
+                const qlonglong itemId = items.value(0).toLongLong();
+                const qlonglong parentId = items.value(1).toLongLong();
+                QTreeWidgetItem *parent = parentId > 0 ? itemById.value(parentId, rootItem) : rootItem;
+                auto *item = new QTreeWidgetItem(parent);
+                const double nodeQuantity = items.value(3).toDouble();
+                const double cumulative = parent->data(0, BomCumulativeQuantityRole).toDouble()
+                    * nodeQuantity;
+                item->setText(0, QStringLiteral("%1 - %2")
+                                     .arg(items.value(4).toString(), items.value(5).toString()));
+                item->setText(1, items.value(6).toString());
+                item->setText(2, items.value(7).toString());
+                item->setText(3, items.value(8).toString());
+                item->setText(4, QString::number(nodeQuantity, 'g', 12));
+                item->setText(5, QString::number(cumulative, 'g', 12));
+                item->setText(6, items.value(9).toString());
+                item->setText(7, QString::number(items.value(10).toDouble(), 'g', 12));
+                item->setData(0, BomMaterialIdRole, items.value(2));
+                item->setData(0, BomLookupCodeRole, items.value(4));
+                item->setData(0, BomLookupNameRole, items.value(5));
+                item->setData(4, Qt::UserRole, nodeQuantity);
+                item->setData(0, BomItemIdRole, itemId);
+                item->setData(0, BomCumulativeQuantityRole, cumulative);
+                itemById.insert(itemId, item);
+            }
         }
     }
     rootItem->setExpanded(true);
@@ -557,7 +621,66 @@ void MaterialPage::refreshBomTree()
     m_viewBomMaterialButton->setEnabled(true);
     m_editBomQuantityButton->setEnabled(canEdit);
     m_removeBomItemButton->setEnabled(canEdit);
-    m_clearBomButton->setEnabled(canEdit && !itemById.isEmpty());
+    m_clearBomButton->setEnabled(canEdit && rootItem->childCount() > 0);
+    m_exportBomJsonButton->setEnabled(rootItem->childCount() > 0);
+}
+
+void MaterialPage::exportBomJson()
+{
+    const auto *root = m_bomTree->topLevelItem(0);
+    if (!root || root->childCount() == 0) return;
+    const bool process = processView();
+    const QString productCode = m_bomProductCombo->currentData(BomProductCodeRole).toString();
+    QJsonObject bom = process
+        ? QJsonDocument::fromJson(m_processBom.originalPayload.toUtf8()).object()
+        : QJsonObject{{"nodes", materialBomNodes(*root)}};
+    bom.insert("productCode", productCode);
+    bom.insert("bomType", process ? "process" : "material");
+    const QByteArray json = QJsonDocument(bom).toJson(QJsonDocument::Indented);
+
+    const QString type = process ? QStringLiteral("工艺BOM") : QStringLiteral("成品BOM");
+    QString fileName = productCode + "_" + type + ".json";
+    fileName.replace(QRegularExpression(QStringLiteral(R"([<>:"/\\|?*\x00-\x1f])")), "_");
+    QFileDialog dialog(this, QStringLiteral("导出%1 JSON").arg(type));
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    dialog.setNameFilter(QStringLiteral("JSON 文件 (*.json)"));
+    dialog.setDefaultSuffix(QStringLiteral("json"));
+    dialog.selectFile(fileName);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    QSaveFile file(dialog.selectedFiles().first());
+    if (!file.open(QIODevice::WriteOnly) || file.write(json) != json.size() || !file.commit()) {
+        QMessageBox::warning(this, QStringLiteral("导出失败"), file.errorString());
+        return;
+    }
+    QMessageBox::information(this, QStringLiteral("导出完成"),
+                             QStringLiteral("已保存到 %1").arg(QDir::toNativeSeparators(file.fileName())));
+}
+
+bool MaterialPage::showProcessNodes(QTreeWidgetItem *root, QString &error)
+{
+    if (!ProcessBom::load(m_database, m_bomProductCombo->currentData().toLongLong(), m_processBom, error))
+        return false;
+    m_processBom.productCode = m_bomProductCombo->currentData(BomProductCodeRole).toString();
+    std::function<void(QTreeWidgetItem *, const QList<ProcessBomItem> &)> append =
+        [&](QTreeWidgetItem *parent, const QList<ProcessBomItem> &nodes) {
+        for (const auto &node : nodes) {
+            const double total = parent->data(0, BomCumulativeQuantityRole).toDouble() * node.quantity;
+            auto category = node.code.isEmpty() ? QStringLiteral("工艺组") : node.category;
+            if (!node.issueError.isEmpty()) category += " " + node.issueError;
+            auto *row = new QTreeWidgetItem(parent, {node.label(), node.specification, category.trimmed(),
+                    node.unit, QString::number(node.quantity, 'g', 15), QString::number(total, 'g', 15),
+                    node.processing, node.stock});
+            row->setData(0, BomMaterialIdRole, node.materialId);
+            row->setData(0, BomItemIdRole, parent->childCount());
+            row->setData(0, BomCumulativeQuantityRole, total);
+            row->setData(0, BomLookupCodeRole, node.code);
+            row->setData(0, BomLookupNameRole, node.name);
+            append(row, node.items);
+        }
+    };
+    append(root, m_processBom.groups);
+    return true;
 }
 
 void MaterialPage::viewBomMaterialDetails()
@@ -633,7 +756,7 @@ void MaterialPage::viewBomMaterialDetails()
     addField(0, 1, QStringLiteral("物料名称"), material.value(1).toString());
     addField(1, 0, QStringLiteral("规格型号"), displayValue(material.value(2).toString()));
     addField(1, 1, QStringLiteral("物料类别"), displayValue(material.value(3).toString()));
-    addField(2, 0, QStringLiteral("品牌"), displayValue(material.value(4).toString()));
+    addField(2, 0, QStringLiteral("品牌/最新供应商"), displayValue(material.value(4).toString()));
     addField(2, 1, QStringLiteral("单位"), material.value(5).toString());
     addField(3, 0, QStringLiteral("单台用量"),
              QString::number(material.value(6).toDouble(), 'g', 12));
@@ -740,8 +863,8 @@ void MaterialPage::viewBomMaterialDetails()
 
 qlonglong MaterialPage::selectedMaterialId() const
 {
-    if (m_viewTabs && m_viewTabs->currentIndex() == 0 && m_bomTree->currentItem())
-        return m_bomTree->currentItem()->data(0, BomMaterialIdRole).toLongLong();
+    if (m_viewTabs && m_viewTabs->currentIndex() != 2)
+        return m_bomTree->currentItem() ? m_bomTree->currentItem()->data(0, BomMaterialIdRole).toLongLong() : 0;
     const QModelIndex current = m_table->currentIndex();
     if (!current.isValid()) return 0;
     return m_model->index(current.row(), 0).data().toLongLong();
@@ -750,7 +873,7 @@ qlonglong MaterialPage::selectedMaterialId() const
 QList<qlonglong> MaterialPage::selectedMaterialIds() const
 {
     QList<qlonglong> ids;
-    if (m_viewTabs && m_viewTabs->currentIndex() == 0) {
+    if (m_viewTabs && m_viewTabs->currentIndex() != 2) {
         for (const QTreeWidgetItem *item : m_bomTree->selectedItems()) {
             const qlonglong id = item->data(0, BomMaterialIdRole).toLongLong();
             if (id > 0 && !ids.contains(id)) ids.append(id);
@@ -1756,18 +1879,18 @@ void MaterialPage::importBom()
     if (QMessageBox::question(
             this, QStringLiteral("确认导入BOM"),
             QStringLiteral("已识别成品 %1，共 %2 个BOM节点（半成品 %3 个、原材料/辅料 %4 个）。\n\n"
-                           "继续后将创建或更新相关物料，并替换该成品现有的整棵BOM。")
+                           "继续后将创建或更新相关物料，并替换该成品的%4。")
                 .arg(result.productCode)
                 .arg(result.rows.size() - 1)
                 .arg(semiFinishedCount)
-                .arg(leafCount)) != QMessageBox::Yes) {
+                .arg(leafCount).arg(processView() ? QStringLiteral("工艺BOM") : QStringLiteral("成品BOM"))) != QMessageBox::Yes) {
         return;
     }
 
     int created = 0;
     int updated = 0;
     if (!BomExcelImporter::importRows(m_database, m_session.userId, result,
-                                      &created, &updated, &error)) {
+                                      &created, &updated, &error, processView())) {
         QMessageBox::warning(this, QStringLiteral("BOM导入失败"), error);
         return;
     }
@@ -1775,7 +1898,6 @@ void MaterialPage::importBom()
     const int productIndex = m_bomProductCombo->findData(
         result.productCode, BomProductCodeRole);
     if (productIndex >= 0) m_bomProductCombo->setCurrentIndex(productIndex);
-    m_viewTabs->setCurrentIndex(0);
     QMessageBox::information(
         this, QStringLiteral("BOM导入完成"),
         QStringLiteral("成品 %1 的BOM已导入：新增物料 %2 条、更新物料 %3 条、层级节点 %4 个。")
@@ -1861,6 +1983,11 @@ void MaterialPage::addBomChild()
     const QString selected = materialCombo->itemText(selectedIndex);
     const double quantity = quantitySpin->value();
 
+    if (processView()) {
+        changeProcessNode(parentItem, true, materialCombo->itemData(selectedIndex, BomLookupCodeRole).toString(),
+                          materialCombo->itemData(selectedIndex, BomLookupNameRole).toString(), quantity);
+        return;
+    }
     const qlonglong parentBomItemId = parentItem->data(0, BomItemIdRole).toLongLong();
     QSqlQuery duplicate(m_database);
     duplicate.prepare(parentBomItemId > 0
@@ -1928,7 +2055,7 @@ void MaterialPage::editBomQuantity()
     const qlonglong itemId = item ? item->data(0, BomItemIdRole).toLongLong() : 0;
     const qlonglong materialId = item ? item->data(0, BomMaterialIdRole).toLongLong() : 0;
     const qlonglong productId = m_bomProductCombo->currentData().toLongLong();
-    if (!item || materialId <= 0 || productId <= 0) {
+    if (!item || (!processView() && materialId <= 0) || productId <= 0) {
         QMessageBox::information(this, QStringLiteral("请选择BOM节点"),
                                  QStringLiteral("请先选择需要调整的成品或下级节点。"));
         return;
@@ -1970,6 +2097,14 @@ void MaterialPage::editBomQuantity()
         if (descendantIndex >= 0) materialCombo->removeItem(descendantIndex);
         for (int childIndex = 0; childIndex < descendant->childCount(); ++childIndex)
             descendants.append(descendant->child(childIndex));
+    }
+    // A recipe may contain a named group or a part number awaiting its material record.
+    QLineEdit *sourceName = nullptr;
+    if (processView() && materialId == 0) {
+        materialCombo->insertItem(0, QStringLiteral("保留原节点"), qlonglong(0));
+        materialCombo->setItemData(0, item->data(0, BomLookupCodeRole), BomLookupCodeRole);
+        sourceName = new QLineEdit(item->data(0, BomLookupNameRole).toString(), &dialog);
+        form->addRow(QStringLiteral("配料表名称"), sourceName);
     }
     const int currentMaterialIndex = materialCombo->findData(materialId);
     materialCombo->setCurrentIndex(currentMaterialIndex);
@@ -2013,6 +2148,12 @@ void MaterialPage::editBomQuantity()
     const int selectedIndex = materialCombo->currentIndex();
     const qlonglong newMaterialId = materialCombo->itemData(selectedIndex).toLongLong();
     const double quantity = quantitySpin->value();
+    if (processView()) {
+        changeProcessNode(item, false, materialCombo->itemData(selectedIndex, BomLookupCodeRole).toString(),
+                          sourceName && newMaterialId == 0 ? sourceName->text().trimmed()
+                              : materialCombo->itemData(selectedIndex, BomLookupNameRole).toString(), quantity);
+        return;
+    }
     const qlonglong parentItemId = item->parent()
         ? item->parent()->data(0, BomItemIdRole).toLongLong() : 0;
     QSqlQuery duplicate(m_database);
@@ -2075,6 +2216,10 @@ void MaterialPage::removeBomItem()
                                       QStringLiteral("请先选择需要删除的BOM节点。"));
         return;
     }
+    if (processView()) {
+        removeProcessNode(item);
+        return;
+    }
     int subtreeCount = 1;
     QSqlQuery subtree(m_database);
     subtree.prepare(QStringLiteral(
@@ -2115,6 +2260,11 @@ void MaterialPage::clearBom()
     if (productId <= 0) {
         QMessageBox::information(this, QStringLiteral("请选择成品"),
                                  QStringLiteral("请先选择需要清空BOM的成品。"));
+        return;
+    }
+
+    if (processView()) {
+        if (auto *root = m_bomTree->topLevelItem(0)) removeProcessNode(root);
         return;
     }
 

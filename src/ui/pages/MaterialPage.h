@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Session.h"
+#include "services/ProcessBom.h"
 
 #include <QList>
 #include <QSqlDatabase>
@@ -11,9 +12,10 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSqlQueryModel;
-class QTabWidget;
+class QTabBar;
 class QTableView;
 class QTreeWidget;
+class QTreeWidgetItem;
 
 class MaterialPage final : public QWidget
 {
@@ -67,10 +69,21 @@ private:
     QTableView *m_table = nullptr;
     QSqlQueryModel *m_model = nullptr;
     QLabel *m_countLabel = nullptr;
-    QTabWidget *m_viewTabs = nullptr;
+    QTabBar *m_viewTabs = nullptr;
+    ProcessBom m_processBom;
+    bool processView() const;
+    void importBomJson(bool process);
+    void exportBomJson();
+    bool showProcessNodes(QTreeWidgetItem *root, QString &error);
+    void changeProcessNode(QTreeWidgetItem *item, bool add, const QString &code,
+                           const QString &name, double quantity);
+    void removeProcessNode(QTreeWidgetItem *item);
+    bool saveBomTree(qlonglong productId, const ProcessBom &bom, const QString *expected,
+                        const QString &action, const QString &detail);
     QComboBox *m_bomProductCombo = nullptr;
     QTreeWidget *m_bomTree = nullptr;
     QPushButton *m_importBomButton = nullptr;
+    QPushButton *m_exportBomJsonButton = nullptr;
     QPushButton *m_viewBomMaterialButton = nullptr;
     QPushButton *m_addBomChildButton = nullptr;
     QPushButton *m_editBomQuantityButton = nullptr;

@@ -403,7 +403,7 @@ bool StockLineTable::setProductionMaterials(
     }
 
     m_table->setUpdatesEnabled(false);
-    m_table->setRowCount(0);
+    const int originalRows = m_table->rowCount();
     QString missingMaterial;
     for (const auto &productionMaterial : materials) {
         const qlonglong materialId = productionMaterial.first;
@@ -424,11 +424,9 @@ bool StockLineTable::setProductionMaterials(
             updateProductionQuantity(row);
         }
     }
-    m_table->setUpdatesEnabled(true);
-
     if (!missingMaterial.isEmpty()) {
-        m_table->setRowCount(0);
-        if (!m_keepEmptyWhenNoRows) addLine();
+        m_table->setRowCount(originalRows);
+        m_table->setUpdatesEnabled(true);
         refreshRowNumbers();
         if (errorMessage) {
             *errorMessage = QStringLiteral("物料 ID %1 已停用或不存在，无法自动生成领料明细。")
@@ -436,8 +434,24 @@ bool StockLineTable::setProductionMaterials(
         }
         return false;
     }
+    for (int row = originalRows - 1; row >= 0; --row) m_table->removeRow(row);
+    m_table->setUpdatesEnabled(true);
     if (materials.isEmpty() && !m_keepEmptyWhenNoRows) addLine();
     refreshRowNumbers();
+    return true;
+}
+
+bool StockLineTable::setProductionRemaining(const QList<ProductionDemand> &materials, QString *errorMessage)
+{
+    QList<QPair<qlonglong, double>> usage;
+    for (const auto &d : materials) if (d.remaining() > 0.0000001) usage.append({d.materialId, d.unitUsage});
+    if (!setProductionMaterials(usage, errorMessage)) return false;
+    int row = 0;
+    for (const auto &d : materials) {
+        if (d.remaining() <= 0.0000001) continue;
+        auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row++, QuantityColumn));
+        if (quantity) quantity->setValue(d.remaining());
+    }
     return true;
 }
 
@@ -708,9 +722,33 @@ void StockLineTable::refreshReferenceData()
     for (int row = 0; row < m_table->rowCount(); ++row) {
         QComboBox *material = comboAt(row, MaterialColumn);
         const QVariant selected = material ? material->currentData() : QVariant();
+        auto *usage = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, UnitUsageColumn));
+        auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, QuantityColumn));
+        auto *serial = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
+        const bool preserveIssue = m_issueOptionsMode && selected.toLongLong() > 0;
+        const double enteredUsage = usage ? usage->value() : 0;
+        const double enteredQuantity = quantity ? quantity->value() : 0;
+        const auto *warehouse = comboAt(row, WarehouseColumn);
+        const auto *location = comboAt(row, LocationColumn);
+        const auto *batch = comboAt(row, BatchColumn);
+        const QVariant oldWarehouse = warehouse ? warehouse->currentData() : QVariant();
+        const QVariant oldLocation = location ? location->currentData() : QVariant();
+        const QString oldBatch = batch ? batch->currentText() : QString();
+        const QVariant oldSerials = serial ? serial->property("serials") : QVariant();
+        const QString oldSerialText = serial ? serial->text() : QString();
         if (material) loadMaterials(material, selected);
         loadUnitUsage(row);
         loadWarehouses(row);
+        if (preserveIssue && material && material->currentData() == selected) {
+            // A reference-data refresh must not turn a partial issue back into the full plan,
+            // nor replace the task BOM usage with the material archive's default usage.
+            if (usage) { const QSignalBlocker blocker(usage); usage->setValue(enteredUsage); }
+            if (quantity) { const QSignalBlocker blocker(quantity); quantity->setValue(enteredQuantity); }
+            if (serial && warehouse && location && batch && warehouse->currentData() == oldWarehouse
+                && location->currentData() == oldLocation && batch->currentText() == oldBatch) {
+                serial->setProperty("serials", oldSerials); serial->setText(oldSerialText);
+            }
+        }
     }
 }
 
