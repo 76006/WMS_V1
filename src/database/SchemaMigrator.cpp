@@ -133,10 +133,27 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     if (!applyTwoDigitNumberRulesMigration(database, errorMessage)) {
         return false;
     }
+    if (!applyFlexibleProductionIssuesMigration(database, errorMessage)) {
+        return false;
+    }
     if (!ensureSystemIdentity(database, errorMessage)) {
         return false;
     }
     return ensureDefaultAdministrator(database, errorMessage);
+}
+
+bool SchemaMigrator::applyFlexibleProductionIssuesMigration(QSqlDatabase database, QString *errorMessage)
+{
+    QSqlQuery applied(database);
+    if (!applied.exec(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=22"))) {
+        if (errorMessage) *errorMessage = applied.lastError().text();
+        return false;
+    }
+    if (applied.next()) return true;
+    applied.finish();
+    return executeSqlResource(database,
+                              QStringLiteral(":/database/migrations/022_flexible_production_issues.sql"),
+                              QStringLiteral("升级数据库到版本22"), errorMessage);
 }
 
 bool SchemaMigrator::applyTwoDigitNumberRulesMigration(QSqlDatabase database,

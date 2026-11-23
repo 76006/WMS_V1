@@ -419,7 +419,8 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
     if (!form) return false;
     QSqlQuery source(m_database);
     source.prepare(QStringLiteral(
-        "SELECT d.document_no,p.batch_no,p.product_name,p.product_model,p.planned_quantity "
+        "SELECT d.document_no,p.batch_no,p.product_name,p.product_model,"
+        "COALESCE(d.issue_unit_count,p.planned_quantity) "
         "FROM business_documents d LEFT JOIN production_runs p ON p.id=d.production_run_id "
         "WHERE d.id=? AND d.document_type='SCLL'"));
     source.addBindValue(request.sourceDocumentId);
@@ -457,8 +458,9 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
 
     QSqlQuery item(m_database);
     item.prepare(QStringLiteral(
-        "SELECT m.code,m.name,m.specification,m.unit,i.batch_no,i.quantity,i.notes "
+        "SELECT m.code,m.name,m.specification,m.unit,i.batch_no,i.quantity,i.notes,u.unit_usage "
         "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
+        "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
         "WHERE i.id=? AND i.document_id=?"));
     for (const ProductionReturnLine &line : request.lines) {
         item.bindValue(0, line.sourceItemId);
@@ -477,7 +479,9 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
         templateLine.unit = item.value(3).toString();
         templateLine.batchNo = item.value(4).toString();
         templateLine.quantity = item.value(5).toDouble();
-        if (plannedQuantity > 0.0) {
+        if (!item.value(7).isNull() && item.value(7).toDouble() >= 0.0) {
+            templateLine.unitUsage = item.value(7).toDouble();
+        } else if (plannedQuantity > 0.0) {
             templateLine.unitUsage = templateLine.quantity / plannedQuantity;
         }
         templateLine.returnQuantity = line.quantity;

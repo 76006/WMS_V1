@@ -342,7 +342,8 @@ private:
     bool setDocumentProductionContext(qlonglong documentId,
                                       qlonglong productionRunId,
                                       const QString &submissionToken,
-                                      QString *errorMessage);
+                                      QString *errorMessage,
+                                      const QVariant &issueUnitCount = QVariant());
     bool setDocumentSubmissionToken(qlonglong documentId,
                                     const QString &submissionToken,
                                     QString *errorMessage);

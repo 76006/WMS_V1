@@ -30,6 +30,7 @@ private:
     static bool applyInspectionQuantitiesMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyInspectionResultRecordsMigration(QSqlDatabase database, QString *errorMessage);
     static bool applySystemIdentityMigration(QSqlDatabase database, QString *errorMessage);
+    static bool applyFlexibleProductionIssuesMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyTwoDigitNumberRulesMigration(QSqlDatabase database,
                                                   QString *errorMessage);
     static bool ensureSystemIdentity(QSqlDatabase database, QString *errorMessage);

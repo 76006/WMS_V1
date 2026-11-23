@@ -52,7 +52,7 @@ QList<FieldDefinition> fieldDefinitions(const OfficeTemplateDocument &document)
             fields.append(FieldDefinition{QStringLiteral("productionBatch"),
                                           QStringLiteral("生产批次"), QString(), true});
             fields.append(FieldDefinition{QStringLiteral("plannedQuantity"),
-                                          QStringLiteral("计划数量"), QString(), true});
+                                          QStringLiteral("本次生产台数"), QString(), true});
         }
         return fields;
     }
@@ -238,6 +238,11 @@ void DocumentTemplateDialog::addEditableFields()
     for (const FieldDefinition &definition : definitions) {
         auto *edit = new QLineEdit(this);
         edit->setText(m_document.fields.value(definition.key, definition.defaultValue));
+        if (m_document.kind == OfficeFormKind::ProductionIssue
+            && m_document.fields.value(QStringLiteral("hasProductionContext")) == QStringLiteral("1")
+            && definition.key != QStringLiteral("receivingDepartment")) {
+            edit->setReadOnly(true);
+        }
         edit->setProperty("required", definition.required);
         m_fieldEdits.insert(definition.key, edit);
         form->addRow(definition.label + (definition.required ? QStringLiteral(" *") : QString()), edit);

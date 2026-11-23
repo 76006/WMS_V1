@@ -108,7 +108,8 @@ bool InventoryService::saveIssueLineOptions(qlonglong documentItemId,
 bool InventoryService::setDocumentProductionContext(qlonglong documentId,
                                                      qlonglong productionRunId,
                                                      const QString &submissionToken,
-                                                     QString *errorMessage)
+                                                     QString *errorMessage,
+                                                     const QVariant &issueUnitCount)
 {
     const QString token = submissionToken.trimmed();
     if (productionRunId <= 0 || token.isEmpty()) {
@@ -130,9 +131,10 @@ bool InventoryService::setDocumentProductionContext(qlonglong documentId,
 
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral(
-        "UPDATE business_documents SET production_run_id=?, submission_token=? WHERE id=?"));
+        "UPDATE business_documents SET production_run_id=?, submission_token=?, issue_unit_count=? WHERE id=?"));
     update.addBindValue(productionRunId);
     update.addBindValue(token);
+    update.addBindValue(issueUnitCount);
     update.addBindValue(documentId);
     if (!update.exec() || update.numRowsAffected() != 1) {
         const QString detail = update.lastError().text();
@@ -157,20 +159,14 @@ qlonglong InventoryService::ensureProductionRun(const ProductionRunRequest &run,
 
     QSqlQuery existing(m_database);
     existing.prepare(QStringLiteral(
-        "SELECT id, product_material_id, planned_quantity FROM production_runs WHERE batch_no=?"));
+        "SELECT id FROM production_runs WHERE batch_no=? AND product_material_id=?"));
     existing.addBindValue(batchNo);
+    existing.addBindValue(run.productMaterialId);
     if (!existing.exec()) {
         setProductionError(errorMessage, existing.lastError().text());
         return 0;
     }
     if (existing.next()) {
-        if (existing.value(1).toLongLong() != run.productMaterialId
-            || std::abs(existing.value(2).toDouble() - run.plannedQuantity)
-                   > ProductionQuantityTolerance) {
-            setProductionError(errorMessage,
-                               QStringLiteral("该生产批次已存在，成品或计划数量与原记录不一致。"));
-            return 0;
-        }
         return existing.value(0).toLongLong();
     }
 
@@ -230,28 +226,16 @@ bool InventoryService::postProductionIssue(const ProductionRunRequest &run,
                          document.documentDate, document.handlerName, document.purpose,
                          document.notes, QVariant(), errorMessage);
     if (documentId <= 0
-        || !setDocumentProductionContext(documentId, runId, document.submissionToken, errorMessage)) {
+        || !setDocumentProductionContext(documentId, runId, document.submissionToken,
+                                         errorMessage, run.plannedQuantity)) {
         rollback();
         return false;
     }
 
-    QSet<QString> identities;
     for (int index = 0; index < document.lines.size(); ++index) {
         StockMovementRequest movement = document.lines.at(index);
         movement.documentType = QStringLiteral("SCLL");
         movement.documentDate = document.documentDate;
-        const QString identity = QStringLiteral("%1|%2|%3|%4")
-                                     .arg(movement.materialId)
-                                     .arg(movement.warehouseId)
-                                     .arg(movement.locationId)
-                                     .arg(movement.batchNo.trimmed().toUpper());
-        if (identities.contains(identity)) {
-            setProductionError(errorMessage,
-                               lineError(index + 1, QStringLiteral("物料、库位和批次组合重复。")));
-            rollback();
-            return false;
-        }
-        identities.insert(identity);
 
         QString detail;
         const MaterialRules rules = materialRules(movement.materialId, &detail);

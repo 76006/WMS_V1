@@ -1306,8 +1306,9 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "COALESCE(s.contact_name,''),COALESCE(s.contact_phone,''),COALESCE(s.sales_order_no,''),"
         "COALESCE(s.logistics_company,''),COALESCE(s.tracking_no,''),"
         "COALESCE(s.delivery_date,''),COALESCE(p.batch_no,''),COALESCE(p.product_name,''),"
-        "COALESCE(p.product_model,''),COALESCE(p.planned_quantity,0) "
+        "COALESCE(p.product_model,''),COALESCE(d.issue_unit_count,src.issue_unit_count,p.planned_quantity,0) "
         "FROM business_documents d LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
+        "LEFT JOIN business_documents src ON d.document_type='SCTL' AND src.id=d.source_document_id "
         "LEFT JOIN production_runs p ON p.id=d.production_run_id WHERE d.id=?"));
     header.addBindValue(documentId);
     if (!header.exec() || !header.next()) {
@@ -1323,9 +1324,10 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "GROUP_CONCAT(DISTINCT sn.serial_no),source.quantity,"
         "COALESCE(o.external_dispatch,0),COALESCE(o.secondary_dispatch,0),"
         "COALESCE(o.loss_marked,0),COALESCE(o.return_to_stock,0),"
-        "COALESCE(u.unit_usage,-1) "
+        "COALESCE(NULLIF(u.unit_usage,-1),source_usage.unit_usage,-1) "
         "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
         "LEFT JOIN business_document_items source ON source.id=i.source_item_id "
+        "LEFT JOIN issue_line_usage source_usage ON source_usage.document_item_id=source.id "
         "LEFT JOIN issue_line_options o ON o.document_item_id=i.id "
         "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id "

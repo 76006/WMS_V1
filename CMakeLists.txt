@@ -136,6 +136,7 @@ set(WMS_RESOURCE_FILES
         database/migrations/019_inspection_result_records.sql
         database/migrations/020_system_identity.sql
         database/migrations/021_two_digit_number_rules.sql
+        database/migrations/022_flexible_production_issues.sql
         resources/PdfPreview.qml
         resources/fill_office_template.ps1
         resources/styles.qss

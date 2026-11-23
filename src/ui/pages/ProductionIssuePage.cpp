@@ -107,7 +107,7 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     auto *productionForm = new QFormLayout(m_productionFieldsGroup);
     productionForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     productionForm->addRow(QStringLiteral("生产批次"), m_batchEdit);
-    productionForm->addRow(QStringLiteral("生产台数"), m_plannedQuantity);
+    productionForm->addRow(QStringLiteral("本次生产台数"), m_plannedQuantity);
     panelLayout->addWidget(m_productionFieldsGroup);
 
     m_lines = new StockLineTable(m_database, StockLineTable::Mode::Outbound, panel);
@@ -216,7 +216,7 @@ void ProductionIssuePage::updateIssueType()
     m_usageHint->setText(
         production
             ? (hasProductionProduct
-                ? QStringLiteral("已填写生产信息：可逐项添加物料，也可点击“一键导入BOM用料”；总用量按生产台数计算。")
+                ? QStringLiteral("可逐项添加物料或导入BOM。实领数量按本次台数预填，可直接修改；同一物料可按库存批次分行领取。")
                 : QStringLiteral("生产信息可以不填。当前为直接领料模式，可逐项添加物料并手工填写领用数量；选择成品后可导入BOM并按台数计算。"))
             : QStringLiteral("点击“添加物料”逐项选择本次领用的物料、仓库、库位、批次和数量。"));
     m_submitButton->setEnabled(m_session.canPostProduction());
