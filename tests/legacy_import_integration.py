@@ -3,6 +3,7 @@ import base64
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -79,13 +80,14 @@ def fixture(path, exe):
         c.execute("INSERT INTO material_images(material_id,original_file_name,sha256,image_data,updated_by) VALUES(71,'旧图片.png',?,?,41)", (hashlib.sha256(IMAGE).hexdigest(), IMAGE))
         c.execute("INSERT INTO document_forms(id,document_id,form_kind,payload,status,attachment_id) VALUES(161,91,'INBOUND','{\"legacy\":true}','COMPLETED',151)")
         c.execute("INSERT INTO audit_logs(id,user_id,action,entity_type,entity_id,detail) VALUES(171,41,'POST','document',91,'旧单据审计')")
+        c.execute("INSERT INTO material_supplier_defaults(material_id,original_brand) VALUES(71,'原始品牌')")
         c.execute("UPDATE number_rules SET current_sequence=37,sequence_date='20260101' WHERE document_type='QTRK'")
         assert not list(c.execute('PRAGMA foreign_key_check'))
     c.close()
 
 
 def main():
-    folder = base.RUNTIME / ('legacy-import-test-' + uuid.uuid4().hex)
+    folder = Path(os.environ.get('WMS_TEST_DATA_ROOT', base.RUNTIME)) / ('legacy-import-test-' + uuid.uuid4().hex)
     folder.mkdir()
     databases = []
     def target(product):
@@ -93,16 +95,16 @@ def main():
         role = 'wms_icebeauty_business_demo'
         base.sql(f'CREATE DATABASE {name} OWNER {role}')
         databases.append(name)
-        env = base.ENV | {'WMS_PG_HOST':'127.0.0.1', 'WMS_PG_PORT':'55432',
+        env = base.ENV | {'WMS_PG_HOST':'127.0.0.1', 'WMS_PG_PORT':base.PG_PORT,
                          'WMS_PG_DATABASE':name, 'WMS_PG_USER':role,
                          'WMS_PG_PASSWORD':base.CREDS['app'],
                          'WMS_DEMO_ADMIN_PASSWORD':'123456', 'WMS_LAN_TEST_PASSWORDS':'1'}
         for flag in ('--init-lan-empty', '--init-business'):
             base.run([SERVER, '--product', product, flag], env=env)
         return name, env
-    def migrate(path, product, env, success=True):
+    def migrate(path, product, env, success=True, mode="empty", answer=""):
         before = digest(path)
-        result = base.run([SERVER, '--product', product, '--import-legacy', path], env=env,
+        result = base.run([SERVER, '--product', product, '--import-mode', mode, '--import-legacy', path], env=env, input_text=answer,
                           check=False, timeout=120)
         assert (result.returncode == 0) == success, (result.returncode, result.stdout, result.stderr)
         assert before == digest(path), 'Original SQLite file changed'
@@ -116,6 +118,17 @@ def main():
             name, env = target(product)
             other = 'MEI_JING_LING' if product == 'ICE_BEAUTY' else 'ICE_BEAUTY'
             migrate(source, other, env, False)
+            invalid = folder / (product + '-incompatible.db')
+            shutil.copyfile(source, invalid)
+            with sqlite3.connect(invalid) as c:
+                c.execute('ALTER TABLE materials ADD COLUMN future_value TEXT')
+            assert 'future_value' in migrate(invalid, product, env, False).stderr
+            migrate(source, product, env, mode='replace')
+            name, env = target(product)
+            with sqlite3.connect(source) as c:
+                c.execute('INSERT INTO schema_migrations(version) VALUES(?)',
+                          (25 if product == 'ICE_BEAUTY' else 5000000000,))
+                c.execute('DELETE FROM schema_migrations WHERE version=18')
             unrelated = folder / 'unrelated.db'
             with sqlite3.connect(unrelated) as c:
                 c.execute('CREATE TABLE IF NOT EXISTS unrelated(value TEXT)')
@@ -153,6 +166,7 @@ def main():
             finally:
                 writer.close()
             assert scalar(name, 'SELECT count(*) FROM materials') == '2'
+            assert scalar(name, 'SELECT original_brand FROM material_supplier_defaults WHERE material_id=71') == '原始品牌'
             assert scalar(name, "SELECT encode(file_data,'hex') FROM attachments WHERE id=151") == BLOB.hex()
             assert scalar(name, "SELECT encode(image_data,'hex') FROM material_images WHERE material_id=71") == IMAGE.hex()
             assert scalar(name, 'SELECT uploaded_by FROM attachments WHERE id=151') == '41'
@@ -173,22 +187,86 @@ def main():
                 assert status == 200 and 'error' not in result, result
                 assert int(result['postedDocument']['documentId']) > 91
             assert float(scalar(name, 'SELECT quantity FROM stock_balances WHERE id=111')) == 97.125
-            base.expect(True, f'{product}: preserved records, IDs, BLOBs, passwords, WAL and source; rejection/rollback; new outbound after migration')
-        # Simulate an identified v20 database, and a v19 original IceBeauty database.
-        for version in (19,20,21):
+            outgoing_before = scalar(name, 'SELECT count(*) FROM business_documents')
+            migrate(broken, product, env, False, mode='replace')
+            assert scalar(name, 'SELECT count(*) FROM business_documents') == outgoing_before
+            # An independently created file collides on both surrogate IDs and business keys.
+            second = folder / (product + '-second.db')
+            fixture(second, exe)
+            with sqlite3.connect(second) as c:
+                c.execute("INSERT INTO materials(id,code,name,unit) VALUES(72,'OTHER-MAT','第二库物料','个')")
+                c.execute("UPDATE business_documents SET notes='另一份同号单据'")
+                c.execute("UPDATE stock_balances SET quantity=7")
+                c.execute("UPDATE inventory_ledger SET quantity_in=7,quantity_after=7")
+                c.execute("UPDATE business_document_items SET quantity=7")
+                c.execute("INSERT INTO production_task_boms VALUES(81,?)",
+                          (json.dumps([{'key':'0','material':'72'}]),))
+            base.sql("INSERT INTO wms_business.warehouses(code,name) VALUES('HOST-STORE','重名仓库')", name)
+            with sqlite3.connect(second) as c:
+                c.execute("INSERT INTO warehouses(code,name) VALUES('OTHER-STORE','重名仓库')")
+            cancel = migrate(second, product, env, False, mode='merge', answer='\n')
+            assert 'OLD-0001' in cancel.stdout and 'MERGE' in cancel.stdout, (cancel.stdout,cancel.stderr)
+            assert scalar(name, 'SELECT count(*) FROM business_documents') == outgoing_before
+            assert scalar(name, "SELECT count(*) FROM materials WHERE code='OTHER-MAT'") == '0'
+            ok = migrate(second, product, env, mode='merge', answer='MERGE\n')
+            assert 'OLD-0001' in ok.stdout and '重名仓库' in ok.stdout
+            assert scalar(name,"SELECT count(*) FROM warehouses WHERE code IN ('HOST-STORE','OTHER-STORE')")== '2'
+            assert scalar(name, "SELECT count(*) FROM business_documents WHERE document_no LIKE 'OLD-0001%'") == '2'
+            assert float(scalar(name,'SELECT quantity FROM stock_balances WHERE id=111')) == 104.125
+            assert scalar(name, "SELECT count(*) FROM attachments a JOIN business_documents d ON d.id=a.business_id WHERE a.business_type='QTRK' AND d.notes='另一份同号单据'")=='1'
+            assert scalar(name, "SELECT count(*) FROM production_task_boms b JOIN materials m ON m.id=(b.payload::jsonb->0->>'material')::bigint WHERE m.code='OTHER-MAT'")=='1'
+            assert scalar(name, "SELECT count(*) FROM business_document_items i JOIN business_documents d ON d.id=i.document_id WHERE d.notes='另一份同号单据' AND i.quantity=7")=='1'
+            again = migrate(second, product, env, mode='merge')
+            assert 'MERGE' not in again.stdout and float(scalar(name,'SELECT quantity FROM stock_balances WHERE id=111'))==104.125
+            assert scalar(name, 'SELECT rows_imported FROM legacy_import_history')=='0'
+            with sqlite3.connect(second) as c:
+                c.execute('UPDATE stock_balances SET quantity=8')
+                c.execute('UPDATE inventory_ledger SET quantity_after=8,quantity_in=8')
+                c.execute('UPDATE business_document_items SET quantity=8')
+            migrate(second, product, env, mode='merge', answer='MERGE\n')
+            assert float(scalar(name,'SELECT quantity FROM stock_balances WHERE id=111'))==105.125
+            migrate(source, product, env, mode='replace')
+            assert scalar(name,"SELECT count(*) FROM materials WHERE code='OTHER-MAT'")=='0'
+            assert scalar(name,'SELECT count(*) FROM business_documents')=='1'
+            assert scalar(name,'SELECT count(*) FROM network_requests')=='0'
+            assert scalar(name, 'SELECT max(version) FROM schema_migrations') == '24'
+            if product == 'ICE_BEAUTY':
+                branch = folder / 'forked.db'
+                with sqlite3.connect(source) as original, sqlite3.connect(branch) as copy:
+                    original.backup(copy)
+                with sqlite3.connect(branch) as c:
+                    c.execute("INSERT INTO business_documents(id,document_no,document_type,stock_direction,document_date,created_by) VALUES(92,'SOURCE-92','QTCK','OUT','2026-01-02',41)")
+                base.sql("INSERT INTO wms_business.business_documents(id,document_no,document_type,stock_direction,document_date,created_by) VALUES(92,'HOST-92','QTCK','OUT','2026-01-02',41)", name)
+                migrate(branch,product,env,mode='merge',answer='MERGE\n')
+                assert scalar(name,"SELECT count(*) FROM business_documents WHERE document_no IN ('HOST-92','SOURCE-92')")=='2'
+            base.expect(True, f'{product}: future/gapped schema, conflict preview, cancel/commit, merge stock, ID links, retry, replacement/rollback and post-import outbound')
+        # Recreate each older SQLite layout, including the last release without product identity.
+        for version in (19,20,21,22,23):
             source = folder / f'older-{version}.db'
-            shutil.copyfile(folder / 'ICE_BEAUTY.db', source)
+            with sqlite3.connect(folder / 'ICE_BEAUTY.db') as original, sqlite3.connect(source) as copy:
+                original.backup(copy)
             with sqlite3.connect(source) as c:
                 c.execute('DELETE FROM schema_migrations WHERE version>?', (version,))
-                c.execute('DROP TABLE IF EXISTS process_boms')
+                c.execute('INSERT OR IGNORE INTO schema_migrations(version) VALUES(18)')
+                if version < 24:
+                    c.execute('DROP TABLE purchase_item_suppliers')
+                    c.execute('DROP TABLE material_supplier_defaults')
+                if version < 23:
+                    c.execute('DROP TABLE production_document_stages')
+                    c.execute('DROP TABLE production_task_boms')
+                if version < 22:
+                    c.execute('DROP TABLE process_boms')
                 if version == 19:
                     c.execute('DROP TABLE system_identity')
                     c.execute('PRAGMA application_id=0')
             name, env = target('ICE_BEAUTY')
             migrate(source, 'ICE_BEAUTY', env)
-            assert scalar(name, 'SELECT max(version) FROM schema_migrations') == '22'
             assert scalar(name, 'SELECT count(*) FROM materials') == '2'
-            base.expect(True, f'v{version} snapshot upgrades to v22 without modifying the original')
+            base.expect(True, f'v{version} snapshot upgrades to v24 without modifying the original')
+        # Compatible business data does not need migration metadata at all.
+        with sqlite3.connect(folder / 'ICE_BEAUTY.db') as c:
+            c.execute('DROP TABLE schema_migrations')
+        migrate(folder / 'ICE_BEAUTY.db', 'ICE_BEAUTY', env, mode='replace')
         print('PASS: complete legacy migration integration suite')
     finally:
         for name in databases:

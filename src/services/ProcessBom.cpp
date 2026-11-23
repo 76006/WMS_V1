@@ -144,10 +144,10 @@ bool ProcessBom::resolveMaterials(QSqlDatabase db, QString &error)
     return true;
 }
 
-bool ProcessBomItem::issueMaterials(double count, QList<QPair<qlonglong, double>> &lines, QString &error) const
+bool ProcessBomItem::issueMaterials(double count, QList<ProcessBomUsage> &lines, QString &error) const
 {
     QStringList problems;
-    QList<QPair<qlonglong, double>> result;
+    QList<ProcessBomUsage> result;
     QHash<qlonglong, qsizetype> positions;
     std::function<void(const ProcessBomItem &, double)> visit = [&](const ProcessBomItem &item, double parentUsage) {
         const double cumulative = parentUsage * item.quantity;
@@ -160,14 +160,14 @@ bool ProcessBomItem::issueMaterials(double count, QList<QPair<qlonglong, double>
         } else {
             if (!positions.contains(item.materialId)) {
                 positions.insert(item.materialId, result.size());
-                result.append({item.materialId, 0.0});
+                result.append({item.materialId, item.code, item.name, 0.0});
             }
-            result[positions.value(item.materialId)].second += cumulative;
+            result[positions.value(item.materialId)].quantity += cumulative;
         }
     };
     visit(*this, 1);
     for (const auto &line : result) {
-        const double usage = line.second;
+        const double usage = line.quantity;
         if (!std::isfinite(usage) || usage * count > maxLineQuantity || usage < 0.000001
             || std::abs(std::round(usage * 1e6) / 1e6 - usage) > 1e-10) {
             problems << QStringLiteral("累计用量超出领料数量范围或六位小数精度。");

@@ -246,14 +246,17 @@ bool InventoryService::saveProductionStage(qlonglong documentId, qlonglong runId
         setProductionError(errorMessage, QStringLiteral("此批次有旧版未区分半成品的领料记录，无法自动分摊。请为分阶段生产建立新的生产批次。"));
         return false;
     }
-    QList<ProductionDemand> demands;
-    if (!task.demand(m_database, runId, document.productionStageKey, run.value(1).toDouble(), demands, errorMessage)) return false;
-    const auto *stage = task.stage(document.productionStageKey);
     if (inbound) {
+        if (!task.isReceiptStage(document.productionStageKey)) {
+            setProductionError(errorMessage, QStringLiteral("请选择可完工入库的半成品或整机。")); return false;
+        }
+        const auto *stage = task.stage(document.productionStageKey);
         for (const auto &line : document.lines) if (line.materialId != stage->materialId) {
             setProductionError(errorMessage, QStringLiteral("完工入库物料与所选半成品/整机工序不一致。")); return false;
         }
     } else {
+        QList<ProductionDemand> demands;
+        if (!task.demand(m_database, runId, document.productionStageKey, run.value(1).toDouble(), demands, errorMessage)) return false;
         QMap<qlonglong, double> remaining;
         for (const auto &d : demands) remaining.insert(d.materialId, d.remaining());
         for (const auto &line : document.lines) {

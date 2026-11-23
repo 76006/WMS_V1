@@ -2,6 +2,7 @@
 param(
     [ValidateSet('IceBeauty','MeiJingLing')][string]$Product,
     [string]$SourceDatabase,
+    [ValidateSet('Empty','Replace','Merge')][string]$Mode,
     [switch]$ConfirmImport
 )
 $ErrorActionPreference = 'Stop'
@@ -48,9 +49,28 @@ if (!(Test-Path -LiteralPath (Join-Path $pgData 'postmaster.pid') -PathType Leaf
 Write-Host "源文件：$($source.FullName)"
 Write-Host "目标系统：$productName    目标库：$database"
 Write-Host "主机数据库目录：$pgData"
+if (!$Mode) {
+    if ($ConfirmImport) { $Mode = 'Empty' }
+    else {
+        Write-Host '1 导入空库   2 合并（保留双方数据，列出冲突供确认）   3 整库替换（覆盖所选产品）'
+        switch (Read-Host '选择方式，回车取消') {
+            '1' { $Mode = 'Empty' }
+            '2' { $Mode = 'Merge' }
+            '3' { $Mode = 'Replace' }
+            '' { return }
+            default { throw '请输入 1、2 或 3。' }
+        }
+    }
+}
+$operation = switch ($Mode) {
+    Empty { '导入空库' }
+    Merge { '合并旧库和目标库' }
+    Replace { '整库替换：目标产品现有的账号、库存、单据及附件将被旧库覆盖' }
+}
+Write-Host "$productName — $operation"
 if (!$ConfirmImport) {
     Write-Host "请保存单据并退出该产品的所有联网前台。导入时将暂停$productName 后台。"
-    if ((Read-Host '确认将旧库导入此空业务库？输入 YES 继续，回车取消') -ne 'YES') { return }
+    if ((Read-Host '确认上面显示的目标和导入方式？输入 YES 继续，回车取消') -ne 'YES') { return }
 }
 $lock = [IO.File]::Open((Join-Path $runtime 'move-to-documents.lock'),'OpenOrCreate','ReadWrite','None')
 $restartServer = $false
@@ -70,7 +90,7 @@ try {
         $env:PATH = "D:\Qt\6.5.3\mingw_64\bin;$env:PATH"
     }
     $helpText = & $server --help
-    if ($LASTEXITCODE -or !($helpText -match '--import-legacy')) {
+    if ($LASTEXITCODE -or !($helpText -match '--import-mode')) {
         throw '请在包含旧库导入功能的新主机包目录中运行。'
     }
     $env:WMS_PG_HOST = '127.0.0.1'
@@ -84,11 +104,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw '连接或检查目标数据库失败。' }
         return $result
     }
-    if ((Read-Target 'SELECT product FROM wms_business.network_identity WHERE version=2') -ne $productCode) {
+    if ((Read-Target 'SELECT product FROM wms_business.network_identity') -ne $productCode) {
         throw '目标业务库与选定产品不符。'
     }
-    if ((Read-Target 'SELECT EXISTS(SELECT 1 FROM wms_business.materials UNION ALL SELECT 1 FROM wms_business.business_documents UNION ALL SELECT 1 FROM wms_business.stock_balances)') -ne 'f') {
-        throw '目标系统已录入物料、单据或库存。整库导入仅适用于刚初始化的空业务库。'
+    if ($Mode -eq 'Empty' -and (Read-Target 'SELECT EXISTS(SELECT 1 FROM wms_business.materials UNION ALL SELECT 1 FROM wms_business.business_documents UNION ALL SELECT 1 FROM wms_business.stock_balances)') -ne 'f') {
+        throw '目标系统已录入物料、单据或库存。请选择合并或整库替换。'
     }
     $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object LocalPort -eq $servicePort)
     if ($listeners.Count -gt 0) {
@@ -120,9 +140,44 @@ try {
     if ($sessionCount -ne '0') {
         throw '目标库仍有其他客户端连接，请先退出后重试。'
     }
-    & $server --product $productCode --import-legacy $source.FullName
-    if ($LASTEXITCODE -ne 0) { throw "旧库导入失败（退出码 $LASTEXITCODE），请查看上方原因。" }
-    Write-Host "$productName 旧库已成功导入，请用旧版账号及密码登录核对。"
+    # Qt writes UTF-8. Decode the diagnostic before Windows PowerShell displays it.
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $server
+    $info.Arguments = '--product {0} --import-mode {1} --import-legacy "{2}"' -f $productCode,$Mode.ToLowerInvariant(),$source.FullName
+    $info.UseShellExecute = $false
+    $info.RedirectStandardError = $true
+    $info.StandardErrorEncoding = [Text.Encoding]::UTF8
+    # Decode conflict descriptions as UTF-8 even on a CP936 console. Forward the
+    # operator's answer only after the server prints its decision prompt.
+    $info.RedirectStandardOutput = $true
+    $info.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $info.RedirectStandardInput = $true
+    $import = [Diagnostics.Process]::Start($info)
+    try {
+        $readError = $import.StandardError.ReadToEndAsync()
+        while ($null -ne ($line = $import.StandardOutput.ReadLine())) {
+            if ($line.StartsWith('{')) {
+                $report = $line | ConvertFrom-Json
+                Write-Host "本次写入 $($report.totalRows) 行。"
+                continue
+            }
+            Write-Host $line
+            if ($line.StartsWith('核对以上全部处理后，输入 MERGE')) {
+                $answer = Read-Host
+                $import.StandardInput.WriteLine([string]$answer)
+                $import.StandardInput.Flush()
+            }
+        }
+        $detail = $readError.GetAwaiter().GetResult().Trim()
+        $import.WaitForExit()
+        if ($import.ExitCode -ne 0) { throw "旧库导入失败（退出码 $($import.ExitCode)）。$detail" }
+        if ($detail) { Write-Warning $detail }
+    } finally {
+        $import.StandardInput.Close()
+        if (!$import.HasExited) { $import.WaitForExit() }
+        $import.Dispose()
+    }
+    Write-Host "$productName 旧库已成功导入，请登录核对库存和单据。"
 } catch { $importError = $_ }
 finally {
     $lock.Dispose()

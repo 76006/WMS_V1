@@ -57,5 +57,8 @@ Write-Host ('Data folder: ' + (& (Join-Path $PSScriptRoot 'get-lan-data-root.ps1
 foreach ($profile in $profiles) {
     Get-NetIPAddress -InterfaceIndex $profile.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notlike '169.254.*' } |
-        ForEach-Object { Write-Host ('第二台电脑的 client\server-address.txt 填写：' + $_.IPAddress + '  (' + $profile.InterfaceAlias + ')') }
+        ForEach-Object {
+            Write-Host ('第二台电脑的 client\server-address.txt 填写：' + $_.IPAddress + '  (' + $profile.InterfaceAlias + ')')
+            Write-Host ("免登录库存查询网址（冰美肌 / 美鲸灵）：http://{0}:18080/" -f $_.IPAddress)
+        }
 }

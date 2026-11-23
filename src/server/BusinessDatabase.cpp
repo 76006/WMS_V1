@@ -119,7 +119,7 @@ bool BusinessDatabase::upgradeProcessBoms(QSqlDatabase raw, const QString &produ
         return false;
     }
     if (query.value(0).isNull()) return true; // Standalone LAN pilot schema.
-    query.prepare("SELECT 1 FROM wms_business.network_identity WHERE product=? AND version=2");
+    query.prepare("SELECT 1 FROM wms_business.network_identity WHERE product=?");
     query.addBindValue(product);
     if (!query.exec() || !query.next()) {
         *error = QStringLiteral("联网业务库身份不匹配");

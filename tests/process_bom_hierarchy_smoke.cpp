@@ -1,7 +1,9 @@
 #include "database/SchemaMigrator.h"
 #include "import/LegacyInventoryImporter.h"
 #include "services/ProcessBom.h"
+#include "services/InventoryService.h"
 #include "ui/pages/MaterialPage.h"
+#include "ui/pages/ProductionIssuePage.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -14,6 +16,8 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSqlQuery>
+#include <QSqlError>
+#include <QTableWidget>
 #include <QTabBar>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -40,6 +44,96 @@ void checkHierarchyActions(QWidget &page)
         check(action->isVisible() && !action->visibleRegion().isEmpty(),
               QStringLiteral("页签未显示操作按钮：%1").arg(name));
     }
+}
+
+void checkProcessIssue(QSqlDatabase db, const Session &session, qlonglong productId)
+{
+    QString error;
+    ProductionTask task;
+    check(ProductionTask::load(db, 0, productId, task, &error), error);
+    const auto groups = task.issueStages();
+    check(groups.size() == 2 && groups.first().name == "装配组" && groups.last().key == "0",
+          "Expected a process group and whole-machine assembly");
+    const QString key = groups.first().key;
+    const auto semi = task.receiptStages().last();
+    QList<ProductionDemand> demand;
+    check(!task.isReceiptStage(key) && semi.code == "W1"
+          && !task.demand(db, 0, semi.key, 3, demand, &error), "Issue and receipt stages mixed");
+    check(task.demand(db, 0, key, 3, demand, &error) && demand.size() == 1
+          && demand.first().required == 42, "Expected process quantity (2 + 3 x 4) x 3");
+
+    ProductionIssuePage page(db, session);
+    QComboBox *products = nullptr;
+    QComboBox *stages = nullptr;
+    for (auto *combo : page.findChildren<QComboBox *>()) {
+        if (combo->findText("不选择产品") >= 0) products = combo;
+        if (combo->findText("手工领料（不统计阶段进度）") >= 0) stages = combo;
+    }
+    check(products && stages, "Missing production selectors");
+    products->setCurrentIndex(products->findData(productId));
+    check(stages->currentData().toString() == key && stages->currentText().contains("装配组")
+          && stages->findData(semi.key) < 0, "Issue page used the material hierarchy");
+    QTableWidget *progress = nullptr;
+    for (auto *table : page.findChildren<QTableWidget *>()) {
+        if (table->columnCount() == 5 && table->horizontalHeaderItem(4)
+            && table->horizontalHeaderItem(4)->text() == "未领数量") progress = table;
+    }
+    check(progress && progress->rowCount() == 1 && progress->item(0, 0)->text() == "M1"
+          && progress->item(0, 4)->text().toDouble() == 14, "Wrong process materials in the issue page");
+
+    QSqlQuery sql(db);
+    check(sql.exec("INSERT INTO warehouses(code,name) VALUES('TEST-WH','Test warehouse')"), sql.lastError().text());
+    StockMovementRequest line;
+    line.materialId = demand.first().materialId;
+    line.warehouseId = sql.lastInsertId().toLongLong();
+    sql.prepare("INSERT INTO locations(warehouse_id,code) VALUES(?,'TEST-LOC')");
+    sql.addBindValue(line.warehouseId);
+    check(sql.exec(), sql.lastError().text());
+    line.locationId = sql.lastInsertId().toLongLong();
+    line.quantity = 12;
+    line.batchNo = "TEST-BATCH";
+    sql.prepare("INSERT INTO stock_balances(material_id,warehouse_id,location_id,batch_no,quantity) VALUES(?,?,?,?,100)");
+    for (const auto value : {line.materialId,line.warehouseId,line.locationId}) sql.addBindValue(value);
+    sql.addBindValue(line.batchNo);
+    check(sql.exec(), sql.lastError().text());
+    StockDocumentRequest issue;
+    issue.documentDate = QDate::currentDate();
+    issue.submissionToken = "issue-1";
+    issue.productionStageKey = key;
+    issue.productionBomFingerprint = task.fingerprint();
+    issue.lines = {line};
+    ProductionRunRequest run{"TASK-1", productId, 3};
+    InventoryService inventory(db, session.userId);
+    qlonglong runId = 0;
+    check(inventory.postProductionIssue(run, issue, nullptr, &runId, &error), error);
+    check(ProductionTask::load(db, runId, productId, task, &error) && task.fingerprint() == issue.productionBomFingerprint
+          && task.demand(db, runId, key, 3, demand, &error) && demand.first().remaining() == 30,
+          "Partial issue did not keep the original process demand");
+    issue.submissionToken = "issue-2";
+    issue.lines.first().quantity = 31;
+    check(!inventory.postProductionIssue(run, issue, nullptr, nullptr, &error) && error.contains("剩余"),
+          "Accepted an issue larger than the remaining process demand");
+
+    // A pre-process snapshot keeps the original material hierarchy and its stage IDs.
+    QJsonArray legacy;
+    for (const auto &value : QJsonDocument::fromJson(task.payload().toUtf8()).array()) {
+        auto node = value.toObject();
+        if (node.contains("kind")) continue;
+        node.remove("processBom");
+        legacy.append(node);
+    }
+    sql.prepare("INSERT INTO production_runs(batch_no,product_material_id,product_name,planned_quantity,created_by) "
+                "VALUES('OLD-TASK',?,'Product',3,1)");
+    sql.addBindValue(productId);
+    check(sql.exec(), sql.lastError().text());
+    const auto oldId = sql.lastInsertId().toLongLong();
+    sql.prepare("INSERT INTO production_task_boms(production_run_id,payload) VALUES(?,?)");
+    sql.addBindValue(oldId);
+    sql.addBindValue(QString::fromUtf8(QJsonDocument(legacy).toJson(QJsonDocument::Compact)));
+    check(sql.exec(), sql.lastError().text());
+    check(ProductionTask::load(db, oldId, productId, task, &error) && !task.usesProcessBom()
+          && task.demand(db, oldId, semi.key, 3, demand, &error) && demand.first().required == 27,
+          "Legacy task switched to the process BOM");
 }
 
 void editNode(QWidget &page, QString action, QString code, double quantity)
@@ -205,9 +299,10 @@ int main(int argc, char **argv)
     const auto id = product.value(0).toLongLong();
     ProcessBom saved;
     check(ProcessBom::load(db, id, saved, error), error);
-    QList<QPair<qlonglong,double>> lines;
+    QList<ProcessBomUsage> lines;
     check(saved.groups.first().issueMaterials(3, lines, error) && lines.size()==1
-              && lines.first().second == 14, "Expected per-unit issue quantity 2 + 3 x 4");
+              && lines.first().quantity == 14, "Expected per-unit issue quantity 2 + 3 x 4");
+    checkProcessIssue(db, session, id);
     tree->setCurrentItem(root()->child(0)->child(1));
     QTimer::singleShot(0, confirm);
     button(page, "删除选中节点")->click();
@@ -216,6 +311,13 @@ int main(int argc, char **argv)
     QTimer::singleShot(0, confirm);
     button(page, "清空整棵BOM")->click();
     check(root()->childCount() == 0, "Clear process tree");
+    ProductionTask batch;
+    QSqlQuery run(db);
+    check(run.exec("SELECT id FROM production_runs WHERE batch_no='TASK-1'") && run.next(), "Missing test run");
+    check(ProductionTask::load(db, run.value(0).toLongLong(), id, batch, &error)
+          && batch.issueStages().first().name == "装配组", "Clearing the master BOM changed a posted task");
+    check(ProductionTask::load(db, 0, id, batch, &error) && batch.issueStages().size() == 1
+          && batch.issueStages().first().key == "0", "Exposed material semi-finished stages without a process BOM");
     check(!exportButton->isEnabled(), "Empty tree offered an unusable export");
     editNode(page, "添加下级", "W1", 2);
     check(root()->child(0)->text(5) == "2", "Create from empty root");
@@ -230,5 +332,5 @@ int main(int argc, char **argv)
     check(button(viewer, "导出 JSON")->isEnabled(), "Viewer cannot export the displayed BOM");
     for (const QString &name : {"导入成品 BOM JSON","导入工艺 BOM JSON","导入BOM","添加下级","调整选中节点","删除选中节点","清空整棵BOM"})
         check(!button(viewer, name)->isEnabled(), "Read-only user can edit");
-    qInfo("PASS material and process JSON export/edit/import, precision, hierarchy, isolation and permissions");
+    qInfo("PASS material and process BOM maintenance, process issue stages, partial issues and snapshot compatibility");
 }

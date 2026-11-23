@@ -3,14 +3,13 @@
 #include "core/SystemProfile.h"
 #include "database/SchemaMigrator.h"
 #include <QFileInfo>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QUuid>
 #include <QVariant>
 
 namespace {
-constexpr int currentVersion = 22;
-
 QString connectionName()
 {
     return QStringLiteral("import_sqlite_") + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -45,25 +44,16 @@ bool copySnapshot(const QString &source, const QString &target, QString *error)
     return ok;
 }
 
-bool inspect(QSqlDatabase db, const QString &product, int *version, QString *error)
+bool inspect(QSqlDatabase db, const QString &product, QString *error)
 {
     QSqlQuery q(db);
     if (!q.exec(QStringLiteral(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
-            "('schema_migrations','roles','users','materials','warehouses','locations',"
+            "('roles','users','materials','warehouses','locations',"
             "'stock_balances','business_documents','business_document_items','inventory_ledger')"))
-        || !q.next() || q.value(0).toInt() != 10) {
+        || !q.next() || q.value(0).toInt() != 9) {
         return fail(error, QStringLiteral("所选文件不是完整的旧版仓库数据库。"));
     }
-    if (!q.exec(QStringLiteral("SELECT version FROM schema_migrations ORDER BY version")))
-        return fail(error, q.lastError().text());
-    int latest = 0;
-    while (q.next()) {
-        if (q.value(0).toLongLong() != ++latest || latest > currentVersion)
-            return fail(error, QStringLiteral("旧库迁移记录不连续或版本超过 %1。").arg(currentVersion));
-    }
-    if (!latest || q.lastError().isValid())
-        return fail(error, QStringLiteral("无法确认旧库的版本。"));
     if (!q.exec(QStringLiteral("PRAGMA application_id")) || !q.next())
         return fail(error, QStringLiteral("无法读取旧库的产品标识。"));
     const int appId = q.value(0).toInt();
@@ -73,17 +63,14 @@ bool inspect(QSqlDatabase db, const QString &product, int *version, QString *err
     if (!q.exec(QStringLiteral("SELECT 1 FROM sqlite_master WHERE type='table' AND name='system_identity'")))
         return fail(error, q.lastError().text());
     const bool identified = q.next();
-    if (identified != (latest >= 20))
-        return fail(error, QStringLiteral("产品身份表与旧库版本不一致。"));
     if (identified) {
         if (!q.exec(QStringLiteral("SELECT profile_id FROM system_identity WHERE singleton_id=1"))
             || !q.next() || q.value(0).toString() != product) {
             return fail(error, QStringLiteral("旧库的产品身份与所选系统不符。"));
         }
     } else if (product != QStringLiteral("ICE_BEAUTY")) {
-        return fail(error, QStringLiteral("版本 20 以前的无身份标记旧库只能导入冰美肌。"));
+        return fail(error, QStringLiteral("此旧库没有产品标记，属于双系统拆分前的冰美肌。"));
     }
-    *version = latest;
     return true;
 }
 }
@@ -98,7 +85,7 @@ LegacySource::~LegacySource()
     }
 }
 
-bool LegacySource::prepare(const QString &sourceFile, const QString &product, QString *error)
+bool LegacySource::prepare(const QString &sourceFile, const QString &product, QSqlDatabase target, QString *error)
 {
     if (m_database.isValid() || !m_directory.isValid())
         return fail(error, QStringLiteral("无法创建用于迁移的临时工作目录。"));
@@ -117,17 +104,29 @@ bool LegacySource::prepare(const QString &sourceFile, const QString &product, QS
     m_database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName());
     m_database.setDatabaseName(snapshot);
     if (!m_database.open()) return fail(error, m_database.lastError().text());
-    int version = 0;
-    if (!inspect(m_database, product, &version, error)) return false;
+    if (!inspect(m_database, product, error)) return false;
     QSqlQuery check(m_database);
     if (!check.exec(QStringLiteral("PRAGMA foreign_keys=ON")))
         return fail(error, check.lastError().text());
-    if (version < currentVersion) {
-        if (!SchemaMigrator::migrate(m_database, error)) return false;
-        if (!inspect(m_database, product, &version, error)) return false;
-        if (version != currentVersion)
-            return fail(error, QStringLiteral("临时快照未升级到预期版本。"));
-    }
+    // Run old desktop migrations only when the snapshot actually lacks business fields.
+    QSet<QString> fields;
+    if (!check.exec("SELECT m.name,p.name FROM sqlite_master m JOIN pragma_table_xinfo(m.name) p "
+                    "WHERE m.type='table'")) return fail(error, check.lastError().text());
+    while (check.next()) fields.insert(check.value(0).toString() + '.' + check.value(1).toString());
+    if (check.lastError().isValid()) return fail(error, check.lastError().text());
+    check.finish();
+    QSqlQuery expected(target);
+    if (!expected.exec("SELECT table_name,column_name FROM information_schema.columns "
+                       "WHERE table_schema='wms_business' AND table_name IN (SELECT table_name FROM information_schema.tables "
+                       "WHERE table_schema='wms_business' AND table_type='BASE TABLE') AND table_name NOT IN "
+                       "('network_identity','network_requests','schema_migrations','legacy_import_history','legacy_merge_rows')"))
+        return fail(error, expected.lastError().text());
+    bool missing = false;
+    while (expected.next())
+        missing |= !fields.contains(expected.value(0).toString() + '.' + expected.value(1).toString());
+    if (expected.lastError().isValid()) return fail(error, expected.lastError().text());
+    if (missing && (!SchemaMigrator::migrate(m_database, error) || !inspect(m_database, product, error)))
+        return false;
     if (!check.exec(QStringLiteral("PRAGMA query_only=ON")) ||
         !check.exec(QStringLiteral("PRAGMA integrity_check")) || !check.next() ||
         check.value(0).toString() != QStringLiteral("ok")) {

@@ -15,6 +15,8 @@ private:
     struct Attempt { int count = 0; QDateTime until; };
     QHttpServerResponse login(const QHttpServerRequest &request);
     QHttpServerResponse inventory(const QHttpServerRequest &request);
+    QHttpServerResponse publicStock(const QHttpServerRequest &request);
+    QHttpServerResponse stockFilters();
     QByteArray tokenKey(const QHttpServerRequest &request) const;
     void prune();
     LanDatabase &m_database;

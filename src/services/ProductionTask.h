@@ -1,5 +1,7 @@
 #pragma once
 
+#include "services/ProcessBom.h"
+
 #include <QMap>
 #include <QSqlDatabase>
 #include <QString>
@@ -13,6 +15,8 @@ struct ProductionStage {
     QString code, name, model, category;
     double quantity = 1;
     double perMachine = 1;
+    QList<ProcessBomUsage> processMaterials;
+    QString issueError;
 };
 
 struct ProductionDemand {
@@ -30,12 +34,19 @@ public:
                      ProductionTask &task, QString *error);
     QString payload() const;
     QString fingerprint() const;
-    QList<ProductionStage> stages() const;
+    QList<ProductionStage> issueStages() const;
+    QList<ProductionStage> receiptStages() const;
+    bool isReceiptStage(const QString &key) const;
+    bool usesProcessBom() const { return m_usesProcessBom; }
     const ProductionStage *stage(const QString &key) const;
     QString stagePath(const QString &key) const;
     bool demand(QSqlDatabase db, qlonglong runId, const QString &key, double count,
                 QList<ProductionDemand> &result, QString *error) const;
     static double received(QSqlDatabase db, qlonglong runId, const QString &key, QString *error);
 private:
+    void expandMaterialDemand(const QString &parent, double multiplier,
+                              QMap<qlonglong, ProductionDemand> &grouped) const;
     QList<ProductionStage> m_nodes;
+    bool m_usesProcessBom = false;
+    QList<ProductionStage> m_processStages;
 };

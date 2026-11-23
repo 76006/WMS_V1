@@ -12,6 +12,7 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlRecord>
+#include <QTextStream>
 #include <cmath>
 #include <limits>
 
@@ -54,6 +55,18 @@ void checkReadEnd(const QSqlQuery &q)
     if (q.lastError().isValid()) throw Problem{q.lastError().text()};
 }
 
+void checkNames(const QSet<QString> &actual, const QSet<QString> &expected, const QString &context)
+{
+    if (actual == expected) return;
+    auto missing = (expected - actual).values(), extra = (actual - expected).values();
+    missing.sort();
+    extra.sort();
+    QStringList differences;
+    if (!missing.isEmpty()) differences << QStringLiteral("缺少 %1").arg(missing.join(", "));
+    if (!extra.isEmpty()) differences << QStringLiteral("多出 %1").arg(extra.join(", "));
+    throw Problem{context + "：" + differences.join("，")};
+}
+
 struct Baseline {
     QStringList tables;
     QMap<QString, QList<QJsonObject>> seeds;
@@ -93,6 +106,7 @@ Baseline loadBaseline(const QString &product)
     }
     require(!result.seeds.value("schema_migrations").isEmpty() && result.tables.contains("users"),
             QStringLiteral("无法识别业务数据库结构。"));
+    result.tables.removeOne("schema_migrations");
     return result;
 }
 
@@ -152,7 +166,7 @@ QList<Column> columnsFor(QSqlDatabase target, QSqlDatabase source, const QString
     QSet<QString> sourceNames;
     while (sourceColumns.next()) sourceNames.insert(sourceColumns.value(1).toString());
     checkReadEnd(sourceColumns);
-    require(!names.isEmpty() && names == sourceNames, QStringLiteral("单机与联网表结构不一致：%1。").arg(table));
+    checkNames(sourceNames, names, QStringLiteral("旧库 %1 的字段").arg(table));
     return columns;
 }
 
@@ -193,7 +207,7 @@ struct TableResult {
     bool identity = false;
 };
 
-TableResult copyTable(QSqlDatabase target, QSqlDatabase source, const QString &table)
+TableResult copyTable(QSqlDatabase target, QSqlDatabase source, const QString &table, const QString &destination)
 {
     const auto columns = columnsFor(target, source, table);
     QStringList fields, marks;
@@ -205,7 +219,7 @@ TableResult copyTable(QSqlDatabase target, QSqlDatabase source, const QString &t
     auto rows = read(source, "SELECT " + names + " FROM " + quoteName(table));
     QSqlQuery insert(target);
     insert.setNumericalPrecisionPolicy(QSql::HighPrecision);
-    if (!insert.prepare("INSERT INTO " + quoteName(table) + " (" + names + ") VALUES (" +
+    if (!insert.prepare("INSERT INTO " + destination + " (" + names + ") VALUES (" +
                         marks.join(',') + ") RETURNING " + names)) throw Problem{insert.lastError().text()};
     TableResult result;
     for (const auto &column : columns) result.identity |= column.identity;
@@ -236,13 +250,13 @@ TableResult copyTable(QSqlDatabase target, QSqlDatabase source, const QString &t
         insert.finish();
     }
     checkReadEnd(rows);
-    require(result.rows == scalar(target,"SELECT count(*) FROM " + quoteName(table)).toLongLong(),
+    require(result.rows == scalar(target,"SELECT count(*) FROM " + destination).toLongLong(),
             QStringLiteral("行数校验失败：%1。").arg(table));
     return result;
 }
 } // namespace
 
-bool LegacyImport::run(QSqlDatabase target, QSqlDatabase source, const QString &product,
+bool LegacyImport::run(QSqlDatabase target, QSqlDatabase source, const QString &product, const QString &mode,
                        QString *report, QString *error)
 {
     if (report) report->clear();
@@ -257,29 +271,25 @@ bool LegacyImport::run(QSqlDatabase target, QSqlDatabase source, const QString &
         auto schema = read(source, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'");
         while (schema.next()) sourceTables.insert(schema.value(0).toString());
         checkReadEnd(schema);
-        require(sourceTables == QSet<QString>(baseline.tables.cbegin(),baseline.tables.cend()),
-                QStringLiteral("单机表与受支持的版本不一致，未执行导入。"));
-        require(scalar(source, "SELECT profile_id FROM system_identity WHERE singleton_id=1").toString()==product &&
-                scalar(source, "PRAGMA application_id").toInt()==SystemProfile::databaseApplicationId(),
+        sourceTables.remove("schema_migrations");
+        checkNames(sourceTables, QSet<QString>(baseline.tables.cbegin(),baseline.tables.cend()), QStringLiteral("旧库业务表"));
+        require(scalar(source, "SELECT profile_id FROM system_identity WHERE singleton_id=1").toString()==product,
                 QStringLiteral("单机数据库产品身份不匹配。"));
-        require(scalar(source, "SELECT count(*) FROM users u JOIN roles r ON u.role_id=r.id WHERE "
-                      "r.code='ADMIN' AND u.is_active=1").toInt()>0, QStringLiteral("单机数据库没有可用的管理员。"));
 
         require(target.transaction(), QStringLiteral("无法开始导入事务。"));
         transaction = true;
         read(target, "SET LOCAL search_path=wms_business,public,pg_catalog");
         read(target, "SET LOCAL lock_timeout='5s'");
-        read(target, "SET LOCAL statement_timeout='120s'");
+        read(target, "SET LOCAL statement_timeout=0");
+        read(target, "SET LOCAL client_min_messages=warning");
         require(scalar(target, "SELECT pg_try_advisory_xact_lock(1977011602)").toBool(),
                 QStringLiteral("目标库正在写入，请停止该系统后台并重试。"));
         QStringList tables;
         for (const auto &table : baseline.tables) tables << quoteName(table);
         read(target, "LOCK TABLE " + tables.join(',') + ",network_identity,network_requests IN ACCESS EXCLUSIVE MODE");
-        require(scalar(target, "SELECT count(*)=1 AND bool_and(product=? AND version=2) FROM network_identity",
+        require(scalar(target, "SELECT count(*)=1 AND bool_and(product=?) FROM network_identity",
                        {product}).toBool(),
-                QStringLiteral("联网目标库产品或版本不匹配。"));
-        require(scalar(target, "SELECT to_regclass('wms_business.legacy_import_history') IS NULL").toBool(),
-                QStringLiteral("此目标库已经完成过单机导入，重复执行已拒绝。"));
+                QStringLiteral("联网目标库的产品不匹配。"));
         auto targetSchema = read(target, "SELECT table_name FROM information_schema.tables "
                                  "WHERE table_schema='wms_business' AND table_type='BASE TABLE'");
         QSet<QString> targetTables;
@@ -288,20 +298,38 @@ bool LegacyImport::run(QSqlDatabase target, QSqlDatabase source, const QString &
         auto expectedTables = sourceTables;
         expectedTables.insert("network_identity");
         expectedTables.insert("network_requests");
-        require(targetTables == expectedTables, QStringLiteral("联网业务库的表与受支持的版本不一致。"));
-        requireEmptyTarget(target,baseline);
+        expectedTables.insert("schema_migrations");
+        const bool imported = targetTables.remove("legacy_import_history");
+        targetTables.remove("legacy_merge_rows");
+        checkNames(targetTables, expectedTables, QStringLiteral("联网业务表"));
+        if (mode == "empty") {
+            require(!imported, QStringLiteral("目标库已有导入记录，请选择合并或整库替换。"));
+            requireEmptyTarget(target,baseline);
+        }
+        const bool merge = mode == "merge";
         const QStringList actorTables{"audit_logs","attachments","inspection_notices","material_images"};
         // Only turn off WMS's actor-stamping triggers, inside this locked transaction.
         // Keep all FK and check constraints, preserving original authors and timestamps.
         for (const auto &table : actorTables)
             read(target, "ALTER TABLE " + quoteName(table) + " DISABLE TRIGGER authenticated_actor");
         read(target, "SET CONSTRAINTS ALL DEFERRED");
-        read(target, "TRUNCATE TABLE " + tables.join(','));
+        read(target, "CREATE TABLE IF NOT EXISTS legacy_merge_rows (origin text NOT NULL, tab text NOT NULL, "
+                     "src_key text NOT NULL, dst_id bigint, digest text NOT NULL, amount numeric, shared boolean NOT NULL, "
+                     "PRIMARY KEY(origin,tab,src_key))");
+        read(target, "CREATE INDEX IF NOT EXISTS legacy_merge_target_id ON legacy_merge_rows(tab,dst_id) WHERE dst_id IS NOT NULL");
+        if (!merge)
+            read(target, "TRUNCATE TABLE " + tables.join(',') + ",network_requests,legacy_merge_rows");
+        read(target, "CREATE TEMP TABLE import_tables (tab text PRIMARY KEY, written bigint NOT NULL DEFAULT 0) ON COMMIT DROP");
+        read(target, "CREATE TEMP TABLE import_conflicts (message text NOT NULL) ON COMMIT DROP");
+        read(target, "SELECT set_config('wms.import_mode',?,true)", {mode});
         QJsonObject counts;
         QMap<QString,qint64> nextId;
         qint64 total = 0;
         for (const auto &table : baseline.tables) {
-            const auto copied = copyTable(target,source,table);
+            read(target,"INSERT INTO import_tables(tab) VALUES(?)",{table});
+            const auto stage = quoteName("incoming_" + table);
+            read(target, "CREATE TEMP TABLE " + stage + " (LIKE " + quoteName(table) + ") ON COMMIT DROP");
+            const auto copied = copyTable(target, source, table, stage);
             counts.insert(table,copied.rows);
             total += copied.rows;
             if (copied.identity) {
@@ -312,16 +340,53 @@ bool LegacyImport::run(QSqlDatabase target, QSqlDatabase source, const QString &
                 nextId.insert(table,high+1);
             }
         }
+        QFile script(QStringLiteral(":/database/postgresql/legacy-merge.sql"));
+        require(script.open(QIODevice::ReadOnly), QStringLiteral("缺少旧库合并脚本。"));
+        for (const auto &statement : QString::fromUtf8(script.readAll()).split("-- @statement", Qt::SkipEmptyParts))
+            read(target, statement);
         read(target, "SET CONSTRAINTS ALL IMMEDIATE");
+        if (merge) {
+            auto written = read(target, "SELECT tab,written FROM import_tables");
+            total = 0;
+            while (written.next()) {
+                const auto rowCount = written.value(1).toLongLong();
+                counts.insert(written.value(0).toString(), rowCount);
+                total += rowCount;
+            }
+            checkReadEnd(written);
+            auto conflicts = read(target, "SELECT message FROM import_conflicts ORDER BY message");
+            QTextStream output(stdout);
+            output.setEncoding(QStringConverter::Utf8);
+            bool needsConfirmation = false;
+            while (conflicts.next()) {
+                if (!needsConfirmation) output << QStringLiteral("合并冲突及拟处理方式：") << Qt::endl;
+                needsConfirmation = true;
+                output << conflicts.value(0).toString().replace(QRegularExpression(QStringLiteral("[\\x00-\\x1f\\x7f]")), " ") << Qt::endl;
+            }
+            checkReadEnd(conflicts);
+            if (needsConfirmation) {
+                output << QStringLiteral("核对以上全部处理后，输入 MERGE 确认；直接回车取消：") << Qt::endl;
+                require(QTextStream(stdin).readLine().trimmed() == "MERGE", QStringLiteral("合并已取消，目标库已回滚。"));
+            }
+        }
         for (const auto &table : actorTables)
             read(target, "ALTER TABLE " + quoteName(table) + " ENABLE TRIGGER authenticated_actor");
-        for (auto i=nextId.cbegin(); i!=nextId.cend(); ++i) {
+        for (auto i=nextId.begin(); i!=nextId.end(); ++i) {
+            if (merge) {
+                const auto sequence = scalar(target, "SELECT pg_get_serial_sequence(?, 'id')", {i.key()}).toString();
+                const auto last = scalar(target,"SELECT CASE WHEN is_called THEN last_value ELSE last_value-1 END FROM " + sequence).toLongLong();
+                const auto maxId = scalar(target,"SELECT coalesce(max(id),0) FROM " + quoteName(i.key())).toLongLong();
+                const auto highest = qMax(last,maxId);
+                require(highest < std::numeric_limits<qint64>::max(), QStringLiteral("编号空间已耗尽：%1").arg(i.key()));
+                i.value() = qMax(i.value(),highest+1);
+            }
             // ALTER ... RESTART is transactional. setval() would survive a rollback.
             read(target, "ALTER TABLE " + quoteName(i.key()) + " ALTER COLUMN id RESTART WITH " + QString::number(i.value()));
         }
-        read(target, "CREATE TABLE legacy_import_history (singleton integer PRIMARY KEY CHECK(singleton=1), "
+        read(target, "CREATE TABLE IF NOT EXISTS legacy_import_history (singleton integer PRIMARY KEY CHECK(singleton=1), "
                      "product text NOT NULL, rows_imported bigint NOT NULL, imported_at timestamptz NOT NULL DEFAULT now())");
-        read(target, "INSERT INTO legacy_import_history(singleton,product,rows_imported) VALUES(1,?,?)",{product,total});
+        read(target, "INSERT INTO legacy_import_history(singleton,product,rows_imported) VALUES(1,?,?) "
+                     "ON CONFLICT(singleton) DO UPDATE SET rows_imported=excluded.rows_imported,imported_at=now()",{product,total});
         require(target.commit(), QStringLiteral("未能确认导入提交，请核对目标库后再试。"));
         transaction = false;
         if (report) *report = QString::fromUtf8(QJsonDocument(QJsonObject{

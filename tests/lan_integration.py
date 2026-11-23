@@ -23,11 +23,12 @@ PG_BIN = RUNTIME / "postgres" / "pgsql" / "bin"
 QT_BIN = Path(os.environ.get("WMS_TEST_QT_BIN", "D:/Qt/6.5.3/mingw_64/bin"))
 FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 # Use the host launcher's resolver, including its saved path for other Windows accounts.
-DATA_ROOT = Path(subprocess.check_output(
+DATA_ROOT = Path(os.environ.get("WMS_TEST_DATA_ROOT") or subprocess.check_output(
     ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
      "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); & './scripts/get-lan-data-root.ps1'"],
     cwd=ROOT, encoding="utf-8-sig", creationflags=FLAGS
 ).strip())
+PG_PORT = os.environ.get("WMS_TEST_PG_PORT", "55432")
 CREDS = json.loads((DATA_ROOT / "credentials.json").read_text(encoding="utf-8-sig"))
 ENV = os.environ.copy()
 ENV["PATH"] = os.pathsep.join([str(PG_BIN), str(QT_BIN), ENV["PATH"]])
@@ -44,7 +45,7 @@ def run(args, env=ENV, check=True, timeout=30, input_text=None):
 
 def sql(statement, database="postgres"):
     env = ENV | {"PGPASSWORD": CREDS["postgres"]}
-    return run([PG_BIN / "psql.exe", "-X", "-h", "127.0.0.1", "-p", "55432",
+    return run([PG_BIN / "psql.exe", "-X", "-h", "127.0.0.1", "-p", PG_PORT,
                 "-U", "postgres", "-d", database, "-v", "ON_ERROR_STOP=1", "-t", "-A"],
                env=env, input_text=statement).stdout.strip()
 
@@ -83,7 +84,7 @@ def main():
             database = "wms_lan_test_" + uuid.uuid4().hex
             sql(f"CREATE DATABASE {database} OWNER wms_icebeauty_demo;")
             databases.append(database)
-            env = ENV | {"WMS_PG_HOST": "127.0.0.1", "WMS_PG_PORT": "55432",
+            env = ENV | {"WMS_PG_HOST": "127.0.0.1", "WMS_PG_PORT": PG_PORT,
                          "WMS_PG_DATABASE": database, "WMS_PG_USER": "wms_icebeauty_demo",
                          "WMS_PG_PASSWORD": CREDS["app"], "WMS_DEMO_ADMIN_PASSWORD": test_password}
             server = BUILD / "WmsServer.exe"

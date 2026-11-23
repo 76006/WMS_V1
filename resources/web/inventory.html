@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123f40">
+  <title>{{brand}} · 库存查询</title>
+  <style>
+    :root { color-scheme: light; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #193637; background: #f2f6f5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    .wrap { width: min(76rem, 94%); margin: auto; }
+    header { background: #123f40; color: white; border-bottom: 4px solid #73c9aa; }
+    header .wrap, .section-head, footer, nav, form { display: flex; gap: 1rem; align-items: center; }
+    header .wrap { min-height: 4rem; justify-content: space-between; }
+    .brand { font-size: 1.15rem; font-weight: 700; }
+    nav { gap: .4rem; }
+    nav a { padding: .45rem .8rem; border-radius: .35rem; color: #e0eeeb; text-decoration: none; }
+    nav a[aria-current] { background: #315e5c; color: white; }
+    main { padding: clamp(1.5rem, 4vw, 3.3rem) 0 2.5rem; }
+    h1 { margin: 0; font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -.045em; }
+    .intro { margin: .5rem 0 1.6rem; color: #506967; }
+    form { gap: .6rem; margin-bottom: .9rem; }
+    .filters { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: .85rem; margin-bottom: 1.5rem; }
+    .filters label { display: grid; gap: .4rem; color: #36564e; font-size: .94rem; }
+    button, input, select { font: inherit; }
+    input, button, select { border: 1px solid #bacbc7; border-radius: .45rem; min-height: 2.75rem; }
+    select { width: 100%; padding: .5rem .65rem; background: white; color: #193637; }
+    select:disabled { background: #edf2f0; }
+    input { width: min(30rem, 100%); min-width: 0; padding: .6rem .9rem; }
+    button { background: white; color: #193637; cursor: pointer; padding: .45rem .95rem; white-space: nowrap; }
+    button:hover:enabled { background: #eef5f2; }
+    form button { background: #176354; border-color: #176354; color: white; }
+    form button:hover { background: #104d41 !important; }
+    button:disabled { color: #708381; background: #f2f5f4; cursor: default; }
+    :focus-visible { outline: 3px solid #288c78; outline-offset: 2px; }
+    section { background: white; border: 1px solid #cedbd7; border-radius: .75rem; overflow: hidden; }
+    .section-head, footer { flex-wrap: wrap; justify-content: space-between; padding: 1rem 1.25rem; }
+    h2 { margin: 0; font-size: 1.2rem; }
+    #stamp, #range { color: #506967; font-size: .9rem; }
+    #stamp { margin: .25rem 0 0; }
+    .scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: .75rem 1rem; border-bottom: 1px solid #e3ece8; }
+    th { font-size: .9rem; white-space: nowrap; background: #eaf2ee; color: #425f58; }
+    td { overflow-wrap: anywhere; }
+    .secondary { display: block; color: #526762; font-size: .875rem; margin-top: .22rem; }
+    .qty { text-align: right; font-variant-numeric: tabular-nums; font-weight: 650; }
+    #message { text-align: center; padding: 1.2rem; }
+    .pager { display: flex; gap: .45rem; }
+    [hidden] { display: none !important; }
+    @media (max-width: 42rem) {
+      nav a { padding: .45rem .55rem; }
+      .filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
+      .section-head, footer { padding: .85rem; }
+      .scroll { padding: 0 .85rem; }
+      table, tbody { display: block; }
+      thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+      tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem .75rem; padding: 1rem 0; border-top: 1px solid #dce7e2; }
+      td { display: block; padding: 0; border: 0; }
+      td:nth-child(1) { grid-column: 1; font-weight: 600; }
+      td[data-label] { grid-column: 1 / -1; font-size: .9rem; }
+      td[data-label]::before { content: attr(data-label) "　"; color: #526762; }
+      td.qty { grid-column: 2; grid-row: 1; }
+    }
+  </style>
+</head>
+<body>
+  <header><div class="wrap">
+    <span class="brand">仓库管理</span>
+    <nav id="systems" aria-label="选择库存系统" hidden><a data-port="18080">冰美肌</a><a data-port="18081">美鲸灵</a></nav>
+  </div></header>
+  <main class="wrap">
+    <h1>{{brand}}库存查询</h1>
+    <p class="intro">按物料分类、工艺模块和存放位置查看库存。</p>
+    <form id="search" role="search">
+      <input id="term" type="search" aria-label="搜索物料、规格、仓库、库位或批次" placeholder="搜索物料、规格、仓库、库位或批次" maxlength="200">
+      <button>查询</button>
+      <button id="clear" type="button" hidden>清除筛选</button>
+    </form>
+    <div class="filters" role="group" aria-label="库存筛选">
+      <label>物料分类<select id="category" disabled><option value="">全部分类</option></select></label>
+      <label>工艺模块<select id="module" disabled><option value="">全部模块</option></select></label>
+      <label>仓库<select id="warehouse" disabled><option value="">全部仓库</option></select></label>
+      <label>库位<select id="location" disabled><option value="">全部库位</option></select></label>
+    </div>
+    <section aria-labelledby="list-title">
+      <div class="section-head"><div><h2 id="list-title">库存明细</h2><p id="stamp"></p></div>
+        <button type="button" id="refresh">刷新库存</button>
+      </div>
+      <div class="scroll"><table aria-label="库存明细"><thead><tr>
+        <th scope="col">物料 / 编码</th><th scope="col">规格型号</th><th scope="col">物料分类</th>
+        <th scope="col">工艺模块</th><th scope="col">仓库 / 库位</th>
+        <th scope="col">批次</th><th scope="col" class="qty">库存数量</th>
+      </tr></thead><tbody id="rows"></tbody></table></div>
+      <p id="message" role="status">正在读取库存…</p>
+      <footer><span id="range" aria-live="polite"></span><div class="pager">
+        <button id="prev" disabled>上一页</button><button id="next" disabled>下一页</button>
+      </div></footer>
+    </section>
+  </main>
+  <script>
+    const el = id => document.getElementById(id);
+    const systems = el('systems');
+    if (['18080', '18081'].includes(location.port)) {
+      for (const link of systems.querySelectorAll('a')) {
+        const url = new URL('/', location.href);
+        url.port = link.dataset.port;
+        link.href = url.href;
+        if (url.port === location.port) link.setAttribute('aria-current', 'page');
+      }
+      systems.hidden = false;
+    }
+
+    const dimensions = ['category', 'module', 'warehouse', 'location'];
+    let offset = 0, pageSize = 40, keyword = '', currentRequest, filters;
+    function options(id, items) {
+      const select = el(id);
+      const previous = select.value;
+      select.length = 1;
+      for (const item of items) select.add(new Option(item.label, item.id));
+      select.value = previous;
+      if (select.selectedIndex < 0) select.selectedIndex = 0;
+      select.disabled = !items.length;
+    }
+    function locationOptions() {
+      const warehouse = el('warehouse').value;
+      const names = new Map(filters.warehouses.map(w => [w.id, w.label]));
+      options('location', filters.locations.filter(l => !warehouse || l.warehouse === warehouse)
+        .map(l => ({id: l.id, label: warehouse ? l.label : names.get(l.warehouse) + ' / ' + l.label})));
+    }
+    function populateFilters(data) {
+      filters = data;
+      options('category', [...data.categories, {id: '0', label: '未分类'}]);
+      options('module', [...data.modules.map(m => ({id: m.id, label: m.label + ' · ' + m.product})),
+        {id: 'none', label: '未分模块'}]);
+      options('warehouse', data.warehouses);
+      locationOptions();
+    }
+    function cell(row, value, secondary) {
+      const td = row.insertCell();
+      td.textContent = value || '—';
+      if (secondary) {
+        const detail = document.createElement('span');
+        detail.className = 'secondary';
+        detail.textContent = secondary;
+        td.append(detail);
+      }
+      return td;
+    }
+    async function load(refreshFilters = false) {
+      if (currentRequest) currentRequest.abort();
+      const request = new AbortController();
+      currentRequest = request;
+      el('prev').disabled = el('next').disabled = true;
+      el('rows').replaceChildren();
+      el('range').textContent = el('stamp').textContent = '';
+      el('message').hidden = false;
+      el('message').textContent = '正在读取库存…';
+      try {
+        const settings = { signal: request.signal, cache: 'no-store' };
+        if (!filters || refreshFilters) {
+          const list = await fetch('/stock/filters', settings);
+          if (!list.ok) throw new Error();
+          const data = await list.json();
+          if (request !== currentRequest) return;
+          populateFilters(data);
+        }
+        const params = new URLSearchParams({offset, q: keyword});
+        for (const id of dimensions) {
+          if (el(id).value) params.set(id, el(id).value);
+        }
+        const filtered = Boolean(keyword || dimensions.some(id => el(id).value));
+        el('clear').hidden = !filtered;
+        const response = await fetch('/stock?' + params.toString().replace(/\+/g, '%20'), settings);
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        if (request !== currentRequest) return;
+        pageSize = data.pageSize;
+        for (const item of data.items) {
+          const row = el('rows').insertRow();
+          cell(row, item.name, item.code);
+          cell(row, item.spec).dataset.label = '规格';
+          cell(row, item.category).dataset.label = '分类';
+          cell(row, item.modules).dataset.label = '工艺模块';
+          const place = [item.warehouse, item.location].filter(Boolean).join(' / ');
+          cell(row, place, item.locationName !== item.location && item.locationName).dataset.label = '位置';
+          cell(row, item.batch).dataset.label = '批次';
+          cell(row, [item.quantity, item.unit].filter(Boolean).join(' ')).className = 'qty';
+        }
+        el('message').hidden = data.items.length > 0;
+        el('message').textContent = offset ? '本页已无库存记录。' : filtered ? '没有符合当前筛选条件的库存。' : '当前没有在库物料。';
+        el('stamp').textContent = '查询时间 ' + new Date(data.fetchedAt).toLocaleString('zh-CN', { hour12: false });
+        el('range').textContent = data.items.length ? '第 ' + (offset + 1) + '–' + (offset + data.items.length) + ' 条' : '0 条记录';
+        el('next').disabled = !data.hasMore;
+      } catch {
+        if (request !== currentRequest) return;
+        el('message').textContent = '暂时无法读取库存，请点击“刷新库存”重试。';
+      }
+      el('prev').disabled = offset === 0;
+    }
+    el('search').onsubmit = event => { event.preventDefault(); keyword = el('term').value.trim(); offset = 0; load(); };
+    for (const id of dimensions) {
+      el(id).onchange = () => {
+        if (id === 'warehouse') { el('location').value = ''; locationOptions(); }
+        keyword = el('term').value.trim();
+        offset = 0;
+        load();
+      };
+    }
+    el('clear').onclick = () => {
+      for (const id of dimensions) el(id).value = '';
+      el('term').value = keyword = '';
+      locationOptions();
+      offset = 0;
+      load();
+    };
+    el('refresh').onclick = () => load(true);
+    el('prev').onclick = () => { offset = Math.max(0, offset - pageSize); load(); };
+    el('next').onclick = () => { offset += pageSize; load(); };
+    load();
+  </script>
+</body>
+</html>

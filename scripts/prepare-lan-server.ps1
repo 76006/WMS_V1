@@ -46,7 +46,7 @@ try {
         $env:PGCONNECT_TIMEOUT = '5'
         $env:PGCLIENTENCODING = 'UTF8'
         $identity = & $psql -X -w -h 127.0.0.1 -p 55432 -U $dbName -d $dbName -v ON_ERROR_STOP=1 -At `
-            -c 'SELECT product FROM wms_business.network_identity WHERE version=2' 2>&1
+            -c 'SELECT product FROM wms_business.network_identity' 2>&1
         if ($LASTEXITCODE -ne 0 -or @($identity).Count -ne 1 -or "$identity".Trim() -ne $Product) {
             throw "Cannot verify the existing $Product business database. No new database was created."
         }

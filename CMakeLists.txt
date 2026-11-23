@@ -202,10 +202,11 @@ if(WMS_BUILD_SERVER)
         src/server/LegacySource.cpp src/server/LegacySource.h src/database/SchemaMigrator.cpp
         src/services/InventoryService.cpp src/services/InventoryServiceDocuments.cpp
         src/services/InventoryServiceProduction.cpp src/services/InventoryServiceRevision.cpp
-        src/services/ProductionTask.cpp
+        src/services/ProductionTask.cpp src/services/ProcessBom.cpp
         src/services/InspectionService.cpp src/services/UserService.cpp
         src/services/AttachmentService.cpp src/services/ShipmentReceiptService.cpp)
-    qt_add_resources(WmsServer "business_schema" PREFIX "/" FILES database/postgresql/business-schema.json)
+    qt_add_resources(WmsServer "business_schema" PREFIX "/" FILES database/postgresql/business-schema.json database/postgresql/legacy-merge.sql)
+    qt_add_resources(WmsServer "inventory_web" PREFIX "/" FILES resources/web/inventory.html)
     set(WMS_LEGACY_SCHEMA_RESOURCES ${WMS_RESOURCE_FILES})
     list(FILTER WMS_LEGACY_SCHEMA_RESOURCES INCLUDE REGEX "^database/")
     qt_add_resources(WmsServer "legacy_schema" PREFIX "/" FILES ${WMS_LEGACY_SCHEMA_RESOURCES})

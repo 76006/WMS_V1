@@ -4,6 +4,12 @@
 #include <QSqlDatabase>
 #include <QString>
 
+struct ProcessBomUsage {
+    qlonglong materialId;
+    QString code, name;
+    double quantity;
+};
+
 struct ProcessBomItem {
     QString code;
     QString name;
@@ -13,7 +19,7 @@ struct ProcessBomItem {
     QString specification, category, unit, processing, stock;
     QList<ProcessBomItem> items;
     QString label() const { return code.isEmpty() ? name : code + " - " + name; }
-    bool issueMaterials(double count, QList<QPair<qlonglong, double>> &lines, QString &error) const;
+    bool issueMaterials(double count, QList<ProcessBomUsage> &lines, QString &error) const;
 };
 
 struct ProcessBom {

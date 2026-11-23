@@ -10,7 +10,7 @@
 #include <QStringList>
 #include <QVariant>
 #include <cmath>
-#include <functional>
+#include <algorithm>
 
 namespace {
 bool fail(QString *error, const QString &text) { if (error) *error = text; return false; }
@@ -19,7 +19,7 @@ bool fail(QString *error, const QString &text) { if (error) *error = text; retur
 bool ProductionTask::load(QSqlDatabase db, qlonglong runId, qlonglong productId,
                           ProductionTask &task, QString *error)
 {
-    task.m_nodes.clear();
+    task = ProductionTask{};
     QSqlQuery saved(db);
     saved.prepare(QStringLiteral("SELECT payload FROM production_task_boms WHERE production_run_id=?"));
     saved.addBindValue(runId);
@@ -30,13 +30,33 @@ bool ProductionTask::load(QSqlDatabase db, qlonglong runId, qlonglong productId,
             return fail(error, QStringLiteral("生产任务的BOM快照损坏，不能重新套用当前BOM。"));
         for (const auto &value : json.array()) {
             const auto o = value.toObject();
+            const QString kind = o.value("kind").toString();
+            if (kind == QStringLiteral("processMaterial")) {
+                const auto materialId = o.value("material").toString().toLongLong();
+                const double quantity = o.value("quantity").toDouble();
+                if (task.m_processStages.isEmpty() || o.value("parent").toString() != task.m_processStages.last().key
+                    || materialId <= 0 || !std::isfinite(quantity) || quantity <= 0)
+                    return fail(error, QStringLiteral("任务快照中的工艺用料无效。"));
+                task.m_processStages.last().processMaterials.append({materialId, o.value("code").toString(),
+                    o.value("name").toString(), quantity});
+                continue;
+            }
             ProductionStage n;
             n.key = o.value("key").toString(); n.parent = o.value("parent").toString();
             n.materialId = o.value("material").toString().toLongLong();
             n.code = o.value("code").toString(); n.name = o.value("name").toString();
             n.model = o.value("model").toString(); n.category = o.value("category").toString();
             n.quantity = o.value("quantity").toDouble(); n.perMachine = o.value("perMachine").toDouble();
-            task.m_nodes.append(n);
+            if (kind == QStringLiteral("processGroup")) {
+                if (n.key != QStringLiteral("process:%1").arg(task.m_processStages.size() + 1)
+                    || n.parent != QStringLiteral("0") || !std::isfinite(n.perMachine) || n.perMachine <= 0)
+                    return fail(error, QStringLiteral("任务快照中的工艺组无效。"));
+                n.issueError = o.value("issueError").toString();
+                task.m_processStages.append(n);
+            } else {
+                if (n.key == QStringLiteral("0")) task.m_usesProcessBom = o.value("processBom").toBool();
+                task.m_nodes.append(n);
+            }
         }
     } else {
         QSqlQuery root(db);
@@ -63,6 +83,21 @@ bool ProductionTask::load(QSqlDatabase db, qlonglong runId, qlonglong productId,
             child.code = nodes.value(4).toString(); child.name = nodes.value(5).toString();
             child.model = nodes.value(6).toString(); child.category = nodes.value(7).toString();
             task.m_nodes.append(child);
+        }
+        QString detail;
+        ProcessBom processBom;
+        if (!ProcessBom::load(db, productId, processBom, detail)) return fail(error, detail);
+        task.m_usesProcessBom = true;
+        for (const auto &group : processBom.groups) {
+            ProductionStage stage;
+            stage.key = QStringLiteral("process:%1").arg(task.m_processStages.size() + 1);
+            stage.parent = QStringLiteral("0");
+            stage.code = group.code;
+            stage.name = group.name.isEmpty() ? group.code : group.name;
+            stage.model = group.specification;
+            stage.perMachine = group.quantity;
+            group.issueMaterials(1, stage.processMaterials, stage.issueError);
+            task.m_processStages.append(stage);
         }
     }
     QMap<QString, int> indexes;
@@ -98,10 +133,24 @@ bool ProductionTask::load(QSqlDatabase db, qlonglong runId, qlonglong productId,
 QString ProductionTask::payload() const
 {
     QJsonArray rows;
-    for (const auto &n : m_nodes) rows.append(QJsonObject{
+    for (const auto &n : m_nodes) {
+        QJsonObject row{
         {"key",n.key},{"parent",n.parent},{"material",QString::number(n.materialId)},
         {"code",n.code},{"name",n.name},{"model",n.model},{"category",n.category},
-        {"quantity",n.quantity},{"perMachine",n.perMachine}});
+        {"quantity",n.quantity},{"perMachine",n.perMachine}};
+        if (m_usesProcessBom && n.key == QStringLiteral("0"))
+            row.insert("processBom", true);
+        rows.append(row);
+    }
+    // Material IDs remain top-level fields so legacy database merges can remap them.
+    for (const auto &group : m_processStages) {
+        rows.append(QJsonObject{{"kind","processGroup"},{"key",group.key},{"parent",group.parent},
+            {"code",group.code},{"name",group.name},{"model",group.model},
+            {"perMachine",group.perMachine},{"issueError",group.issueError}});
+        for (const auto &line : group.processMaterials)
+            rows.append(QJsonObject{{"kind","processMaterial"},{"parent",group.key},{"material",QString::number(line.materialId)},
+                {"code",line.code},{"name",line.name},{"quantity",line.quantity}});
+    }
     return QString::fromUtf8(QJsonDocument(rows).toJson(QJsonDocument::Compact));
 }
 
@@ -113,10 +162,19 @@ QString ProductionTask::fingerprint() const
 const ProductionStage *ProductionTask::stage(const QString &key) const
 {
     for (const auto &n : m_nodes) if (n.key == key) return &n;
+    for (const auto &group : m_processStages) if (group.key == key) return &group;
     return nullptr;
 }
 
-QList<ProductionStage> ProductionTask::stages() const
+QList<ProductionStage> ProductionTask::issueStages() const
+{
+    if (!m_usesProcessBom) return receiptStages();
+    auto stages = m_processStages;
+    if (const auto *assembly = stage(QStringLiteral("0"))) stages.append(*assembly);
+    return stages;
+}
+
+QList<ProductionStage> ProductionTask::receiptStages() const
 {
     QList<ProductionStage> result;
     for (const auto &n : m_nodes) {
@@ -138,32 +196,36 @@ QString ProductionTask::stagePath(const QString &key) const
     return parts.join(QStringLiteral(" / "));
 }
 
+bool ProductionTask::isReceiptStage(const QString &key) const
+{
+    for (const auto &s : receiptStages()) if (s.key == key) return true;
+    return false;
+}
+
 bool ProductionTask::demand(QSqlDatabase db, qlonglong runId, const QString &key, double count,
                             QList<ProductionDemand> &result, QString *error) const
 {
     result.clear();
     const auto *target = stage(key);
-    bool valid = false;
-    for (const auto &s : stages()) if (s.key == key) valid = true;
-    if (!target || !valid || !std::isfinite(count) || count <= 0)
+    if (!target || !std::isfinite(count) || count <= 0)
         return fail(error, QStringLiteral("请选择有效的整机装配或半成品工序。"));
     QMap<qlonglong, ProductionDemand> grouped;
-    std::function<void(const QString &, double)> expand = [&](const QString &parent, double multiplier) {
-        for (const auto &n : m_nodes) {
-            if (n.parent != parent) continue;
-            bool hasChildren = false;
-            for (const auto &child : m_nodes) if (child.parent == n.key) { hasChildren = true; break; }
-            const double usage = multiplier * n.quantity;
-            if (hasChildren && n.category != QStringLiteral("SEMI")) {
-                expand(n.key, usage);
-            } else {
-                auto &d = grouped[n.materialId];
-                d.materialId = n.materialId; d.code = n.code; d.name = n.name;
-                d.unitUsage += usage;
-            }
+    if (m_usesProcessBom && key != QStringLiteral("0")) {
+        if (!key.startsWith(QStringLiteral("process:"))) return fail(error, QStringLiteral("请选择工艺 BOM 中的工艺组。"));
+        if (!target->issueError.isEmpty()) return fail(error, target->issueError);
+        for (const auto &usage : target->processMaterials) {
+            if (usage.quantity * count > 999999999999.0)
+                return fail(error, QStringLiteral("工艺组累计用量超出领料数量范围。"));
+            ProductionDemand d;
+            d.materialId = usage.materialId; d.code = usage.code; d.name = usage.name;
+            d.unitUsage = usage.quantity / target->perMachine;
+            grouped.insert(d.materialId, d);
         }
-    };
-    expand(key, 1);
+    } else {
+        if (!isReceiptStage(key))
+            return fail(error, QStringLiteral("请选择有效的整机装配或半成品工序。"));
+        expandMaterialDemand(key, 1, grouped);
+    }
     QSqlQuery issued(db);
     issued.prepare(QStringLiteral("SELECT i.material_id,SUM(i.quantity-i.returned_quantity-i.reversed_quantity) "
         "FROM production_document_stages s JOIN business_documents d ON d.id=s.document_id "
@@ -183,6 +245,24 @@ bool ProductionTask::demand(QSqlDatabase db, qlonglong runId, const QString &key
         result.append(d);
     }
     return true;
+}
+
+void ProductionTask::expandMaterialDemand(const QString &parent, double multiplier,
+                                         QMap<qlonglong, ProductionDemand> &grouped) const
+{
+    for (const auto &n : m_nodes) {
+        if (n.parent != parent) continue;
+        const double usage = multiplier * n.quantity;
+        const bool hasChildren = std::any_of(m_nodes.cbegin(), m_nodes.cend(),
+            [&](const ProductionStage &child) { return child.parent == n.key; });
+        if (hasChildren && n.category != QStringLiteral("SEMI")) {
+            expandMaterialDemand(n.key, usage, grouped);
+        } else {
+            auto &d = grouped[n.materialId];
+            d.materialId = n.materialId; d.code = n.code; d.name = n.name;
+            d.unitUsage += usage;
+        }
+    }
 }
 
 double ProductionTask::received(QSqlDatabase db, qlonglong runId, const QString &key, QString *error)

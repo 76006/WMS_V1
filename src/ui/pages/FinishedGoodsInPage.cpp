@@ -301,7 +301,7 @@ void FinishedGoodsInPage::loadRunDetails()
                 m_progressLabel->setText(error); m_submitButton->setEnabled(false); return;
             }
             m_bomFingerprint = task.fingerprint();
-            for (const auto &s : task.stages()) m_stageCombo->addItem(s.code + QStringLiteral(" - ") + task.stagePath(s.key), s.key);
+            for (const auto &s : task.receiptStages()) m_stageCombo->addItem(s.code + QStringLiteral(" - ") + task.stagePath(s.key), s.key);
             const int found = m_stageCombo->findData(selectedStage);
             m_stageCombo->setCurrentIndex(found >= 0 ? found : 0);
             const auto *stage = task.stage(m_stageCombo->currentData().toString());

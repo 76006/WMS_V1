@@ -64,7 +64,7 @@ QHttpServerResponse BusinessApi::login(const QHttpServerRequest &request)
     auto database=std::make_shared<BusinessDatabase>(m_database);QString message;
     if(!database->open(&message))return error(QStringLiteral("业务数据库暂时不可用"),Status::ServiceUnavailable);
     QSqlQuery identity(database->raw());
-    if(!identity.exec("SELECT product,version FROM network_identity") || !identity.next() || identity.value(0).toString()!=m_product || identity.value(1).toInt()!=2)
+    if(!identity.exec("SELECT product FROM network_identity") || !identity.next() || identity.value(0).toString()!=m_product)
         return error(QStringLiteral("完整业务数据库尚未初始化或系统身份不匹配"),Status::ServiceUnavailable);
     QSqlQuery user(database->raw());
     user.prepare("SELECT u.id,u.username,u.display_name,u.password_hash,r.code FROM users u JOIN roles r ON r.id=u.role_id WHERE u.username=? AND u.is_active=1");user.addBindValue(username);
@@ -134,7 +134,7 @@ QHttpServerResponse BusinessApi::data(const QHttpServerRequest &request)
         const bool read=cleaned.startsWith("select ") || cleaned.startsWith("with ");
         if(read){
             if(QRegularExpression("\\b(from|join)\\s+\\w+\\s*\\.").match(cleaned).hasMatch())return error(QStringLiteral("不允许跨数据库结构查询"),Status::Forbidden);
-            if(QRegularExpression("\\b(insert|update|delete|drop|alter|create|copy|grant|revoke|call|set|into|password_hash|network_requests|network_identity|pg_[a-z_]+|information_schema)\\b").match(cleaned).hasMatch())return error(QStringLiteral("查询包含受限内容"),Status::Forbidden);
+            if(QRegularExpression("\\b(insert|update|delete|drop|alter|create|copy|grant|revoke|call|set|into|password_hash|legacy_merge_rows|network_requests|network_identity|pg_[a-z_]+|information_schema)\\b").match(cleaned).hasMatch())return error(QStringLiteral("查询包含受限内容"),Status::Forbidden);
             QSet<QString> functions={"coalesce","sum","count","max","min","round","abs","cast","strftime","date","substr","substring","instr","length","replace","trim","upper","lower","group_concat","nullif","in","exists","as","over","and","or","not","where","join","from","on"};
             auto ctes=QRegularExpression("(?:with(?: recursive)?|,)\\s*([a-z_]\\w*)\\s*\\([^()]*\\)\\s+as\\s*\\(").globalMatch(cleaned);
             QSet<int> ctePositions;

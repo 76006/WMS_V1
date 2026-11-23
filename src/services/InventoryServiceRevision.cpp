@@ -1321,7 +1321,10 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
         ProductionTask task;
         if (!ProductionTask::load(m_database, runId, stageLink.value(2).toLongLong(), task, errorMessage)) { rollback(); return false; }
         QList<ProductionDemand> demands;
-        if (!task.demand(m_database, runId, key, stageLink.value(3).toDouble(), demands, errorMessage)) { rollback(); return false; }
+        if (document.documentType == QStringLiteral("SCLL")
+            && !task.demand(m_database, runId, key, stageLink.value(3).toDouble(), demands, errorMessage)) { rollback(); return false; }
+        if (document.documentType == QStringLiteral("CPRK") && !task.isReceiptStage(key))
+            return fail(errorMessage, QStringLiteral("此单关联的完工入库阶段无效。"));
         for (const auto &line : document.lines) {
             bool allowed = document.documentType == QStringLiteral("CPRK") && line.materialId == task.stage(key)->materialId;
             if (document.documentType == QStringLiteral("SCLL")) for (const auto &d : demands) if (d.materialId == line.materialId) allowed = true;

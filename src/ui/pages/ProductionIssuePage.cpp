@@ -114,7 +114,7 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     ComboBoxSearch::enableContainsSearch(m_taskCombo, QStringLiteral("按整机生产批次选择任务"));
     productionForm->insertRow(0, QStringLiteral("继续已有任务"), m_taskCombo);
     m_stageCombo = new QComboBox(m_productionFieldsGroup);
-    productionForm->addRow(QStringLiteral("本次生产阶段"), m_stageCombo);
+    productionForm->addRow(QStringLiteral("本次领料阶段"), m_stageCombo);
     m_stageSummary = new QLabel(m_productionFieldsGroup);
     m_stageSummary->setWordWrap(true);
     productionForm->addRow(m_stageSummary);
@@ -126,10 +126,10 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_demandTable->horizontalHeader()->setStretchLastSection(true);
     m_demandTable->setMinimumHeight(160);
     productionForm->addRow(m_demandTable);
-    auto *remainingButton = new QPushButton(QStringLiteral("带入本阶段未领物料"), m_productionFieldsGroup);
+    m_remainingButton = new QPushButton(QStringLiteral("带入本阶段未领物料"), m_productionFieldsGroup);
     auto *progressFullscreen = new QPushButton(QStringLiteral("全屏查看用料进度"), m_productionFieldsGroup);
-    productionForm->addRow(remainingButton, progressFullscreen);
-    connect(remainingButton, &QPushButton::clicked, this, &ProductionIssuePage::importProductBom);
+    productionForm->addRow(m_remainingButton, progressFullscreen);
+    connect(m_remainingButton, &QPushButton::clicked, this, &ProductionIssuePage::importProductBom);
     connect(progressFullscreen, &QPushButton::clicked, this, [this] {
         TableExcelExport::fullScreenTable(m_demandTable, QStringLiteral("生产阶段用料进度"), this,
                                         [this] { refreshStageProgress(); });
@@ -150,7 +150,7 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
     m_submitButton->setEnabled(m_session.canPostProduction());
     m_lines->addToolbarAction(m_submitButton);
     m_usageHint = new QLabel(
-        QStringLiteral("按整机生产批次选择本次半成品或整机装配阶段，带入剩余未领物料；可分次领取，库存批号由用户指定。"),
+        QStringLiteral("按生产批次选择工艺 BOM 中的工艺组，带入剩余未领物料。"),
         panel);
     m_usageHint->setObjectName(QStringLiteral("mutedText"));
     m_usageHint->setWordWrap(true);
@@ -225,8 +225,6 @@ ProductionIssuePage::ProductionIssuePage(QSqlDatabase database,
             m_productCombo->currentData(ProductModelRole).toString());
         updateIssueType();
         refreshProductionStages();
-        m_usageHint->setText(
-            QStringLiteral("领料明细已清空。可逐项添加物料，或点击“一键导入BOM用料”。"));
     });
     updateIssueType();
     resetSubmissionToken();
@@ -257,7 +255,7 @@ void ProductionIssuePage::updateIssueType()
     m_usageHint->setText(
         production
             ? (hasProductionProduct
-                ? QStringLiteral("选择本次半成品或整机装配阶段后，点击“带入本阶段未领物料”；可删除暂不领的行或调低数量分次领取。")
+                ? QStringLiteral("选择本次领料阶段，点击“带入本阶段未领物料”。可删除暂不领的行或调低数量，分次领取。")
                 : QStringLiteral("生产信息可以不填。当前为直接领料模式，可逐项添加物料并手工填写领用数量；选择成品后可导入BOM并按台数计算。"))
             : QStringLiteral("点击“添加物料”逐项选择本次领用的物料、仓库、库位、批次和数量。"));
     m_submitButton->setEnabled(m_session.canPostProduction());
@@ -329,11 +327,13 @@ void ProductionIssuePage::importProcessBom()
     const auto index = choice.findChild<QComboBox *>()->currentIndex();
     const auto &group = bom.groups.at(index);
     const auto name = group.label();
-    QList<QPair<qlonglong, double>> lines;
-    if (!group.issueMaterials(m_plannedQuantity->value(), lines, error)) {
+    QList<ProcessBomUsage> usages;
+    if (!group.issueMaterials(m_plannedQuantity->value(), usages, error)) {
         QMessageBox::warning(this, QStringLiteral("该工艺组暂不能领料"), error);
         return;
     }
+    QList<QPair<qlonglong, double>> lines;
+    for (const auto &usage : usages) lines.append({usage.materialId, usage.quantity});
     const auto summary = QStringLiteral("按“%1”生成 %2 种物料的领料明细，替换当前明细。\n"
                                         "领用量 = 每组用量 × %3（生产台数）。")
                              .arg(name).arg(lines.size()).arg(m_plannedQuantity->value());
@@ -375,7 +375,11 @@ void ProductionIssuePage::refreshProductionStages()
     const bool hadStages = m_stageCombo->count() > 1;
     const QSignalBlocker blocker(m_stageCombo);
     m_stageCombo->clear();
-    m_stageCombo->addItem(QStringLiteral("手工 / 工艺组领料（不按半成品统计）"), QString());
+    m_stageCombo->addItem(QStringLiteral("手工领料（不统计阶段进度）"), QString());
+    m_remainingButton->setEnabled(false);
+    m_demandTable->setRowCount(0);
+    const auto previousFingerprint = m_bomFingerprint;
+    m_task = ProductionTask{};
     m_taskRunId = 0; m_bomFingerprint.clear();
     const auto productId = m_productCombo->currentData().toLongLong();
     m_plannedQuantity->setEnabled(productId > 0);
@@ -398,17 +402,21 @@ void ProductionIssuePage::refreshProductionStages()
         m_stageSummary->setText(error); return;
     }
     m_bomFingerprint = m_task.fingerprint();
-    for (const auto &s : m_task.stages()) {
+    if (!previousFingerprint.isEmpty() && previousFingerprint != m_bomFingerprint)
+        m_lines->clearLines();
+    for (const auto &s : m_task.issueStages()) {
         QList<ProductionDemand> demands;
         if (!m_task.demand(m_database, m_taskRunId, s.key, m_plannedQuantity->value(), demands, &error)) {
-            m_stageSummary->setText(error); return;
+            m_stageCombo->addItem(QStringLiteral("%1（无法带入用料）").arg(m_task.stagePath(s.key)), s.key);
+            continue;
         }
         if (demands.isEmpty()) continue;
         int pending = 0;
         for (const auto &d : demands) if (d.remaining() > 0.0000001) ++pending;
-        const QString label = s.key == QStringLiteral("0") ? QStringLiteral("整机装配") : QStringLiteral("半成品");
-        m_stageCombo->addItem(QStringLiteral("%1：%2 - %3（未领%4种）")
-            .arg(label, s.code, m_task.stagePath(s.key)).arg(pending), s.key);
+        const QString label = s.key == QStringLiteral("0") ? QStringLiteral("整机装配")
+            : m_task.usesProcessBom() ? QStringLiteral("工艺组") : QStringLiteral("历史半成品阶段");
+        m_stageCombo->addItem(QStringLiteral("%1：%2（未领%3种）")
+            .arg(label, m_task.stagePath(s.key)).arg(pending), s.key);
     }
     const int index = m_stageCombo->findData(previous);
     m_stageCombo->setCurrentIndex(index > 0 || (hadStages && index == 0) ? index : (m_stageCombo->count() > 1 ? 1 : 0));
@@ -429,7 +437,14 @@ void ProductionIssuePage::refreshStageProgress()
     }
     m_demandTable->setRowCount(0);
     m_processBomButton->setEnabled(key.isEmpty() && m_productCombo->currentData().toLongLong() > 0 && m_session.canPostProduction());
-    if (key.isEmpty()) { m_stageSummary->setText(QStringLiteral("手工模式不统计半成品未领数量。")); return; }
+    m_remainingButton->setEnabled(false);
+    if (key.isEmpty()) {
+        const bool missingRecipe = m_task.usesProcessBom() && m_task.issueStages().size() == 1;
+        m_stageSummary->setText(missingRecipe
+            ? QStringLiteral("该成品尚无工艺 BOM。要分阶段领料，请先在“物料维护 → 工艺BOM”中维护工艺组。")
+            : QStringLiteral("手工模式不统计阶段未领数量。"));
+        return;
+    }
     QList<ProductionDemand> demands;
     QString error;
     if (!m_task.demand(m_database, m_taskRunId, key, m_plannedQuantity->value(), demands, &error)) {
@@ -442,10 +457,18 @@ void ProductionIssuePage::refreshStageProgress()
         for (int col = 0; col < values.size(); ++col) m_demandTable->setItem(row,col,new QTableWidgetItem(values.at(col)));
     }
     const auto *stage = m_task.stage(key);
+    m_remainingButton->setEnabled(!demands.isEmpty() && m_session.canPostProduction());
+    if (m_task.usesProcessBom() && key != QStringLiteral("0")) {
+        m_stageSummary->setText(QStringLiteral("%1：计划 %2 组。可按表中的未领数量分次领取。")
+            .arg(stage->name).arg(stageQuantity, 0, 'g', 12));
+        return;
+    }
     const double received = ProductionTask::received(m_database, m_taskRunId, key, &error);
     if (received < 0) { m_stageSummary->setText(error); return; }
     m_stageSummary->setText(QStringLiteral("%1：计划 %2，已完工入库 %3。仅带出本阶段用料，遇到下级半成品直接领其库存；可使用其他任务生产的库存批号。")
         .arg(stage->name).arg(stage->perMachine*m_plannedQuantity->value(),0,'g',12).arg(received,0,'g',12));
+    if (m_task.usesProcessBom() && m_task.issueStages().size() == 1)
+        m_stageSummary->setText(m_stageSummary->text() + QStringLiteral(" 如需半成品领料，请先在物料维护中维护该产品的工艺 BOM。"));
 }
 
 void ProductionIssuePage::importProductBom()

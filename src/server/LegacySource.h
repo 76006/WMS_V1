@@ -10,7 +10,7 @@ public:
     ~LegacySource();
     Q_DISABLE_COPY(LegacySource)
 
-    bool prepare(const QString &sourceFile, const QString &product, QString *error);
+    bool prepare(const QString &sourceFile, const QString &product, QSqlDatabase target, QString *error);
     QSqlDatabase database() const { return m_database; }
 
 private:

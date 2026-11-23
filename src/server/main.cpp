@@ -25,7 +25,8 @@ int main(int argc, char **argv)
         {"init-demo", "Initialize a new test schema and exit"},
         {"init-lan-empty", "Initialize the legacy LAN schema without sample inventory and exit"},
         {"init-business", "Initialize the complete business schema and exit"},
-        {"import-legacy", "Import a legacy SQLite database into an empty business database and exit", "path"},
+        {"import-legacy", "Import a legacy SQLite database into the business database and exit", "path"},
+        {"import-mode", "Legacy import mode: empty, replace or merge", "mode", "empty"},
         {"allow-insecure-lan", "Allow HTTP over a trusted test LAN"},
         {"tls-cert", "PEM server certificate", "path"},
         {"tls-key", "PEM private key", "path"}});
@@ -36,6 +37,11 @@ int main(int argc, char **argv)
     if (int(demo) + int(empty) + int(parser.isSet("init-business")) + int(importLegacy) > 1) {
         QTextStream(stderr) << "Choose only one initialization option\n";
         return 1;
+    }
+    const auto mode = parser.value("import-mode");
+    if ((parser.isSet("import-mode") && !importLegacy) ||
+        (mode != "empty" && mode != "replace" && mode != "merge")) {
+        QTextStream(stderr) << "Invalid legacy import mode\n"; return 1;
     }
     const auto product = parser.value("product");
     if (product != "ICE_BEAUTY" && product != "MEI_JING_LING") {
@@ -53,8 +59,8 @@ int main(int argc, char **argv)
     if (importLegacy) {
         LegacySource source;
         QString report;
-        if (!source.prepare(parser.value("import-legacy"), product, &error)
-            || !LegacyImport::run(database.connection(), source.database(), product, &report, &error)) {
+        if (!source.prepare(parser.value("import-legacy"), product, database.connection(), &error)
+            || !LegacyImport::run(database.connection(), source.database(), product, mode, &report, &error)) {
             QTextStream(stderr) << error << '\n'; return 8;
         }
         QTextStream(stdout) << report << Qt::endl;

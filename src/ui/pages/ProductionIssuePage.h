@@ -67,6 +67,7 @@ private:
     StockLineTable *m_lines = nullptr;
     QPushButton *m_submitButton = nullptr;
     QPushButton *m_processBomButton = nullptr;
+    QPushButton *m_remainingButton = nullptr;
     QTableWidget *m_recentTable = nullptr;
     QString m_submissionToken;
 };

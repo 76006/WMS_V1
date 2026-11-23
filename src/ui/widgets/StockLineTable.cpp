@@ -92,7 +92,7 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     m_importProductionBomButton = new QPushButton(QStringLiteral("一键导入BOM用料"), this);
     m_importProductionBomButton->setVisible(false);
     m_importProductionBomButton->setToolTip(
-        QStringLiteral("递归导入当前成品BOM中的全部末级领用物料"));
+        QStringLiteral("分阶段领料时带入本阶段未领物料，手工领料时导入成品 BOM 的末级物料"));
     m_fullScreenButton = new QPushButton(QStringLiteral("全屏显示"), this);
     m_fullScreenButton->setToolTip(QStringLiteral("全屏显示物料明细表，按 Esc 可退出"));
     m_toolbarLayout->addWidget(hint);

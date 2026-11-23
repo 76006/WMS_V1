@@ -3,21 +3,26 @@ import json,os,secrets,socket,subprocess,time,uuid,concurrent.futures
 import lan_integration as base
 
 BUILD=base.ROOT/'build-lan-business'
+SERVER=base.BUILD/'WmsServer.exe'
 
 def main():
     databases=[];processes=[]
     password=secrets.token_urlsafe(24)
+    database_owner = base.sql("SELECT rolname FROM pg_roles WHERE rolname IN "
+                              "('wms_icebeauty_business_demo','wms_icebeauty_demo') ORDER BY rolname LIMIT 1")
+    if not database_owner:
+        raise RuntimeError('Start the local IceBeauty LAN host before running business checks.')
     try:
         for product,exe in [('ICE_BEAUTY','IceBeautyWms.exe'),('MEI_JING_LING','MeiJingLingWms.exe')]:
             name='wms_business_test_'+uuid.uuid4().hex
-            base.sql(f'CREATE DATABASE {name} OWNER wms_icebeauty_demo;');databases.append(name)
+            base.sql(f'CREATE DATABASE {name} OWNER {database_owner};');databases.append(name)
             env=base.ENV|{'WMS_PG_HOST':'127.0.0.1','WMS_PG_PORT':'55432','WMS_PG_DATABASE':name,
-                'WMS_PG_USER':'wms_icebeauty_demo','WMS_PG_PASSWORD':base.CREDS['app'],'WMS_DEMO_ADMIN_PASSWORD':password}
+                'WMS_PG_USER':database_owner,'WMS_PG_PASSWORD':base.CREDS['app'],'WMS_DEMO_ADMIN_PASSWORD':password}
             for flag in ['--init-demo','--init-business']:
-                result=base.run([BUILD/'WmsServer.exe','--product',product,flag],env=env,check=False)
+                result=base.run([SERVER,'--product',product,flag],env=env,check=False)
                 assert result.returncode==0,result.stderr
             with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
-            server_args=[str(BUILD/'WmsServer.exe'),'--product',product,'--port',str(port)]
+            server_args=[str(SERVER),'--product',product,'--port',str(port)]
             if os.environ.get('WMS_TEST_GDB'):
                 server_args=['D:/Qt/Tools/mingw1120_64/bin/gdb.exe','--batch','-ex','run','-ex','bt','--args']+server_args
             log=open(base.RUNTIME/f'business-test-{product}.log','w',encoding='utf-8')
@@ -58,6 +63,14 @@ def main():
             base.expect(inbound==repeated and float(scalar('SELECT SUM(quantity) FROM stock_balances'))==100,f'{product}: inbound and lost-response deduplication')
             outbound=rpc('InventoryService.postStockDocument',{'request':document('QTCK',[line(3)]),'inbound':False})['postedDocument']
             base.expect(float(scalar('SELECT SUM(quantity) FROM stock_balances'))==97,'outbound updates shared stock')
+            public_status, public_stock = base.api(port, '/stock?q=TEST-RAW')
+            base.expect(public_status == 200 and len(public_stock['items']) == 1
+                        and float(public_stock['items'][0]['quantity']) == 97,
+                        'anonymous inventory reads the current business balance')
+            base.expect(base.api(port, '/stock?q=%25')[1]['items'] == [],
+                        'inventory search treats percent as a literal')
+            base.expect(base.api(port, '/api/v2/data', {'kind': 'rpc'})[0] == 401,
+                        'public inventory access does not authorize business operations')
             issue=rpc('InventoryService.postProductionIssue',{'run':{'batchNo':'PROD-1','productMaterialId':str(finished),'plannedQuantity':5},'document':document('SCLL',[line(10)])})
             issue_id=issue['postedDocument']['documentId']
             item=scalar('SELECT id FROM business_document_items WHERE document_id=?',[issue_id])
@@ -153,6 +166,28 @@ def main():
             ui=base.run([BUILD/exe,'--server',f'http://127.0.0.1:{port}','--network-smoke-test'],env=env|{'WMS_TEST_PASSWORD':password,'WMS_NETWORK_VERIFY':'1','WMS_TEST_UI_WRITE':'1','WMS_NETWORK_LOG':str(ui_log)},check=False,timeout=150)
             if ui.returncode:print(f'UI exit: {ui.returncode}\n{ui.stderr}\n{ui_log.read_text(encoding="utf-8")}',flush=True)
             base.expect(ui.returncode==0,f'{product}: all original desktop pages load from PostgreSQL')
+            # Shared and nested components must not multiply stock balance rows.
+            bom = {'productCode':'TEST-FG','bomType':'process','groups':[
+                {'name':'Assembly A','items':[{'code':'TEST-SUB','quantity':1,'items':[
+                    {'code':'test-raw','quantity':1}]}]},
+                {'name':'Assembly B','items':[{'code':'TEST-RAW','quantity':2}]}]}
+            base.sql(f"INSERT INTO wms_business.process_boms(product_material_id,payload) "
+                     f"VALUES ({finished},'{json.dumps(bom)}')",name)
+            status, filters = base.api(port,'/stock/filters')
+            groups = {g['label']:g['id'] for g in filters['modules'] if g['product']=='TEST-FG'}
+            base.expect(status==200 and len(groups)==2 and any(
+                l['id']==str(loc) and l['warehouse']==str(wh) for l in filters['locations']),
+                'filter options identify process groups and location owners')
+            criteria = f'/stock?q=TEST-RAW&category={cat}&warehouse={wh}&location={loc}'
+            unfiltered_rows = base.api(port,criteria)[1]['items']
+            base.expect(bool(unfiltered_rows) and all(row['modules']=='Assembly A、Assembly B'
+                for row in unfiltered_rows), 'balances show all process group memberships')
+            for group_id in groups.values():
+                base.expect(base.api(port,criteria+'&module='+group_id)[1]['items']==unfiltered_rows,
+                            'nested and shared module membership preserves each balance')
+            for search in (criteria+'&module=none', f'/stock?warehouse={wh2}&location={loc}',
+                           f'/stock?q=TEST-RAW&category={fgcat}'):
+                base.expect(base.api(port,search)[1]['items']==[], 'combined filters exclude mismatches')
         print(f'Completed {base.CHECKS} full business checks.',flush=True)
     finally:
         for p in processes:
