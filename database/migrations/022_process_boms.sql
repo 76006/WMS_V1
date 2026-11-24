@@ -3,4 +3,4 @@ CREATE TABLE process_boms (
     payload TEXT NOT NULL
 );
 
-INSERT INTO schema_migrations(version) VALUES (22);
+INSERT INTO schema_migrations(version) VALUES (22) ON CONFLICT(version) DO NOTHING;

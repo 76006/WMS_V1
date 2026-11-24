@@ -42,6 +42,8 @@ private:
     void refreshProductionStages();
     void refreshStageProgress();
     void selectProductionTask();
+    void importStageBom(bool useRemaining);
+    double taskPlanQuantity() const;
 
     QSqlDatabase m_database;
     Session m_session;
@@ -55,8 +57,9 @@ private:
     QLabel *m_stageSummary = nullptr;
     ProductionTask m_task;
     qlonglong m_taskRunId = 0;
+    double m_savedPlanQuantity = 0;
     QString m_bomFingerprint;
-    QDoubleSpinBox *m_plannedQuantity = nullptr;
+    QDoubleSpinBox *m_issueQuantity = nullptr;
     QDateEdit *m_dateEdit = nullptr;
     QLineEdit *m_handlerEdit = nullptr;
     QTextEdit *m_notesEdit = nullptr;

@@ -121,12 +121,20 @@ bool LegacySource::prepare(const QString &sourceFile, const QString &product, QS
                        "WHERE table_schema='wms_business' AND table_type='BASE TABLE') AND table_name NOT IN "
                        "('network_identity','network_requests','schema_migrations','legacy_import_history','legacy_merge_rows')"))
         return fail(error, expected.lastError().text());
-    bool missing = false;
-    while (expected.next())
-        missing |= !fields.contains(expected.value(0).toString() + '.' + expected.value(1).toString());
+    QSet<QString> missing;
+    while (expected.next()) {
+        const QString field = expected.value(0).toString() + '.' + expected.value(1).toString();
+        if (!fields.contains(field)) missing.insert(field);
+    }
     if (expected.lastError().isValid()) return fail(error, expected.lastError().text());
-    if (missing && (!SchemaMigrator::migrate(m_database, error) || !inspect(m_database, product, error)))
-        return false;
+    if (missing == QSet<QString>{QStringLiteral("business_documents.issue_unit_count")}) {
+        // A complete pre-v25 layout can lack reliable migration history. Import reads
+        // the snapshot by column name; the destination already enforces the new key.
+        if (!check.exec(QStringLiteral("ALTER TABLE business_documents ADD COLUMN issue_unit_count NUMERIC")))
+            return fail(error, check.lastError().text());
+    } else if (!missing.isEmpty()) {
+        if (!SchemaMigrator::migrate(m_database, error) || !inspect(m_database, product, error)) return false;
+    }
     if (!check.exec(QStringLiteral("PRAGMA query_only=ON")) ||
         !check.exec(QStringLiteral("PRAGMA integrity_check")) || !check.next() ||
         check.value(0).toString() != QStringLiteral("ok")) {

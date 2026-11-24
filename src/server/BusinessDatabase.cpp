@@ -125,28 +125,29 @@ bool BusinessDatabase::upgradeProcessBoms(QSqlDatabase raw, const QString &produ
         *error = QStringLiteral("联网业务库身份不匹配");
         return false;
     }
-    QStringList migrations;
-    for (const int version : {22, 23, 24}) {
-        if (!query.exec(QStringLiteral("SELECT 1 FROM wms_business.schema_migrations WHERE version=%1").arg(version))) {
-            *error = query.lastError().text(); return false;
+    query.finish();
+    if (!raw.transaction()) { *error = raw.lastError().text(); return false; }
+    auto fail = [&] { raw.rollback(); return false; };
+    if (!run(raw, "SET LOCAL search_path=wms_business,public,pg_catalog", error) ||
+        !run(raw, "LOCK TABLE schema_migrations IN SHARE ROW EXCLUSIVE MODE", error)) return fail();
+    const struct { int version; const char *path; } migrations[] = {
+        {22, ":/database/migrations/022_process_boms.sql"},
+        {23, ":/database/migrations/023_production_stages.sql"},
+        {24, ":/database/migrations/024_purchase_suppliers.sql"},
+        {25, ":/database/postgresql/025_flexible_production_issues.sql"}
+    };
+    for (const auto &migration : migrations) {
+        if (!query.exec(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=%1").arg(migration.version))) {
+            *error = query.lastError().text(); return fail();
         }
         if (query.next()) continue;
-        QFile migration(version == 22 ? ":/database/migrations/022_process_boms.sql"
-                        : version == 23 ? ":/database/migrations/023_production_stages.sql"
-                                        : ":/database/migrations/024_purchase_suppliers.sql");
-        if (!migration.open(QIODevice::ReadOnly)) { *error = migration.errorString(); return false; }
-        migrations.append(QString::fromUtf8(migration.readAll()));
+        QFile file(QString::fromLatin1(migration.path));
+        if (!file.open(QIODevice::ReadOnly)) { *error = file.errorString(); return fail(); }
+        const auto statements = QString::fromUtf8(file.readAll()).trimmed().split(';', Qt::SkipEmptyParts);
+        for (const auto &statement : statements)
+            if (!run(raw, statement, error)) return fail();
     }
-    if (migrations.isEmpty()) return true;
-
-    if (!raw.transaction()) { *error = raw.lastError().text(); return false; }
-    if (!run(raw, "SET LOCAL search_path=wms_business,public,pg_catalog", error)) {
-        raw.rollback();
-        return false;
-    }
-    for (const auto &statement : migrations.join(QLatin1Char('\n')).trimmed().split(';', Qt::SkipEmptyParts)) {
-        if (!run(raw, statement, error)) { raw.rollback(); return false; }
-    }
+    query.finish();
     if (raw.commit()) return true;
     *error = raw.lastError().text();
     raw.rollback();

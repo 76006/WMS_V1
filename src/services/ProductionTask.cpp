@@ -218,13 +218,13 @@ bool ProductionTask::demand(QSqlDatabase db, qlonglong runId, const QString &key
                 return fail(error, QStringLiteral("工艺组累计用量超出领料数量范围。"));
             ProductionDemand d;
             d.materialId = usage.materialId; d.code = usage.code; d.name = usage.name;
-            d.unitUsage = usage.quantity / target->perMachine;
+            d.unitUsage = usage.quantity;
             grouped.insert(d.materialId, d);
         }
     } else {
         if (!isReceiptStage(key))
             return fail(error, QStringLiteral("请选择有效的整机装配或半成品工序。"));
-        expandMaterialDemand(key, 1, grouped);
+        expandMaterialDemand(key, target->perMachine, grouped);
     }
     QSqlQuery issued(db);
     issued.prepare(QStringLiteral("SELECT i.material_id,SUM(i.quantity-i.returned_quantity-i.reversed_quantity) "
@@ -239,7 +239,7 @@ bool ProductionTask::demand(QSqlDatabase db, qlonglong runId, const QString &key
     QMap<qlonglong,double> totals;
     while (issued.next()) totals.insert(issued.value(0).toLongLong(), issued.value(1).toDouble());
     for (auto d : grouped) {
-        d.required = d.unitUsage * target->perMachine * count;
+        d.required = d.unitUsage * count;
         d.issued = totals.value(d.materialId);
         if (!std::isfinite(d.required)) return fail(error, QStringLiteral("生产计划用量超出范围。"));
         result.append(d);

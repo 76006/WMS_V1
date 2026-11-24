@@ -111,7 +111,8 @@ bool InventoryService::saveIssueLineOptions(qlonglong documentItemId,
 bool InventoryService::setDocumentProductionContext(qlonglong documentId,
                                                      qlonglong productionRunId,
                                                      const QString &submissionToken,
-                                                     QString *errorMessage)
+                                                     QString *errorMessage,
+                                                     const QVariant &issueUnitCount)
 {
     const QString token = submissionToken.trimmed();
     if (productionRunId <= 0 || token.isEmpty()) {
@@ -133,9 +134,10 @@ bool InventoryService::setDocumentProductionContext(qlonglong documentId,
 
     QSqlQuery update(m_database);
     update.prepare(QStringLiteral(
-        "UPDATE business_documents SET production_run_id=?, submission_token=? WHERE id=?"));
+        "UPDATE business_documents SET production_run_id=?, submission_token=?, issue_unit_count=? WHERE id=?"));
     update.addBindValue(productionRunId);
     update.addBindValue(token);
+    update.addBindValue(issueUnitCount);
     update.addBindValue(documentId);
     if (!update.exec() || update.numRowsAffected() != 1) {
         const QString detail = update.lastError().text();
@@ -154,26 +156,20 @@ qlonglong InventoryService::ensureProductionRun(const ProductionRunRequest &run,
     const QString batchNo = run.batchNo.trimmed().toUpper();
     if (batchNo.isEmpty() || run.productMaterialId <= 0
         || !std::isfinite(run.plannedQuantity) || run.plannedQuantity <= ProductionQuantityTolerance) {
-        setProductionError(errorMessage, QStringLiteral("成品物料、生产批次和计划数量不能为空。"));
+        setProductionError(errorMessage, QStringLiteral("请选择成品、填写生产批次，并输入有效的本次生产台数。"));
         return 0;
     }
 
     QSqlQuery existing(m_database);
     existing.prepare(QStringLiteral(
-        "SELECT id, product_material_id, planned_quantity FROM production_runs WHERE batch_no=?"));
+        "SELECT id FROM production_runs WHERE batch_no=? AND product_material_id=?"));
     existing.addBindValue(batchNo);
+    existing.addBindValue(run.productMaterialId);
     if (!existing.exec()) {
         setProductionError(errorMessage, existing.lastError().text());
         return 0;
     }
     if (existing.next()) {
-        if (existing.value(1).toLongLong() != run.productMaterialId
-            || std::abs(existing.value(2).toDouble() - run.plannedQuantity)
-                   > ProductionQuantityTolerance) {
-            setProductionError(errorMessage,
-                               QStringLiteral("该生产批次已存在，成品或计划数量与原记录不一致。"));
-            return 0;
-        }
         return existing.value(0).toLongLong();
     }
 
@@ -257,15 +253,13 @@ bool InventoryService::saveProductionStage(qlonglong documentId, qlonglong runId
     } else {
         QList<ProductionDemand> demands;
         if (!task.demand(m_database, runId, document.productionStageKey, run.value(1).toDouble(), demands, errorMessage)) return false;
-        QMap<qlonglong, double> remaining;
-        for (const auto &d : demands) remaining.insert(d.materialId, d.remaining());
+        QSet<qlonglong> stageMaterials;
+        for (const auto &d : demands) stageMaterials.insert(d.materialId);
         for (const auto &line : document.lines) {
-            if (!std::isfinite(line.quantity) || line.quantity <= 0 || !remaining.contains(line.materialId)
-                || line.quantity > remaining.value(line.materialId) + ProductionQuantityTolerance) {
-                setProductionError(errorMessage, QStringLiteral("物料不属于该工序或数量超过剩余未领数量，请刷新用料进度；可删行或减少数量分次领取。"));
+            if (!stageMaterials.contains(line.materialId)) {
+                setProductionError(errorMessage, QStringLiteral("领料明细中有物料不属于该生产阶段。"));
                 return false;
             }
-            remaining[line.materialId] -= line.quantity;
         }
     }
     QSqlQuery snapshot(m_database);
@@ -319,7 +313,7 @@ bool InventoryService::postProductionIssue(const ProductionRunRequest &run,
                          document.documentDate, document.handlerName, document.purpose,
                          document.notes, QVariant(), errorMessage);
     if (documentId <= 0
-        || !setDocumentProductionContext(documentId, runId, document.submissionToken, errorMessage)) {
+        || !setDocumentProductionContext(documentId, runId, document.submissionToken, errorMessage, run.plannedQuantity)) {
         rollback();
         return false;
     }
@@ -328,23 +322,10 @@ bool InventoryService::postProductionIssue(const ProductionRunRequest &run,
         rollback();
         return false;
     }
-    QSet<QString> identities;
     for (int index = 0; index < document.lines.size(); ++index) {
         StockMovementRequest movement = document.lines.at(index);
         movement.documentType = QStringLiteral("SCLL");
         movement.documentDate = document.documentDate;
-        const QString identity = QStringLiteral("%1|%2|%3|%4")
-                                     .arg(movement.materialId)
-                                     .arg(movement.warehouseId)
-                                     .arg(movement.locationId)
-                                     .arg(movement.batchNo.trimmed().toUpper());
-        if (identities.contains(identity)) {
-            setProductionError(errorMessage,
-                               lineError(index + 1, QStringLiteral("物料、库位和批次组合重复。")));
-            rollback();
-            return false;
-        }
-        identities.insert(identity);
 
         QString detail;
         const MaterialRules rules = materialRules(movement.materialId, &detail);
@@ -566,7 +547,7 @@ bool InventoryService::postProductionReturn(const ProductionReturnRequest &reque
                 "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
                 "JOIN inventory_ledger l ON l.id=ils.ledger_id "
                 "WHERE sn.serial_no=? AND sn.material_id=? AND sn.status='OUTBOUND' "
-                "AND l.document_item_id=? AND l.business_type='SCLL'"));
+                "AND l.document_item_id=? AND l.business_type='SCLL'") + currentIssueSerialCondition());
             find.addBindValue(serial);
             find.addBindValue(materialId);
             find.addBindValue(returnLine.sourceItemId);

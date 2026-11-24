@@ -4,6 +4,7 @@
 #include "services/InventoryService.h"
 #include "ui/pages/MaterialPage.h"
 #include "ui/pages/ProductionIssuePage.h"
+#include "ui/widgets/StockLineTable.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -13,6 +14,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QGroupBox>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSqlQuery>
@@ -60,7 +63,8 @@ void checkProcessIssue(QSqlDatabase db, const Session &session, qlonglong produc
     check(!task.isReceiptStage(key) && semi.code == "W1"
           && !task.demand(db, 0, semi.key, 3, demand, &error), "Issue and receipt stages mixed");
     check(task.demand(db, 0, key, 3, demand, &error) && demand.size() == 1
-          && demand.first().required == 42, "Expected process quantity (2 + 3 x 4) x 3");
+          && demand.first().required == 84 && demand.first().unitUsage == 28,
+          "Expected two groups per machine and three machines");
 
     ProductionIssuePage page(db, session);
     QComboBox *products = nullptr;
@@ -79,7 +83,7 @@ void checkProcessIssue(QSqlDatabase db, const Session &session, qlonglong produc
             && table->horizontalHeaderItem(4)->text() == "未领数量") progress = table;
     }
     check(progress && progress->rowCount() == 1 && progress->item(0, 0)->text() == "M1"
-          && progress->item(0, 4)->text().toDouble() == 14, "Wrong process materials in the issue page");
+          && progress->item(0, 4)->text().toDouble() == 28, "Wrong process materials in the issue page");
 
     QSqlQuery sql(db);
     check(sql.exec("INSERT INTO warehouses(code,name) VALUES('TEST-WH','Test warehouse')"), sql.lastError().text());
@@ -96,6 +100,38 @@ void checkProcessIssue(QSqlDatabase db, const Session &session, qlonglong produc
     for (const auto value : {line.materialId,line.warehouseId,line.locationId}) sql.addBindValue(value);
     sql.addBindValue(line.batchNo);
     check(sql.exec(), sql.lastError().text());
+    auto *stockLines = page.findChild<StockLineTable *>();
+    auto *lineTable = stockLines->findChild<QTableWidget *>();
+    auto *count = page.findChild<QGroupBox *>()->findChild<QDoubleSpinBox *>();
+    check(stockLines->setProductionMaterials({{line.materialId, 14}, {line.materialId, 2}}, &error), error);
+    auto actual = [&](int row) {
+        return qobject_cast<QDoubleSpinBox *>(lineTable->cellWidget(row, 7));
+    };
+    actual(0)->setValue(9);
+    count->setValue(2);
+    check(lineTable->rowCount() == 2 && !actual(0)->isReadOnly()
+          && actual(0)->value() == 9 && actual(1)->value() == 4,
+          "Changing the slip count discarded manual quantities or failed to scale BOM quantities");
+    page.refreshReferenceData();
+    count->setValue(3);
+    check(lineTable->rowCount() == 2 && actual(0)->value() == 9 && actual(1)->value() == 6,
+          "A reference refresh lost the entered quantities or BOM usage");
+    const auto split = stockLines->lines(&error);
+    check(split.size() == 2 && split.first().batchNo == split.last().batchNo,
+          "Cannot split the same inventory across issue lines: " + error);
+    auto *usage = qobject_cast<QDoubleSpinBox *>(lineTable->cellWidget(0, 5));
+    usage->setValue(0);
+    actual(0)->setValue(1);
+    check(stockLines->lines(&error).size() == 2, "Manual issue unexpectedly requires a unit usage");
+    StockLineTable outbound(db, StockLineTable::Mode::Outbound);
+    outbound.addLine();
+    auto *outboundTable = outbound.findChild<QTableWidget *>();
+    for (int row = 0; row < 2; ++row) {
+        auto *material = qobject_cast<QComboBox *>(outboundTable->cellWidget(row, 0));
+        material->setCurrentIndex(material->findData(line.materialId));
+        qobject_cast<QDoubleSpinBox *>(outboundTable->cellWidget(row, 7))->setValue(1);
+    }
+    check(outbound.lines(&error).isEmpty() && error.contains("重复"), "Non-issue duplicate was accepted");
     StockDocumentRequest issue;
     issue.documentDate = QDate::currentDate();
     issue.submissionToken = "issue-1";
@@ -107,12 +143,40 @@ void checkProcessIssue(QSqlDatabase db, const Session &session, qlonglong produc
     qlonglong runId = 0;
     check(inventory.postProductionIssue(run, issue, nullptr, &runId, &error), error);
     check(ProductionTask::load(db, runId, productId, task, &error) && task.fingerprint() == issue.productionBomFingerprint
-          && task.demand(db, runId, key, 3, demand, &error) && demand.first().remaining() == 30,
+          && task.demand(db, runId, key, 3, demand, &error) && demand.first().remaining() == 72,
           "Partial issue did not keep the original process demand");
+    page.refreshReferenceData();
+    QLineEdit *batch = nullptr;
+    for (auto *editor : page.findChildren<QLineEdit *>())
+        if (editor->placeholderText().contains("PROD-")) batch = editor;
+    check(batch, "Missing batch editor");
+    batch->setText(run.batchNo);
+    QMetaObject::invokeMethod(batch, "editingFinished");
+    count->setValue(2);
+    check(count->isEnabled() && progress->item(0, 2)->text().toDouble() == 84
+          && progress->item(0, 4)->text().toDouble() == 72,
+          "Changing this slip's count changed the original stage plan");
+    const auto confirmImport = [] {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        check(box && box->button(QMessageBox::Yes), "Expected stage BOM import confirmation");
+        box->button(QMessageBox::Yes)->click();
+    };
+    auto *remaining = button(page, "带入本阶段未领物料");
+    QTimer::singleShot(0, confirmImport);
+    remaining->click();
+    check(lineTable->rowCount() == 1 && actual(0)->value() == 72
+          && stockLines->lines(&error).value(0).unitUsage == 28, "Stage balance quick-fill lost");
     issue.submissionToken = "issue-2";
-    issue.lines.first().quantity = 31;
-    check(!inventory.postProductionIssue(run, issue, nullptr, nullptr, &error) && error.contains("剩余"),
-          "Accepted an issue larger than the remaining process demand");
+    issue.lines.first().quantity = 73;
+    check(inventory.postProductionIssue(run, issue, nullptr, nullptr, &error), error);
+    page.refreshReferenceData();
+    check(progress->item(0, 3)->text().toDouble() == 85 && progress->item(0, 4)->text().toDouble() == 0
+          && !remaining->isEnabled(), "Over-issue did not update stage progress");
+    QTimer::singleShot(0, confirmImport);
+    button(page, "一键导入BOM用料")->click();
+    check(lineTable->rowCount() == 1 && actual(0)->value() == 56
+          && qobject_cast<QDoubleSpinBox *>(lineTable->cellWidget(0, 5))->value() == 28,
+          "Cannot import stage members by slip count after reaching the plan");
 
     // A pre-process snapshot keeps the original material hierarchy and its stage IDs.
     QJsonArray legacy;
@@ -132,7 +196,8 @@ void checkProcessIssue(QSqlDatabase db, const Session &session, qlonglong produc
     sql.addBindValue(QString::fromUtf8(QJsonDocument(legacy).toJson(QJsonDocument::Compact)));
     check(sql.exec(), sql.lastError().text());
     check(ProductionTask::load(db, oldId, productId, task, &error) && !task.usesProcessBom()
-          && task.demand(db, oldId, semi.key, 3, demand, &error) && demand.first().required == 27,
+          && task.demand(db, oldId, semi.key, 3, demand, &error) && demand.first().required == 27
+          && demand.first().unitUsage == 9,
           "Legacy task switched to the process BOM");
 }
 
@@ -293,6 +358,11 @@ int main(int argc, char **argv)
     check(assembly["name"] == "装配组" && assemblyItems.size() == 2 &&
           assemblyItems.last().toObject()["items"].toArray().first().toObject()["quantity"] == 4,
           "Selecting a leaf lost the rest of the process tree");
+    auto twoGroups = assembly;
+    twoGroups["quantity"] = 2;
+    auto nestedProcess = nested;
+    nestedProcess["nodes"] = QJsonArray{twoGroups};
+    writeJson(nestedPath, nestedProcess);
     chooseJsonFile(processJson, nestedPath);
     QSqlQuery product(db);
     check(product.exec("SELECT id FROM materials WHERE code='P1'") && product.next(), "Product archive");
@@ -301,7 +371,7 @@ int main(int argc, char **argv)
     check(ProcessBom::load(db, id, saved, error), error);
     QList<ProcessBomUsage> lines;
     check(saved.groups.first().issueMaterials(3, lines, error) && lines.size()==1
-              && lines.first().quantity == 14, "Expected per-unit issue quantity 2 + 3 x 4");
+              && lines.first().quantity == 28, "Expected per-machine issue quantity 2 x (2 + 3 x 4)");
     checkProcessIssue(db, session, id);
     tree->setCurrentItem(root()->child(0)->child(1));
     QTimer::singleShot(0, confirm);

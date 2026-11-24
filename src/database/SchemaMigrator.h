@@ -11,6 +11,7 @@ private:
     static bool validateDatabaseOwnershipBeforeMigration(QSqlDatabase database,
                                                          QString *errorMessage);
     static bool executeSchema(QSqlDatabase database, QString *errorMessage);
+    static bool applyFlexibleProductionIssuesMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyProductionWorkflowMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyFinalFeaturesMigration(QSqlDatabase database, QString *errorMessage);
     static bool applyMaterialNumberingMigration(QSqlDatabase database, QString *errorMessage);

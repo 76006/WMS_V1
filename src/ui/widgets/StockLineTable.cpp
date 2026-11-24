@@ -54,6 +54,7 @@ constexpr int ActionColumn = 15;
 constexpr double QuantityTolerance = 0.0000001;
 constexpr int BatchColumnWidth = 170;
 constexpr auto AutomaticBatchProperty = "automaticBatch";
+constexpr auto ManualIssueQuantityProperty = "manualIssueQuantity";
 constexpr auto ApplyingAutomaticBatchProperty = "applyingAutomaticBatch";
 
 // 物料必须由用户显式选择：占位项使用 0 作为数据，物料主键从 1 开始。
@@ -92,7 +93,7 @@ StockLineTable::StockLineTable(QSqlDatabase database, Mode mode, QWidget *parent
     m_importProductionBomButton = new QPushButton(QStringLiteral("一键导入BOM用料"), this);
     m_importProductionBomButton->setVisible(false);
     m_importProductionBomButton->setToolTip(
-        QStringLiteral("分阶段领料时带入本阶段未领物料，手工领料时导入成品 BOM 的末级物料"));
+        QStringLiteral("按本次台数带入所选阶段用料，手工模式下带入成品 BOM 的末级物料"));
     m_fullScreenButton = new QPushButton(QStringLiteral("全屏显示"), this);
     m_fullScreenButton->setToolTip(QStringLiteral("全屏显示物料明细表，按 Esc 可退出"));
     m_toolbarLayout->addWidget(hint);
@@ -371,7 +372,10 @@ void StockLineTable::addLine()
         gift->setMaximum(qMax(0.0, quantity->value() - ordered->value()));
     };
     connect(quantity, qOverload<double>(&QDoubleSpinBox::valueChanged), gift,
-            [updateGiftMaximum](double) { updateGiftMaximum(); });
+            [this, quantity, updateGiftMaximum](double) {
+                if (m_productionUsageMode) quantity->setProperty(ManualIssueQuantityProperty, true);
+                updateGiftMaximum();
+            });
     connect(ordered, qOverload<double>(&QDoubleSpinBox::valueChanged), gift,
             [updateGiftMaximum](double) { updateGiftMaximum(); });
     connect(unitUsage, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
@@ -387,8 +391,6 @@ void StockLineTable::addLine()
 
     loadMaterials(material);
     loadUnitUsage(row);
-    quantity->setReadOnly(m_productionUsageMode);
-    quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
     loadWarehouses(row);
     refreshRowNumbers();
 }
@@ -450,7 +452,10 @@ bool StockLineTable::setProductionRemaining(const QList<ProductionDemand> &mater
     for (const auto &d : materials) {
         if (d.remaining() <= 0.0000001) continue;
         auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row++, QuantityColumn));
-        if (quantity) quantity->setValue(d.remaining());
+        if (quantity) {
+            quantity->setValue(d.remaining());
+            quantity->setProperty(ManualIssueQuantityProperty, true);
+        }
     }
     return true;
 }
@@ -528,6 +533,7 @@ void StockLineTable::setInspectionBatchMode(bool enabled)
 
 void StockLineTable::setProductionUsageMode(bool enabled)
 {
+    if (m_productionUsageMode == (m_mode == Mode::Outbound && enabled)) return;
     m_productionUsageMode = m_mode == Mode::Outbound && enabled;
     m_importProductionBomButton->setVisible(m_productionUsageMode);
     m_keepEmptyWhenNoRows = m_productionUsageMode || m_forceKeepEmptyWhenNoRows;
@@ -535,19 +541,14 @@ void StockLineTable::setProductionUsageMode(bool enabled)
                              !m_productionUsageMode && !m_issueOptionsMode);
     m_table->setHorizontalHeaderItem(
         QuantityColumn,
-        new QTableWidgetItem(m_productionUsageMode ? QStringLiteral("总用量")
+        new QTableWidgetItem(m_productionUsageMode ? QStringLiteral("实领数量")
                                                    : (m_mode == Mode::Inbound
                                                           ? QStringLiteral("入库数量")
                                                           : QStringLiteral("出库数量"))));
     for (int row = 0; row < m_table->rowCount(); ++row) {
         auto *unitUsage = qobject_cast<QDoubleSpinBox *>(
             m_table->cellWidget(row, UnitUsageColumn));
-        auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, QuantityColumn));
         if (unitUsage) unitUsage->setEnabled(m_productionUsageMode || m_issueOptionsMode);
-        if (quantity) {
-            quantity->setReadOnly(m_productionUsageMode);
-            quantity->setButtonSymbols(QAbstractSpinBox::NoButtons);
-        }
         loadUnitUsage(row);
     }
     if (m_productionUsageMode) m_table->setRowCount(0);
@@ -622,9 +623,14 @@ void StockLineTable::setDocumentDate(const QDate &date)
 
 void StockLineTable::setProductionQuantity(double quantity)
 {
+    if (m_productionQuantity == quantity) return;
     m_productionQuantity = qMax(0.0, quantity);
     if (!m_productionUsageMode) return;
-    for (int row = 0; row < m_table->rowCount(); ++row) updateProductionQuantity(row);
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        const auto *actual = m_table->cellWidget(row, QuantityColumn);
+        if (actual && !actual->property(ManualIssueQuantityProperty).toBool())
+            updateProductionQuantity(row);
+    }
 }
 
 void StockLineTable::updateProductionQuantity(int row)
@@ -637,6 +643,7 @@ void StockLineTable::updateProductionQuantity(int row)
     if (!m_productionUsageMode) return;
     quantity->setMinimum(0.0);
     quantity->setValue(unitUsage->value() * m_productionQuantity);
+    quantity->setProperty(ManualIssueQuantityProperty, false);
     auto *serialButton = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
     if (serialButton) {
         serialButton->setProperty("serials", QStringList());
@@ -722,12 +729,8 @@ void StockLineTable::refreshReferenceData()
     for (int row = 0; row < m_table->rowCount(); ++row) {
         QComboBox *material = comboAt(row, MaterialColumn);
         const QVariant selected = material ? material->currentData() : QVariant();
-        auto *usage = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, UnitUsageColumn));
-        auto *quantity = qobject_cast<QDoubleSpinBox *>(m_table->cellWidget(row, QuantityColumn));
         auto *serial = qobject_cast<QPushButton *>(m_table->cellWidget(row, SerialColumn));
         const bool preserveIssue = m_issueOptionsMode && selected.toLongLong() > 0;
-        const double enteredUsage = usage ? usage->value() : 0;
-        const double enteredQuantity = quantity ? quantity->value() : 0;
         const auto *warehouse = comboAt(row, WarehouseColumn);
         const auto *location = comboAt(row, LocationColumn);
         const auto *batch = comboAt(row, BatchColumn);
@@ -737,17 +740,14 @@ void StockLineTable::refreshReferenceData()
         const QVariant oldSerials = serial ? serial->property("serials") : QVariant();
         const QString oldSerialText = serial ? serial->text() : QString();
         if (material) loadMaterials(material, selected);
-        loadUnitUsage(row);
+        const bool sameIssueMaterial = preserveIssue && material && material->currentData() == selected;
+        if (!sameIssueMaterial) loadUnitUsage(row);
         loadWarehouses(row);
-        if (preserveIssue && material && material->currentData() == selected) {
-            // A reference-data refresh must not turn a partial issue back into the full plan,
-            // nor replace the task BOM usage with the material archive's default usage.
-            if (usage) { const QSignalBlocker blocker(usage); usage->setValue(enteredUsage); }
-            if (quantity) { const QSignalBlocker blocker(quantity); quantity->setValue(enteredQuantity); }
-            if (serial && warehouse && location && batch && warehouse->currentData() == oldWarehouse
-                && location->currentData() == oldLocation && batch->currentText() == oldBatch) {
-                serial->setProperty("serials", oldSerials); serial->setText(oldSerialText);
-            }
+        if (sameIssueMaterial && serial && warehouse && location && batch
+            && warehouse->currentData() == oldWarehouse && location->currentData() == oldLocation
+            && batch->currentText() == oldBatch) {
+            serial->setProperty("serials", oldSerials);
+            serial->setText(oldSerialText);
         }
     }
 }
@@ -1205,12 +1205,6 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
             if (errorMessage) *errorMessage = QStringLiteral("第 %1 行资料不完整。").arg(row + 1);
             return {};
         }
-        if (m_productionUsageMode
-            && (!unitUsage || unitUsage->value() <= QuantityTolerance)) {
-            if (errorMessage) *errorMessage = QStringLiteral("第 %1 行物料未设置单台用量。")
-                                                  .arg(row + 1);
-            return {};
-        }
         if (quantity->value() <= QuantityTolerance) {
             if (errorMessage) *errorMessage = QStringLiteral("第 %1 行数量必须大于0。")
                                                   .arg(row + 1);
@@ -1223,7 +1217,7 @@ QList<StockMovementRequest> StockLineTable::lines(QString *errorMessage) const
                                      .arg(warehouse->currentData().toLongLong())
                                      .arg(location->currentData().toLongLong())
                                      .arg(batchNumber.toUpper());
-        if (identities.contains(identity)) {
+        if (!m_issueOptionsMode && identities.contains(identity)) {
             if (errorMessage) *errorMessage = QStringLiteral("第 %1 行与前面明细重复。").arg(row + 1);
             return {};
         }

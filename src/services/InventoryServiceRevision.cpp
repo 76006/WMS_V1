@@ -1,6 +1,7 @@
 #include "network/RemoteBackend.h"
 #include "network/BusinessWire.h"
 #include "services/InventoryService.h"
+#include "services/InventoryLedgerTime.h"
 #include "services/ProductionTask.h"
 
 #include <QDateTime>
@@ -41,16 +42,6 @@ QString revisedLedgerTime(QString value, const QDate &oldDate, const QDate &newD
     time = time.toLocalTime();
     if (oldDate != newDate) time.setDate(newDate);
     return time.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
-}
-
-QString ledgerTimeOrder(const QString &column)
-{
-    // SQLite 默认时间是不带时区的本地时间；旧版 ISO 流水可能带 Z/偏移量。
-    // 只对显式带时区的记录转换到本地时间，避免同一天的流水被平移八小时。
-    return QStringLiteral(
-        "strftime('%Y-%m-%d %H:%M:%f',%1,CASE WHEN substr(%1,-1)='Z' "
-        "OR instr(substr(%1,20),'+')>0 OR instr(substr(%1,20),'-')>0 "
-        "THEN 'localtime' ELSE '+0 seconds' END)").arg(column);
 }
 
 QString placeholders(int count)
@@ -381,7 +372,7 @@ bool rebuildSerialStates(QSqlDatabase database,
     QSqlQuery reset(database);
     reset.prepare(QStringLiteral(
         "UPDATE serial_numbers SET status='VOIDED',warehouse_id=NULL,location_id=NULL,"
-        "last_document_id=NULL,outbound_at=NULL WHERE id IN (%1)")
+        "last_document_id=NULL,outbound_at=NULL,production_batch='' WHERE id IN (%1)")
                       .arg(placeholders(affectedSerialIds.size())));
     for (qlonglong id : affectedSerialIds) reset.addBindValue(id);
     if (!reset.exec()) {
@@ -394,6 +385,7 @@ bool rebuildSerialStates(QSqlDatabase database,
         qlonglong warehouseId = 0;
         qlonglong locationId = 0;
         QString batchNo;
+        QString productionBatch;
         QString status = QStringLiteral("VOIDED");
         qlonglong lastDocumentId = 0;
         QString inboundAt;
@@ -404,11 +396,14 @@ bool rebuildSerialStates(QSqlDatabase database,
     event.prepare(QStringLiteral(
             "SELECT sn.id,sn.serial_no,sn.material_id,l.material_id,l.batch_no,l.warehouse_id,"
             "l.location_id,l.quantity_in,l.quantity_out,l.document_id,l.business_type,"
-            "COALESCE(sd.document_type,''),COALESCE(sd.stock_direction,''),l.occurred_at "
+            "COALESCE(sd.document_type,''),COALESCE(sd.stock_direction,''),l.occurred_at,"
+            "CASE WHEN l.business_type IN ('SCLL','CPRK') AND d.production_run_id IS NOT NULL THEN pr.batch_no "
+            "WHEN l.quantity_in>0 AND l.business_type NOT IN ('DB-IN','CX-DB-IN','CX','SCTL') THEN '' END "
             "FROM inventory_ledger_serials x JOIN serial_numbers sn ON sn.id=x.serial_id "
             "JOIN inventory_ledger l ON l.id=x.ledger_id "
             "JOIN business_documents d ON d.id=l.document_id "
             "LEFT JOIN business_documents sd ON sd.id=d.source_document_id "
+            "LEFT JOIN production_runs pr ON pr.id=d.production_run_id "
             "WHERE sn.id IN (%1) ORDER BY %2,l.id")
                       .arg(placeholders(affectedSerialIds.size()), ledgerTimeOrder(QStringLiteral("l.occurred_at"))));
     for (qlonglong id : affectedSerialIds) event.addBindValue(id);
@@ -426,6 +421,7 @@ bool rebuildSerialStates(QSqlDatabase database,
             return false;
         }
         State state = states.value(serialId);
+        if (!event.value(14).isNull()) state.productionBatch = event.value(14).toString();
         if (event.value(7).toDouble() > QuantityTolerance) {
             if (state.inStock) {
                 setError(errorMessage, QStringLiteral("SN %1 在修改后的流水中被重复入库。").arg(serialNo));
@@ -465,7 +461,7 @@ bool rebuildSerialStates(QSqlDatabase database,
     QSqlQuery update(database);
     update.prepare(QStringLiteral(
         "UPDATE serial_numbers SET status=?,batch_no=?,warehouse_id=?,location_id=?,"
-        "last_document_id=?,inbound_at=?,outbound_at=? WHERE id=?"));
+        "last_document_id=?,inbound_at=?,outbound_at=?,production_batch=? WHERE id=?"));
     for (auto it = states.cbegin(); it != states.cend(); ++it) {
         const State &state = it.value();
         update.bindValue(0, state.status);
@@ -476,7 +472,8 @@ bool rebuildSerialStates(QSqlDatabase database,
         update.bindValue(5, state.inboundAt.isEmpty() ? QVariant() : QVariant(state.inboundAt));
         update.bindValue(6, state.status == QStringLiteral("OUTBOUND")
                                 ? QVariant(state.outboundAt) : QVariant());
-        update.bindValue(7, it.key());
+        update.bindValue(7, normalized(state.productionBatch));
+        update.bindValue(8, it.key());
         if (!update.exec()) {
             setError(errorMessage, QStringLiteral("保存SN重算结果失败：%1").arg(update.lastError().text()));
             return false;
@@ -511,8 +508,12 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
         "COALESCE(s.delivery_date,''),COALESCE(s.customer_company,''),COALESCE(s.destination,''),"
         "COALESCE(s.contact_name,''),COALESCE(s.contact_phone,''),COALESCE(s.sales_order_no,''),"
         "COALESCE(s.logistics_company,''),COALESCE(s.tracking_no,''),"
-        "COALESCE(q.inspection_notice_id,0) "
+        "COALESCE(q.inspection_notice_id,0),COALESCE(d.issue_unit_count,src.issue_unit_count),"
+        "p.planned_quantity,ds.stage_key,p.product_material_id "
         "FROM business_documents d LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
+        "LEFT JOIN business_documents src ON d.document_type='SCTL' AND src.id=d.source_document_id "
+        "LEFT JOIN production_runs p ON p.id=d.production_run_id "
+        "LEFT JOIN production_document_stages ds ON ds.document_id=COALESCE(src.id,d.id) "
         "LEFT JOIN inbound_inspection_details q ON q.document_id=d.id WHERE d.id=?"));
     query.addBindValue(documentId);
     if (!query.exec() || !query.next()) {
@@ -542,6 +543,21 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
     result.trackingNumber = query.value(19).toString();
     result.inspectionNoticeId = query.value(20).toLongLong();
 
+    double issueUnits = 0.0;
+    if (result.documentType == QStringLiteral("SCLL") || result.documentType == QStringLiteral("SCTL")) {
+        issueUnits = query.value(21).toDouble();
+        if (query.value(21).isNull()) {
+            issueUnits = query.value(22).toDouble();
+            const QString stageKey = query.value(23).toString();
+            if (!stageKey.isEmpty()) {
+                ProductionTask task;
+                if (!ProductionTask::load(m_database, result.productionRunId, query.value(24).toLongLong(), task, errorMessage))
+                    return false;
+                if (const auto *stage = task.stage(stageKey)) issueUnits *= stage->perMachine;
+            }
+        }
+    }
+
     QSqlQuery lines(m_database);
     lines.prepare(QStringLiteral(
         "SELECT i.id,i.material_id,i.quantity,i.ordered_quantity,i.gift_quantity,i.batch_no,"
@@ -550,13 +566,17 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
         "WHEN SUM(l.quantity_out)>SUM(l.quantity_in) THEN 'OUT' ELSE d.stock_direction END,"
         "COALESCE(o.external_dispatch,0),COALESCE(o.secondary_dispatch,0),"
         "COALESCE(o.loss_marked,0),COALESCE(o.return_to_stock,0),"
-        "CASE WHEN COALESCE(u.unit_usage,-1)>=0 THEN u.unit_usage ELSE m.unit_usage END "
+        "COALESCE(NULLIF(u.unit_usage,-1),NULLIF(source_usage.unit_usage,-1)),"
+        "COALESCE(source.quantity,i.quantity),m.unit_usage "
         "FROM business_document_items i JOIN business_documents d ON d.id=i.document_id "
         "JOIN materials m ON m.id=i.material_id "
         "LEFT JOIN issue_line_options o ON o.document_item_id=i.id "
         "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
+        "LEFT JOIN business_document_items source ON d.document_type='SCTL' AND source.id=i.source_item_id "
+        "LEFT JOIN issue_line_usage source_usage ON source_usage.document_item_id=source.id "
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id WHERE i.document_id=? "
-        "GROUP BY i.id,d.id,m.id,o.document_item_id,u.document_item_id ORDER BY i.line_number,i.id"));
+        "GROUP BY i.id,d.id,m.id,o.document_item_id,u.document_item_id,source.id,source_usage.document_item_id "
+        "ORDER BY i.line_number,i.id"));
     lines.addBindValue(documentId);
     if (!lines.exec()) {
         setError(errorMessage, QStringLiteral("读取业务明细失败：%1").arg(lines.lastError().text()));
@@ -581,7 +601,9 @@ bool InventoryService::loadPostedDocument(qlonglong documentId,
         line.secondaryDispatch = lines.value(14).toBool();
         line.lossMarked = lines.value(15).toBool();
         line.returnToStock = lines.value(16).toBool();
-        line.unitUsage = lines.value(17).toDouble();
+        if (!lines.value(17).isNull()) line.unitUsage = lines.value(17).toDouble();
+        else if (issueUnits > 0.0) line.unitUsage = lines.value(18).toDouble() / issueUnits;
+        else line.unitUsage = lines.value(19).toDouble();
         QSqlQuery serials(m_database);
         serials.prepare(QStringLiteral(
             "SELECT DISTINCT sn.serial_no FROM inventory_ledger l "
@@ -1330,8 +1352,6 @@ bool InventoryService::revisePostedDocument(const PostedDocumentEdit &document,
             if (document.documentType == QStringLiteral("SCLL")) for (const auto &d : demands) if (d.materialId == line.materialId) allowed = true;
             if (!allowed) return fail(errorMessage, QStringLiteral("修改后的物料不属于该生产阶段。"));
         }
-        if (document.documentType == QStringLiteral("SCLL")) for (const auto &d : demands)
-            if (d.issued > d.required + 0.0000001) return fail(errorMessage, QStringLiteral("修改后该阶段累计领用超过计划用量。"));
     }
     if (before.productionRunId > 0
         && !refreshProductionRunStatus(before.productionRunId, errorMessage)) {

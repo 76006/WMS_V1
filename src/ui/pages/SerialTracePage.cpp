@@ -1,4 +1,5 @@
 #include "ui/pages/SerialTracePage.h"
+#include "services/InventoryLedgerTime.h"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -172,8 +173,14 @@ void SerialTracePage::loadHistory()
     } else {
         QSqlQuery run(m_database);
         run.prepare(QStringLiteral(
-            "SELECT pr.id,pm.code,pm.name FROM production_runs pr "
-            "JOIN materials pm ON pm.id=pr.product_material_id WHERE pr.batch_no=?"));
+            "SELECT pr.id,pm.code,pm.name FROM inventory_ledger_serials x "
+            "JOIN inventory_ledger l ON l.id=x.ledger_id "
+            "JOIN business_documents d ON d.id=l.document_id "
+            "JOIN production_runs pr ON pr.id=d.production_run_id "
+            "JOIN materials pm ON pm.id=pr.product_material_id "
+            "WHERE x.serial_id=? AND pr.batch_no=? ORDER BY %1 DESC,l.id DESC LIMIT 1")
+                .arg(ledgerTimeOrder(QStringLiteral("l.occurred_at"))));
+        run.addBindValue(serialId);
         run.addBindValue(productionBatch);
         if (run.exec() && run.next()) {
             productionRunId = run.value(0).toLongLong();

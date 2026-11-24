@@ -10,6 +10,9 @@
 #include <QVariant>
 
 namespace {
+bool runSqlResource(QSqlDatabase database, const QString &resourcePath,
+                    const QString &operationName, QString *errorMessage);
+
 struct SqlMigration {
     int version;
     const char *resource;
@@ -147,7 +150,11 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
     }
     for (const auto &migration : sqlMigrations) {
         QSqlQuery applied(database);
-        if (!applied.exec(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=%1").arg(migration.version))) {
+        QString checkApplied = QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=%1").arg(migration.version);
+        // The standalone v22 installed flexible issues instead of process_boms.
+        if (migration.version == 22)
+            checkApplied += QStringLiteral(" AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='process_boms')");
+        if (!applied.exec(checkApplied)) {
             if (errorMessage) *errorMessage = applied.lastError().text();
             return false;
         }
@@ -156,6 +163,7 @@ bool SchemaMigrator::migrate(QSqlDatabase database, QString *errorMessage)
         if (!alreadyApplied && !executeSqlResource(database, QString::fromUtf8(migration.resource),
                 QString::fromUtf8(migration.description), errorMessage)) return false;
     }
+    if (!applyFlexibleProductionIssuesMigration(database, errorMessage)) return false;
     if (!ensureSystemIdentity(database, errorMessage)) {
         return false;
     }
@@ -755,10 +763,9 @@ bool SchemaMigrator::applyProductionWorkflowMigration(QSqlDatabase database,
                               errorMessage);
 }
 
-bool SchemaMigrator::executeSqlResource(QSqlDatabase database,
-                                        const QString &resourcePath,
-                                        const QString &operationName,
-                                        QString *errorMessage)
+namespace {
+bool runSqlResource(QSqlDatabase database, const QString &resourcePath,
+                    const QString &operationName, QString *errorMessage)
 {
     QFile file(resourcePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -772,13 +779,6 @@ bool SchemaMigrator::executeSqlResource(QSqlDatabase database,
     schema.remove(QRegularExpression(QStringLiteral("--[^\n]*")));
     const QStringList statements = schema.split(QLatin1Char(';'), Qt::SkipEmptyParts);
 
-    if (!database.transaction()) {
-        if (errorMessage) {
-            *errorMessage = database.lastError().text();
-        }
-        return false;
-    }
-
     QSqlQuery query(database);
     for (const QString &rawStatement : statements) {
         const QString statement = rawStatement.trimmed();
@@ -786,7 +786,6 @@ bool SchemaMigrator::executeSqlResource(QSqlDatabase database,
             continue;
         }
         if (!query.exec(statement)) {
-            database.rollback();
             if (errorMessage) {
                 *errorMessage = QStringLiteral("%1失败：%2；语句：%3")
                                     .arg(operationName, query.lastError().text(), statement.left(160));
@@ -794,15 +793,79 @@ bool SchemaMigrator::executeSqlResource(QSqlDatabase database,
             return false;
         }
     }
+    return true;
+}
+}
+
+bool SchemaMigrator::executeSqlResource(QSqlDatabase database, const QString &resourcePath,
+                                        const QString &operationName, QString *errorMessage)
+{
+    if (!database.transaction()) {
+        if (errorMessage) *errorMessage = database.lastError().text();
+        return false;
+    }
+    if (!runSqlResource(database, resourcePath, operationName, errorMessage)) {
+        database.rollback();
+        return false;
+    }
 
     if (!database.commit()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("提交%1失败：%2")
                                 .arg(operationName, database.lastError().text());
         }
+        database.rollback();
         return false;
     }
     return true;
+}
+
+bool SchemaMigrator::applyFlexibleProductionIssuesMigration(QSqlDatabase database, QString *errorMessage)
+{
+    QSqlQuery query(database);
+    auto exec = [&](const QString &statement) {
+        if (query.exec(statement)) return true;
+        if (errorMessage) *errorMessage = query.lastError().text();
+        return false;
+    };
+    if (!exec(QStringLiteral("SELECT 1 FROM schema_migrations WHERE version=25"))) return false;
+    if (query.next()) return true;
+    query.finish();
+
+    // SQLite's DROP TABLE acts like a DELETE even with deferred constraints.
+    // Disable the connection's cascades for this rebuild, then check all references.
+    if (!exec(QStringLiteral("PRAGMA foreign_keys=OFF"))) return false;
+    const bool upgraded = [&] {
+        if (!exec(QStringLiteral("BEGIN IMMEDIATE"))) return false;
+        if (!exec(QStringLiteral(
+            "SELECT name FROM pragma_table_info('business_documents') WHERE name='issue_unit_count'"))) return false;
+        const bool hasUnitCount = query.next();
+        query.finish();
+        if (!hasUnitCount && !exec(QStringLiteral(
+            "ALTER TABLE business_documents ADD COLUMN issue_unit_count NUMERIC CHECK (issue_unit_count > 0)"))) return false;
+
+        if (!exec(QStringLiteral(
+            "SELECT (SELECT group_concat(name, ',') FROM (SELECT name FROM pragma_index_info(i.name) ORDER BY seqno)) "
+            "FROM pragma_index_list('production_runs') i WHERE i.[unique]=1 AND i.partial=0"))) return false;
+        QStringList uniqueKeys;
+        while (query.next()) uniqueKeys << query.value(0).toString();
+        query.finish();
+        if ((uniqueKeys.contains(QStringLiteral("batch_no")) ||
+             !uniqueKeys.contains(QStringLiteral("batch_no,product_material_id"))) &&
+            !runSqlResource(database, QStringLiteral(":/database/migrations/025_flexible_production_issues.sql"),
+                            QStringLiteral("升级生产批号约束"), errorMessage)) return false;
+        if (!exec(QStringLiteral("PRAGMA foreign_key_check"))) return false;
+        if (query.next()) {
+            if (errorMessage) *errorMessage = QStringLiteral("生产批次升级后存在失效外键：%1").arg(query.value(0).toString());
+            return false;
+        }
+        query.finish();
+        return exec(QStringLiteral("INSERT OR IGNORE INTO schema_migrations(version) VALUES(25)"))
+            && exec(QStringLiteral("COMMIT"));
+    }();
+    query.finish();
+    if (!upgraded) database.rollback();
+    return exec(QStringLiteral("PRAGMA foreign_keys=ON")) && upgraded;
 }
 
 bool SchemaMigrator::ensureDefaultAdministrator(QSqlDatabase database, QString *errorMessage)

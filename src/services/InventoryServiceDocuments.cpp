@@ -341,10 +341,10 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
         return false;
     }
 
-    const QString numberRuleType = QStringList{
+    const bool issue = QStringList{
         QStringLiteral("SCLL"), QStringLiteral("SHLL"),
-        QStringLiteral("YFLL"), QStringLiteral("QTLL")}.contains(type)
-        ? QStringLiteral("SCLL") : type;
+        QStringLiteral("YFLL"), QStringLiteral("QTLL")}.contains(type);
+    const QString numberRuleType = issue ? QStringLiteral("SCLL") : type;
     const QString number = nextDocumentNumber(numberRuleType, request.documentDate, errorMessage);
     const qlonglong documentId = number.isEmpty()
         ? 0
@@ -478,7 +478,7 @@ bool InventoryService::postStockDocument(const StockDocumentRequest &request,
                                      .arg(movement.warehouseId)
                                      .arg(movement.locationId)
                                      .arg(movement.batchNo.trimmed().toUpper());
-        if (identities.contains(identity)) {
+        if ((inbound || !issue) && identities.contains(identity)) {
             setDocumentError(errorMessage,
                              lineError(index + 1, QStringLiteral("物料、库位和批次组合重复。")));
             rollback();

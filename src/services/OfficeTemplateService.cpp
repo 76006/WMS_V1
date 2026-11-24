@@ -1162,8 +1162,10 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "COALESCE(s.contact_name,''),COALESCE(s.contact_phone,''),COALESCE(s.sales_order_no,''),"
         "COALESCE(s.logistics_company,''),COALESCE(s.tracking_no,''),"
         "COALESCE(s.delivery_date,''),COALESCE(p.batch_no,''),COALESCE(p.product_name,''),"
-        "COALESCE(p.product_model,''),COALESCE(p.planned_quantity,0),ds.stage_key,p.id,p.product_material_id "
+        "COALESCE(p.product_model,''),COALESCE(d.issue_unit_count,src.issue_unit_count,p.planned_quantity,0),"
+        "ds.stage_key,p.id,p.product_material_id,COALESCE(d.issue_unit_count,src.issue_unit_count) "
         "FROM business_documents d LEFT JOIN sales_outbound_details s ON s.document_id=d.id "
+        "LEFT JOIN business_documents src ON d.document_type='SCTL' AND src.id=d.source_document_id "
         "LEFT JOIN production_runs p ON p.id=d.production_run_id "
         "LEFT JOIN production_document_stages ds ON ds.document_id=CASE WHEN d.document_type='SCTL' "
         "THEN d.source_document_id ELSE d.id END WHERE d.id=?"));
@@ -1174,6 +1176,24 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         return false;
     }
 
+    QString productName = header.value(16).toString();
+    QString productModel = header.value(17).toString();
+    double formUnitCount = header.value(18).toDouble();
+    if (!header.value(19).toString().isEmpty()) {
+        ProductionTask task;
+        QString error;
+        if (!ProductionTask::load(database, header.value(20).toLongLong(), header.value(21).toLongLong(), task, &error)) {
+            if (errors) errors->append(error);
+            return false;
+        }
+        if (const auto *stage = task.stage(header.value(19).toString())) {
+            productName = stage->name;
+            productModel = stage->model;
+            // Older stage forms counted stage units before issue slips stored whole-machine counts.
+            if (header.value(22).isNull()) formUnitCount *= stage->perMachine;
+        }
+    }
+
     QList<OfficeTemplateLine> materialRows;
     QSqlQuery lines(database);
     lines.prepare(QStringLiteral(
@@ -1181,9 +1201,10 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "GROUP_CONCAT(DISTINCT sn.serial_no),source.quantity,"
         "COALESCE(o.external_dispatch,0),COALESCE(o.secondary_dispatch,0),"
         "COALESCE(o.loss_marked,0),COALESCE(o.return_to_stock,0),"
-        "COALESCE(u.unit_usage,-1),MAX(COALESCE(ps.supplier,b.supplier)) "
+        "COALESCE(NULLIF(u.unit_usage,-1),source_usage.unit_usage,-1),MAX(COALESCE(ps.supplier,b.supplier)) "
         "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
         "LEFT JOIN business_document_items source ON source.id=i.source_item_id "
+        "LEFT JOIN issue_line_usage source_usage ON source_usage.document_item_id=source.id "
         "LEFT JOIN issue_line_options o ON o.document_item_id=i.id "
         "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
         "LEFT JOIN batches b ON b.material_id=i.material_id AND b.batch_no=i.batch_no "
@@ -1191,7 +1212,8 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         "LEFT JOIN inventory_ledger l ON l.document_item_id=i.id "
         "LEFT JOIN inventory_ledger_serials x ON x.ledger_id=l.id "
         "LEFT JOIN serial_numbers sn ON sn.id=x.serial_id WHERE i.document_id=? "
-        "GROUP BY i.id,m.id,source.id,o.document_item_id,u.document_item_id ORDER BY i.line_number,i.id"));
+        "GROUP BY i.id,m.id,source.id,o.document_item_id,u.document_item_id,source_usage.document_item_id "
+        "ORDER BY i.line_number,i.id"));
     lines.addBindValue(documentId);
     if (!lines.exec()) {
         if (errors) errors->append(QStringLiteral("读取修改后的业务明细失败：%1")
@@ -1228,8 +1250,8 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         }
         if (specifiedUnitUsage < 0.0
             && (type == QStringLiteral("SCLL") || type == QStringLiteral("SCTL"))
-            && header.value(18).toDouble() > 0.0)
-            line.unitUsage = line.quantity / header.value(18).toDouble();
+            && formUnitCount > 0.0)
+            line.unitUsage = line.quantity / formUnitCount;
         materialRows.append(line);
     }
     if (materialRows.isEmpty()) {
@@ -1365,20 +1387,6 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
         document.fields.insert(QStringLiteral("logisticsCompany"), header.value(12).toString());
         document.fields.insert(QStringLiteral("trackingNumber"), header.value(13).toString());
         const QString productionBatch = header.value(15).toString();
-        QString productName = header.value(16).toString();
-        QString productModel = header.value(17).toString();
-        double stagePlannedQuantity = header.value(18).toDouble();
-        if (!header.value(19).toString().isEmpty()) {
-            ProductionTask task; QString error;
-            if (!ProductionTask::load(database, header.value(20).toLongLong(), header.value(21).toLongLong(), task, &error)) {
-                if (errors) errors->append(error);
-                return false;
-            }
-            if (const auto *stage = task.stage(header.value(19).toString())) {
-                productName = stage->name; productModel = stage->model;
-                stagePlannedQuantity *= stage->perMachine;
-            }
-        }
         if (!productionBatch.trimmed().isEmpty())
             document.fields.insert(QStringLiteral("productionBatch"), productionBatch);
         else
@@ -1396,8 +1404,8 @@ bool OfficeTemplateService::synchronizeDocumentForms(QSqlDatabase database,
                                    originalFields.value(QStringLiteral("productModel")));
         document.fields.insert(
             QStringLiteral("plannedQuantity"),
-            stagePlannedQuantity > 0.0
-                ? QString::number(stagePlannedQuantity, 'g', 12)
+            formUnitCount > 0.0
+                ? QString::number(formUnitCount, 'g', 12)
                 : originalFields.value(QStringLiteral("plannedQuantity")));
         if (kind == OfficeFormKind::ProductionIssue) {
             document.fields.insert(QStringLiteral("issueType"), documentType);

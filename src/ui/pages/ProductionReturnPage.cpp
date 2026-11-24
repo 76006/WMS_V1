@@ -2,6 +2,7 @@
 
 #include "services/InventoryService.h"
 #include "services/OfficeTemplateService.h"
+#include "services/ProductionTask.h"
 #include "ui/dialogs/DocumentTemplateDialog.h"
 #include "ui/widgets/ComboBoxSearch.h"
 #include "ui/widgets/TableExcelExport.h"
@@ -365,17 +366,15 @@ void ProductionReturnPage::chooseSerials(int row)
     list->setSelectionMode(QAbstractItemView::ExtendedSelection);
     const QStringList previous = button->property("serials").toStringList();
     const QSet<QString> selected(previous.cbegin(), previous.cend());
-    QSqlQuery query(m_database);
-    query.prepare(QStringLiteral(
-        "SELECT DISTINCT sn.serial_no FROM serial_numbers sn "
-        "JOIN inventory_ledger_serials ils ON ils.serial_id=sn.id "
-        "JOIN inventory_ledger l ON l.id=ils.ledger_id "
-        "WHERE l.document_item_id=? AND l.business_type='SCLL' AND sn.status='OUTBOUND' "
-        "ORDER BY sn.serial_no"));
-    query.addBindValue(source->data(SourceItemRole));
-    query.exec();
-    while (query.next()) {
-        auto *item = new QListWidgetItem(query.value(0).toString(), list);
+    InventoryService service(m_database, m_session.userId);
+    QString error;
+    const auto available = service.reversibleSerialNumbers(source->data(SourceItemRole).toLongLong(), &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("读取可退SN失败"), error);
+        return;
+    }
+    for (const auto &serial : available) {
+        auto *item = new QListWidgetItem(serial, list);
         item->setSelected(selected.contains(item->text()));
     }
     layout->addWidget(list);
@@ -419,8 +418,10 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
     if (!form) return false;
     QSqlQuery source(m_database);
     source.prepare(QStringLiteral(
-        "SELECT d.document_no,p.batch_no,p.product_name,p.product_model,p.planned_quantity "
+        "SELECT d.document_no,p.batch_no,p.product_name,p.product_model,"
+        "COALESCE(d.issue_unit_count,p.planned_quantity),ds.stage_key,p.id,p.product_material_id,d.issue_unit_count "
         "FROM business_documents d LEFT JOIN production_runs p ON p.id=d.production_run_id "
+        "LEFT JOIN production_document_stages ds ON ds.document_id=d.id "
         "WHERE d.id=? AND d.document_type='SCLL'"));
     source.addBindValue(request.sourceDocumentId);
     if (!source.exec()) {
@@ -437,7 +438,23 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
         return false;
     }
     const QString issueNumber = source.value(0).toString();
-    const double plannedQuantity = source.value(4).toDouble();
+    double plannedQuantity = source.value(4).toDouble();
+    QString productName = source.value(2).toString();
+    QString productModel = source.value(3).toString();
+    if (!source.value(5).isNull()) {
+        ProductionTask task;
+        QString error;
+        if (!ProductionTask::load(m_database, source.value(6).toLongLong(), source.value(7).toLongLong(),
+                                  task, &error)) {
+            if (errorMessage) *errorMessage = error;
+            return false;
+        }
+        if (const auto *stage = task.stage(source.value(5).toString())) {
+            productName = stage->name;
+            productModel = stage->model;
+            if (source.value(8).isNull()) plannedQuantity *= stage->perMachine;
+        }
+    }
 
     OfficeTemplateDocument document;
     document.kind = OfficeFormKind::ProductionIssue;
@@ -449,16 +466,17 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
     document.fields.insert(QStringLiteral("hasProductionContext"),
                            plannedQuantity > 0.0 ? QStringLiteral("1") : QStringLiteral("0"));
     document.fields.insert(QStringLiteral("productionBatch"), source.value(1).toString());
-    document.fields.insert(QStringLiteral("productName"), source.value(2).toString());
-    document.fields.insert(QStringLiteral("productModel"), source.value(3).toString());
+    document.fields.insert(QStringLiteral("productName"), productName);
+    document.fields.insert(QStringLiteral("productModel"), productModel);
     document.fields.insert(QStringLiteral("plannedQuantity"),
                            QString::number(plannedQuantity, 'g', 12));
     document.fields.insert(QStringLiteral("originalIssueNumber"), issueNumber);
 
     QSqlQuery item(m_database);
     item.prepare(QStringLiteral(
-        "SELECT m.code,m.name,m.specification,m.unit,i.batch_no,i.quantity,i.notes "
+        "SELECT m.code,m.name,m.specification,m.unit,i.batch_no,i.quantity,i.notes,u.unit_usage "
         "FROM business_document_items i JOIN materials m ON m.id=i.material_id "
+        "LEFT JOIN issue_line_usage u ON u.document_item_id=i.id "
         "WHERE i.id=? AND i.document_id=?"));
     for (const ProductionReturnLine &line : request.lines) {
         item.bindValue(0, line.sourceItemId);
@@ -477,7 +495,9 @@ bool ProductionReturnPage::buildReturnForm(const ProductionReturnRequest &reques
         templateLine.unit = item.value(3).toString();
         templateLine.batchNo = item.value(4).toString();
         templateLine.quantity = item.value(5).toDouble();
-        if (plannedQuantity > 0.0) {
+        if (!item.value(7).isNull() && item.value(7).toDouble() >= 0.0) {
+            templateLine.unitUsage = item.value(7).toDouble();
+        } else if (plannedQuantity > 0.0) {
             templateLine.unitUsage = templateLine.quantity / plannedQuantity;
         }
         templateLine.returnQuantity = line.quantity;

@@ -1,6 +1,7 @@
 #include "network/RemoteBackend.h"
 #include "network/BusinessWire.h"
 #include "services/InventoryService.h"
+#include "services/InventoryLedgerTime.h"
 
 #include "core/SystemProfile.h"
 
@@ -48,6 +49,19 @@ QString notReversedBySourceDocumentSql()
         "AND cx_d.source_document_id=?)");
 }
 
+QString currentReturnSerialCondition(const QString &sourceType)
+{
+    if (sourceType != QStringLiteral("SCTL")) return {};
+    // Transfers only move the stock. Older databases may lack the last-document pointer.
+    return QStringLiteral(
+        " AND l.id=(SELECT event.id FROM inventory_ledger_serials trace "
+        "JOIN inventory_ledger event ON event.id=trace.ledger_id "
+        "JOIN serial_numbers tracked ON tracked.id=trace.serial_id WHERE trace.serial_id=sn.id "
+        "AND event.business_type NOT IN ('DB-OUT','DB-IN','CX-DB-OUT','CX-DB-IN') "
+        "ORDER BY CASE WHEN event.document_id=tracked.last_document_id THEN 0 ELSE 1 END,"
+        "%1 DESC,event.id DESC LIMIT 1)").arg(ledgerTimeOrder(QStringLiteral("event.occurred_at")));
+}
+
 QString serialStatusText(const QString &status)
 {
     if (status == QStringLiteral("IN_STOCK")) return QStringLiteral("在库");
@@ -62,6 +76,19 @@ QString serialStatusText(const QString &status)
 InventoryService::InventoryService(QSqlDatabase database, qlonglong operatorId)
     : m_database(std::move(database)), m_operatorId(operatorId)
 {
+}
+
+QString InventoryService::currentIssueSerialCondition()
+{
+    // Undoing a production return makes its SN outbound on the original issue again.
+    return QStringLiteral(
+        " AND (sn.last_document_id=l.document_id OR EXISTS ("
+        "SELECT 1 FROM business_documents cx "
+        "JOIN inventory_ledger ret ON ret.document_id=cx.source_document_id AND ret.business_type='SCTL' "
+        "JOIN inventory_ledger_serials rs ON rs.ledger_id=ret.id "
+        "JOIN business_document_items ri ON ri.id=ret.document_item_id "
+        "WHERE cx.id=sn.last_document_id AND cx.document_type='CX' "
+        "AND rs.serial_id=sn.id AND ri.source_item_id=l.document_item_id))");
 }
 
 bool InventoryService::postInbound(const StockMovementRequest &request,
@@ -737,6 +764,7 @@ QStringList InventoryService::reversibleSerialNumbers(qlonglong sourceItemId,
                 "JOIN inventory_ledger l ON l.id=ils.ledger_id "
                 "WHERE sn.material_id=? AND sn.status='OUTBOUND' "
                 "AND l.document_item_id=? AND l.business_type='SCLL'")
+                + currentIssueSerialCondition()
                 + notReversedBySourceDocumentSql();
         } else {
             // 普通出库撤销：同一物料可能出现在多行，必须同时沿原明细的流水关联匹配。
@@ -757,6 +785,7 @@ QStringList InventoryService::reversibleSerialNumbers(qlonglong sourceItemId,
             "WHERE sn.material_id=? AND sn.status='IN_STOCK' "
             "AND sn.warehouse_id=? AND sn.location_id=? AND sn.batch_no=? "
             "AND l.document_item_id=?")
+            + currentReturnSerialCondition(sourceType)
             + notReversedBySourceDocumentSql();
     }
     QSqlQuery query(m_database);
@@ -932,7 +961,7 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
     itemRequest.locationId = locationId;
     itemRequest.notes = request.notes;
     itemRequest.serialNumbers = request.serialNumbers;
-    const qlonglong itemId = createItem(documentId, itemRequest, 0, 0, errorMessage);
+    const qlonglong itemId = createDocumentItem(documentId, 1, itemRequest, request.sourceItemId, errorMessage);
     if (itemId <= 0) {
         rollback();
         return false;
@@ -967,6 +996,7 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
                 "JOIN inventory_ledger l ON l.id=ils.ledger_id "
                 "WHERE sn.serial_no=? AND sn.material_id=? AND sn.status='OUTBOUND' "
                 "AND l.document_item_id=? AND l.business_type='SCLL'")
+                + currentIssueSerialCondition()
                 + notReversedBySourceDocumentSql());
         } else if (reversalInbound) {
             // 普通出库撤销：除最后单据外，还必须匹配原明细的流水关联，
@@ -987,6 +1017,7 @@ bool InventoryService::reverseItem(const ReversalRequest &request,
                 "WHERE sn.serial_no=? AND sn.material_id=? "
                 "AND sn.status='IN_STOCK' AND sn.warehouse_id=? AND sn.location_id=? "
                 "AND sn.batch_no=? AND l.document_item_id=?")
+                + currentReturnSerialCondition(sourceType)
                 + notReversedBySourceDocumentSql());
         }
         find.addBindValue(serial.trimmed().toUpper());
@@ -1239,7 +1270,7 @@ bool InventoryService::validateMovement(const StockMovementRequest &request,
         setError(errorMessage, QStringLiteral("业务类型或日期无效。"));
         return false;
     }
-    if (request.quantity <= QuantityTolerance) {
+    if (!std::isfinite(request.quantity) || request.quantity <= QuantityTolerance) {
         setError(errorMessage, QStringLiteral("数量必须大于0。"));
         return false;
     }

@@ -9,6 +9,14 @@ LANGUAGE sql STABLE STRICT AS $$
     SELECT new_id FROM pg_temp.import_ids WHERE tab=t AND old_id=original
 $$;
 -- @statement
+-- A pre-v25 document had no unit-count key. Keep its original digest when a
+-- snapshot still has no count, so a repeat import preserves later host edits.
+CREATE FUNCTION pg_temp.source_digest(row_data jsonb) RETURNS text
+LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT encode(sha256(convert_to((CASE WHEN row_data->'issue_unit_count'='null'::jsonb
+        THEN row_data-'issue_unit_count' ELSE row_data END)::text,'UTF8')),'hex')
+$$;
+-- @statement
 DO $$
 DECLARE
     t text; staged text; pk text; collist text; origin_id text;
@@ -35,7 +43,13 @@ BEGIN
             EXIT WHEN NOT same_install;
         END LOOP;
     END IF;
-    FOR t IN SELECT tab FROM import_tables ORDER BY CASE tab
+    -- Stage and purchase detail tables have immediate foreign keys. Their parents
+    -- must be written first in empty, replace and merge mode alike.
+    ALTER TABLE import_tables ADD COLUMN needs_parents boolean DEFAULT false;
+    UPDATE import_tables i SET needs_parents=true WHERE EXISTS (
+        SELECT 1 FROM pg_constraint c WHERE c.conrelid=format('wms_business.%I',i.tab)::regclass
+        AND c.contype='f' AND NOT c.condeferrable);
+    FOR t IN SELECT tab FROM import_tables ORDER BY needs_parents, CASE tab
         WHEN 'materials' THEN 1 WHEN 'warehouses' THEN 2 WHEN 'locations' THEN 3
         WHEN 'batches' THEN 4 WHEN 'stock_balances' THEN 5 ELSE 6 END,tab LOOP
         staged := 'incoming_'||t;
@@ -52,7 +66,7 @@ BEGIN
         IF NOT merging THEN
             EXECUTE format('INSERT INTO %I (%s) SELECT %s FROM %I',t,collist,collist,staged);
             EXECUTE format('INSERT INTO legacy_merge_rows SELECT $1,$2,%s,%s,
-                encode(sha256(convert_to(to_jsonb(s)::text,''UTF8'')),''hex''),%s,false FROM %I s',
+                pg_temp.source_digest(to_jsonb(s)),%s,false FROM %I s',
                 key_expr,id_expr,amount_expr,staged) USING origin_id,t;
             CONTINUE;
         END IF;
@@ -61,8 +75,8 @@ BEGIN
             ADD _prev numeric, ADD _amount numeric, ADD _seen boolean DEFAULT false,
             ADD _shared boolean DEFAULT false, ADD _skip boolean DEFAULT false',staged);
         EXECUTE format('UPDATE %I s SET _key=%s,_old_id=%s,_amount=%s,
-            _digest=encode(sha256(convert_to((to_jsonb(s)-ARRAY[''_key'',''_digest'',''_old_id'',
-               ''_prev'',''_amount'',''_seen'',''_shared'',''_skip''])::text,''UTF8'')),''hex'')',
+            _digest=pg_temp.source_digest(to_jsonb(s)-ARRAY[''_key'',''_digest'',''_old_id'',
+               ''_prev'',''_amount'',''_seen'',''_shared'',''_skip''])',
             staged,key_expr,id_expr,amount_expr);
         EXECUTE format('UPDATE %I s SET _prev=p.amount,_seen=true,_shared=p.shared,_skip=p.digest=s._digest
             FROM legacy_merge_rows p WHERE p.origin=$1 AND p.tab=$2 AND p.src_key=s._key',staged)
@@ -91,7 +105,7 @@ BEGIN
         IF same_install THEN
             -- An installation imported with an earlier release can already contain these rows.
             EXECUTE format('INSERT INTO import_ids SELECT $1,s.id,d.id FROM %I s JOIN %I d ON d.id=s.id
-                WHERE NOT s._seen AND s._digest=encode(sha256(convert_to(to_jsonb(d)::text,''UTF8'')),''hex'')
+                WHERE NOT s._seen AND s._digest=pg_temp.source_digest(to_jsonb(d))
                 ON CONFLICT DO NOTHING',staged,t) USING t;
             EXECUTE format('UPDATE %I s SET _shared=true,_prev=_amount FROM import_ids m
                 WHERE m.tab=$1 AND m.old_id=s.id AND NOT s._seen',staged) USING t;
@@ -109,12 +123,18 @@ END $$;
 -- @statement
 -- Give independent, colliding document numbers a distinct visible number. Use the same
 -- spelling on later imports, and never take a number used elsewhere in this source.
-CREATE FUNCTION pg_temp.rename_collisions(t text, col text, label text) RETURNS void LANGUAGE plpgsql AS $$
+CREATE FUNCTION pg_temp.rename_collisions(t text, col text, label text, scope_col text DEFAULT NULL) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE r record; candidate text; occupied boolean; n integer; staged text := 'incoming_'||t;
+    scope_value text := 'NULL::bigint'; scope_match text := ''; scope_filter text := '';
 BEGIN
+    IF scope_col IS NOT NULL THEN
+        scope_value := format('s.%I::bigint',scope_col);
+        scope_match := format(' AND used.%1$I=s.%1$I',scope_col);
+        scope_filter := format(' AND %I=$2',scope_col);
+    END IF;
     FOR r IN EXECUTE format('SELECT s._key,s.id,s._skip,s.%1$I::text original,old.%1$I::text previous
-        FROM %2$I s JOIN %3$I used ON used.%1$I=s.%1$I AND used.id<>s.id
-        LEFT JOIN %3$I old ON old.id=s.id WHERE NOT s._shared ORDER BY s.id',col,staged,t)
+        ,%4$s scope_id FROM %2$I s JOIN %3$I used ON used.%1$I=s.%1$I AND used.id<>s.id %5$s
+        LEFT JOIN %3$I old ON old.id=s.id WHERE NOT s._shared ORDER BY s.id',col,staged,t,scope_value,scope_match)
     LOOP
         candidate := r.previous;
         IF candidate IS NULL THEN
@@ -122,8 +142,9 @@ BEGIN
             LOOP
                 n := n+1;
                 candidate := r.original||'-IMPORT-'||r.id||CASE WHEN n>1 THEN '-'||n ELSE '' END;
-                EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I WHERE %I=$1 UNION ALL
-                              SELECT 1 FROM %I WHERE %I=$1)',t,col,staged,col) INTO occupied USING candidate;
+                EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I WHERE %I=$1::public.citext %s UNION ALL
+                              SELECT 1 FROM %I WHERE %I=$1::public.citext %s)',t,col,scope_filter,staged,col,scope_filter)
+                    INTO occupied USING candidate,r.scope_id;
                 EXIT WHEN NOT occupied;
             END LOOP;
         END IF;
@@ -184,13 +205,41 @@ BEGIN
     PERFORM pg_temp.rename_collisions('material_categories','name','物料分类名称');
     PERFORM pg_temp.rename_collisions('business_documents','document_no','单号');
     PERFORM pg_temp.rename_collisions('business_documents','submission_token','单据提交编号');
-    PERFORM pg_temp.rename_collisions('production_runs','batch_no','生产批号');
+    -- A v24 host could rename this run because a *different* product used the
+    -- same batch. Keep that assigned name when a later source adds documents/SNs.
+    UPDATE incoming_production_runs s SET batch_no=d.batch_no FROM production_runs d
+        WHERE d.id=s.id AND s._seen AND (s._skip OR (
+            left(d.batch_no::text,length(s.batch_no))::public.citext=s.batch_no AND
+            substr(d.batch_no::text,length(s.batch_no)+1) ~ ('^-IMPORT-'||s.id||'(-[0-9]+)?$')));
+    PERFORM pg_temp.rename_collisions('production_runs','batch_no','生产批号','product_material_id');
     PERFORM pg_temp.rename_collisions('inspection_notices','inspection_no','送检单号');
     PERFORM pg_temp.rename_collisions('serial_numbers','serial_no','序列号');
     UPDATE incoming_inventory_ledger l SET serial_no=s.serial_no FROM incoming_serial_numbers s
         JOIN import_original_names o ON o.kind='serial' AND o.id=s.id WHERE o.val=l.serial_no;
-    UPDATE incoming_serial_numbers s SET production_batch=run.batch_no FROM incoming_production_runs run
-        JOIN import_original_names o ON o.kind='run' AND o.id=run.id WHERE o.val=s.production_batch;
+    -- Prefer the serial's actual document/run after FK remapping. Older serials
+    -- without document links can still be renamed when the original name is unique.
+    WITH run_names AS (
+        SELECT run.id,run.batch_no,o.val::public.citext original,
+               count(*) OVER (PARTITION BY o.val::public.citext) siblings
+        FROM incoming_production_runs run JOIN import_original_names o ON o.kind='run' AND o.id=run.id
+    ), choices AS (
+        SELECT s.id,names.batch_no,1 priority,0::bigint ledger_id FROM incoming_serial_numbers s
+        JOIN incoming_business_documents d ON d.id=s.last_document_id
+        JOIN run_names names ON names.id=d.production_run_id AND names.original=s.production_batch::public.citext
+        UNION ALL
+        SELECT s.id,names.batch_no,2,l.id FROM incoming_serial_numbers s
+        JOIN incoming_inventory_ledger_serials x ON x.serial_id=s.id
+        JOIN incoming_inventory_ledger l ON l.id=x.ledger_id
+        JOIN incoming_business_documents d ON d.id=l.document_id
+        JOIN run_names names ON names.id=d.production_run_id AND names.original=s.production_batch::public.citext
+        UNION ALL
+        SELECT s.id,names.batch_no,3,0 FROM incoming_serial_numbers s
+        JOIN run_names names ON names.siblings=1 AND names.original=s.production_batch::public.citext
+    ), resolved AS (
+        SELECT DISTINCT ON (id) id,batch_no FROM choices ORDER BY id,priority,ledger_id DESC
+    )
+    UPDATE incoming_serial_numbers s SET production_batch=resolved.batch_no FROM resolved
+        WHERE resolved.id=s.id AND s.production_batch<>resolved.batch_no::text;
     UPDATE incoming_inbound_inspection_details d SET inspection_no=n.inspection_no FROM incoming_inspection_notices n
         WHERE d.inspection_notice_id=n.id;
     INSERT INTO import_conflicts
@@ -222,7 +271,7 @@ BEGIN
         WHERE l.material_id=s.material_id AND l.warehouse_id=s.warehouse_id AND l.location_id=s.location_id
           AND l.batch_no=s.batch_no AND NOT l._skip;
     UPDATE incoming_stock_balances s SET quantity=s.quantity+o.delta FROM import_balance_offsets o WHERE o.id=s.id;
-    FOR t IN SELECT tab FROM import_tables ORDER BY tab LOOP
+    FOR t IN SELECT tab FROM import_tables ORDER BY needs_parents,tab LOOP
         staged := 'incoming_'||t;
         SELECT string_agg(format('%I',a.attname),',' ORDER BY k.ord),
                string_agg(format('s.%1$I=d.%1$I',a.attname),' AND ' ORDER BY k.ord)

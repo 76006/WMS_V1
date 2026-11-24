@@ -1,8 +1,8 @@
 """Full business HTTP flows against disposable PostgreSQL databases."""
-import json,os,secrets,socket,subprocess,time,uuid,concurrent.futures
+import hashlib,json,os,secrets,socket,subprocess,time,uuid,concurrent.futures
 import lan_integration as base
 
-BUILD=base.ROOT/'build-lan-business'
+BUILD=base.BUILD
 SERVER=base.BUILD/'WmsServer.exe'
 
 def main():
@@ -16,7 +16,7 @@ def main():
         for product,exe in [('ICE_BEAUTY','IceBeautyWms.exe'),('MEI_JING_LING','MeiJingLingWms.exe')]:
             name='wms_business_test_'+uuid.uuid4().hex
             base.sql(f'CREATE DATABASE {name} OWNER {database_owner};');databases.append(name)
-            env=base.ENV|{'WMS_PG_HOST':'127.0.0.1','WMS_PG_PORT':'55432','WMS_PG_DATABASE':name,
+            env=base.ENV|{'WMS_PG_HOST':'127.0.0.1','WMS_PG_PORT':base.PG_PORT,'WMS_PG_DATABASE':name,
                 'WMS_PG_USER':database_owner,'WMS_PG_PASSWORD':base.CREDS['app'],'WMS_DEMO_ADMIN_PASSWORD':password}
             for flag in ['--init-demo','--init-business']:
                 result=base.run([SERVER,'--product',product,flag],env=env,check=False)
@@ -71,10 +71,154 @@ def main():
                         'inventory search treats percent as a literal')
             base.expect(base.api(port, '/api/v2/data', {'kind': 'rpc'})[0] == 401,
                         'public inventory access does not authorize business operations')
+            serial_material = inserted('INSERT INTO materials(code,name,unit,category_id,require_batch,require_serial) '
+                                       'VALUES(?,?,?,?,1,1)', ['FLEX-SN', 'Serialized part', 'pcs', cat])
+            other_product = inserted("INSERT INTO materials(code,name,unit,category_id) VALUES(?,?,?,?)",
+                                     ['FLEX-FG', 'Product B', 'pcs', fgcat])
+            def serial_line(serials):
+                return line(len(serials), serial_material, 'SERIAL-LOT') | {'serialNumbers':serials}
+            def serial_issue(product_id, serials):
+                slip = rpc('InventoryService.postProductionIssue', {
+                    'run':{'batchNo':'SHARED-SN', 'productMaterialId':str(product_id), 'plannedQuantity':1},
+                    'document':document('SCLL', [serial_line(serials) | {'unitUsage':7}])})['postedDocument']['documentId']
+                return slip, str(scalar('SELECT id FROM business_document_items WHERE document_id=?', [slip]))
+            def return_serial(source, serial, **kwargs):
+                return rpc('InventoryService.postProductionReturn', {'request':{
+                    'sourceDocumentId':source[0], 'documentDate':date, 'submissionToken':str(uuid.uuid4()),
+                    'lines':[{'sourceItemId':source[1], 'quantity':1, 'warehouseId':str(wh),
+                              'locationId':str(loc), 'serialNumbers':[serial]}]}}, **kwargs)
+            rpc('InventoryService.postStockDocument', {'request':document('QTRK',[serial_line(['FLEX-1','FLEX-2'])]), 'inbound':True})
+            original = serial_issue(finished, ['FLEX-1','FLEX-2'])
+            old_return = return_serial(original, 'FLEX-1')['postedDocument']['documentId']
+            old_return_item = str(scalar('SELECT id FROM business_document_items WHERE document_id=?', [old_return]))
+            edited_return = rpc('InventoryService.loadPostedDocument', {'documentId':old_return})['document']
+            edited_return['notes'] = 'Revised return notes'
+            rpc('InventoryService.revisePostedDocument', {'document':edited_return})
+            base.expect(float(scalar('SELECT unit_usage FROM issue_line_usage WHERE document_item_id=?', [old_return_item])) == 7,
+                        'editing return notes preserves the source issue line unit usage')
+            current = serial_issue(other_product, ['FLEX-1'])
+            base.expect('error' in return_serial(original, 'FLEX-1', allow_error=True),
+                        'a reissued serial cannot be returned against its old issue')
+            base.expect(rpc('InventoryService.reversibleSerialNumbers', {'sourceItemId':original[1]})['result'] == ['FLEX-2'],
+                        'only currently issued serials can be reversed')
+            returned = return_serial(current, 'FLEX-1')['postedDocument']['documentId']
+            returned_item = str(scalar('SELECT id FROM business_document_items WHERE document_id=?', [returned]))
+            def undo_return(item, **kwargs):
+                return rpc('InventoryService.reverseItem', {'request':{'sourceItemId':item, 'documentDate':date, 'quantity':1,
+                                                                        'serialNumbers':['FLEX-1'],'notes':'Undo return'}}, **kwargs)
+            old_choices = rpc('InventoryService.reversibleSerialNumbers', {'sourceItemId':old_return_item})['result']
+            old_undo = undo_return(old_return_item, allow_error=True)
+            base.expect(old_choices == [] and 'error' in old_undo
+                        and float(scalar('SELECT returned_quantity FROM business_document_items WHERE id=?', [original[1]])) == 1,
+                        'an earlier return cannot offer or reverse a serial returned on another issue')
+            # Imported data may have ledger links without a last-document pointer.
+            base.sql("UPDATE wms_business.serial_numbers SET last_document_id=NULL WHERE serial_no='FLEX-1'", name)
+            base.expect(rpc('InventoryService.reversibleSerialNumbers', {'sourceItemId':old_return_item})['result'] == []
+                        and rpc('InventoryService.reversibleSerialNumbers', {'sourceItemId':returned_item})['result'] == ['FLEX-1'],
+                        'legacy serials resolve to their latest return through the ledger')
+            undo_return(returned_item)
+            base.expect(rpc('InventoryService.reversibleSerialNumbers', {'sourceItemId':current[1]})['result'] == ['FLEX-1'],
+                        'undoing a return restores that serial to the correct issue')
+            return_serial(current, 'FLEX-1')
+            editable_serials = document('QTRK', [serial_line(['FLEX-3','FLEX-4'])])
+            rpc('InventoryService.postStockDocument', {'request':editable_serials,'inbound':True})
+            revised_issue, _ = serial_issue(finished, ['FLEX-3'])
+            revise_sn = rpc('InventoryService.loadPostedDocument', {'documentId':revised_issue})['document']
+            revise_sn['lines'][0]['serialNumbers'] = ['FLEX-4']
+            rpc('InventoryService.revisePostedDocument', {'document':revise_sn})
+            base.expect(scalar("SELECT production_batch FROM serial_numbers WHERE serial_no='FLEX-4'") == 'SHARED-SN'
+                        and not scalar("SELECT production_batch FROM serial_numbers WHERE serial_no='FLEX-3'"),
+                        'replacing a serial on an issue moves its production batch association')
+            # Two groups per machine consume one component in total on this saved plan of ten.
+            component = inserted("INSERT INTO materials(code,name,unit,category_id,require_batch) VALUES(?,?,?,?,?)",
+                                 ['FLEX-RAW', 'Part', 'pcs', cat, 1])
+            base.sql(f"INSERT INTO wms_business.production_runs(batch_no,product_material_id,product_name,"
+                     f"planned_quantity,created_by) VALUES('SHARED-BATCH',{finished},'Product A',10,1)", name)
+            task = int(scalar("SELECT id FROM production_runs WHERE batch_no='SHARED-BATCH'"))
+            nodes = [
+                dict(key='0', parent='', material=str(finished), code='TEST-FG', name='Product A',
+                     model='', category='FINISHED', quantity=1, perMachine=1, processBom=True),
+                dict(kind='processGroup', key='process:1', parent='0', name='Assembly', code='ASM',
+                     model='', perMachine=2, issueError=''),
+                dict(kind='processMaterial', parent='process:1', material=str(component),
+                     code='FLEX-RAW', name='Part', quantity=1)]
+            snapshot = json.dumps(nodes, sort_keys=True, separators=(',', ':'))
+            base.sql(f"INSERT INTO wms_business.production_task_boms(production_run_id,payload) "
+                     f"VALUES({task},'{snapshot}')", name)
+            stage = {'productionStageKey':'process:1', 'productionBomFingerprint':hashlib.sha256(snapshot.encode()).hexdigest()}
+            def issue_request(count, quantities, product_id=finished):
+                slip = document('SCLL', [line(q, component, 'FLEX-LOT') for q in quantities])
+                if product_id == finished:
+                    slip.update(stage)
+                return {'run':{'batchNo':'SHARED-BATCH', 'productMaterialId':str(product_id), 'plannedQuantity':count},
+                        'document':slip}
+            def component_balance():
+                return float(scalar('SELECT SUM(quantity) FROM stock_balances WHERE material_id=?', [component]))
+            issue_method = 'InventoryService.postProductionIssue'
+            rpc('InventoryService.postStockDocument', {'request':document('QTRK',[line(20, component, 'FLEX-LOT')]), 'inbound':True})
+            first = rpc(issue_method, issue_request(10, [8]))['postedDocument']['documentId']
+            second_request = issue_request(3, [2, 1])
+            replay_id = str(uuid.uuid4())
+            second = rpc(issue_method, second_request, request_id=replay_id)
+            second_id = second['postedDocument']['documentId']
+            base.expect(second == rpc(issue_method, second_request, request_id=replay_id)
+                        and 'error' in rpc(issue_method, second_request, allow_error=True)
+                        and component_balance() == 9, '8 + 3 issues against plan 10 debit stock once')
+            base.expect(float(scalar('SELECT planned_quantity FROM production_runs WHERE id=?',[task])) == 10
+                        and float(scalar('SELECT issue_unit_count FROM business_documents WHERE id=?',[first])) == 10
+                        and float(scalar('SELECT issue_unit_count FROM business_documents WHERE id=?',[second_id])) == 3
+                        and int(scalar('SELECT COUNT(*) FROM business_document_items WHERE document_id=?',[second_id])) == 2,
+                        'each issue retains its unit count and split stock rows')
+            oversized = issue_request(2, [4, 6])
+            base.expect('error' in rpc(issue_method, oversized, allow_error=True) and component_balance() == 9
+                        and int(scalar('SELECT COUNT(*) FROM business_documents WHERE submission_token=?',
+                                       [oversized['document']['submissionToken']])) == 0,
+                        'insufficient stock on the last split row rolls back all rows')
+            foreign = issue_request(1, [1])
+            foreign['document']['lines'] = [line(1)]
+            stale = issue_request(1, [1])
+            stale['document']['productionBomFingerprint'] = 'expired'
+            base.expect('error' in rpc(issue_method, foreign, allow_error=True)
+                        and 'error' in rpc(issue_method, stale, allow_error=True), 'stage membership and snapshot are enforced')
+            other = rpc(issue_method, issue_request(1, [1], other_product))
+            base.expect(int(other['productionRunId']) != task and component_balance() == 8,
+                        'two finished products sharing a batch have distinct tasks')
+            revision = rpc('InventoryService.loadPostedDocument', {'documentId':second_id})['document']
+            revision['lines'][0]['quantity'] = 3
+            rpc('InventoryService.revisePostedDocument', {'document':revision})
+            base.expect(component_balance() == 7 and float(scalar(
+                'SELECT issue_unit_count FROM business_documents WHERE id=?', [second_id])) == 3,
+                'revising a stage issue above plan preserves its unit count')
+            rpc('InventoryService.reversePostedDocument', {'documentId':second_id, 'handlerName':'测试', 'reason':'撤销分行领料'})
+            base.expect(component_balance() == 11, 'reversal restores the actual split row quantities')
+            manual = document('QTLL', [line(1, component, 'FLEX-LOT'), line(2, component, 'FLEX-LOT')])
+            rpc('InventoryService.postStockDocument', {'request':manual, 'inbound':False})
+            duplicate_receipt = document('QTRK', manual['lines'])
+            base.expect(component_balance() == 8 and 'error' in rpc('InventoryService.postStockDocument',
+                        {'request':duplicate_receipt, 'inbound':True}, allow_error=True) and component_balance() == 8,
+                        'manual issues support split stock rows and duplicate receipt rows still roll back')
+            # Pre-migration slips counted stage groups. Their saved BOM retained two groups per machine.
+            saved_slip = rpc('InventoryService.loadPostedDocument', {'documentId':first})['document']
+            base.expect(saved_slip['lines'][0]['unitUsage'] == 0.8, 'a saved slip count already identifies its ten units')
+            base.sql(f'UPDATE wms_business.business_documents SET issue_unit_count=NULL WHERE id={int(first)}', name)
+            historical = rpc('InventoryService.loadPostedDocument', {'documentId':first})['document']
+            original_line = historical['lines'][0]
+            old_stage_return = rpc('InventoryService.postProductionReturn', {'request':{
+                'sourceDocumentId':first, 'documentDate':date, 'submissionToken':str(uuid.uuid4()),
+                'lines':[{'sourceItemId':original_line['itemId'], 'warehouseId':str(wh), 'locationId':str(loc), 'quantity':1}]}})
+            old_edit = rpc('InventoryService.loadPostedDocument', {'documentId':old_stage_return['postedDocument']['documentId']})['document']
+            old_edit['notes'] = 'Historical stage return'
+            rpc('InventoryService.revisePostedDocument', {'document':old_edit})
+            base.expect(original_line['unitUsage'] == 0.4 and float(scalar(
+                'SELECT unit_usage FROM issue_line_usage WHERE document_item_id=?', [old_edit['lines'][0]['itemId']])) == 0.4,
+                'historical issue and return revisions use eight parts divided by twenty stage groups')
             issue=rpc('InventoryService.postProductionIssue',{'run':{'batchNo':'PROD-1','productMaterialId':str(finished),'plannedQuantity':5},'document':document('SCLL',[line(10)])})
             issue_id=issue['postedDocument']['documentId']
             item=scalar('SELECT id FROM business_document_items WHERE document_id=?',[issue_id])
-            rpc('InventoryService.postProductionReturn',{'request':{'sourceDocumentId':issue_id,'documentDate':date,'handlerName':'联调人员','submissionToken':str(uuid.uuid4()),'lines':[{'sourceItemId':str(item),'quantity':2,'warehouseId':str(wh),'locationId':str(loc)}]}})
+            returned = rpc('InventoryService.postProductionReturn',{'request':{'sourceDocumentId':issue_id,'documentDate':date,'handlerName':'联调人员','submissionToken':str(uuid.uuid4()),'lines':[{'sourceItemId':str(item),'quantity':2,'warehouseId':str(wh),'locationId':str(loc)}]}})
+            edit_return = rpc('InventoryService.loadPostedDocument', {'documentId':returned['postedDocument']['documentId']})['document']
+            base.expect(edit_return['lines'][0]['unitUsage'] == 2,
+                        'without an explicit unit usage the return uses the original issue quantity and slip count')
             fg=document('CPRK',[line(5,finished,'FG-1')]);fg['productionRunId']=issue['productionRunId']
             rpc('InventoryService.postFinishedGoodsInbound',{'document':fg})
             base.expect(float(scalar('SELECT SUM(quantity) FROM stock_balances WHERE material_id=?',[material]))==89,'production issue and return are atomic')

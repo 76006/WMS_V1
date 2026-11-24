@@ -13,6 +13,7 @@ import time
 import uuid
 
 import lan_integration as base
+from flexible_issue_sqlite_migration import historical_fixture
 
 SERVER = base.BUILD / 'WmsServer.exe'
 PASSWORD = 'LegacyAdmin123!'
@@ -59,7 +60,7 @@ def running(env, product):
 
 
 def fixture(path, exe):
-    result = base.run([base.ROOT / 'build-lan-business' / exe,
+    result = base.run([Path(os.environ.get('WMS_TEST_SQLITE_BUILD', base.ROOT / 'build-lan-business')) / exe,
                        '--database', path, '--smoke-test'], check=False)
     assert result.returncode == 0, result.stderr
     with sqlite3.connect(path) as c:
@@ -127,7 +128,7 @@ def main():
             name, env = target(product)
             with sqlite3.connect(source) as c:
                 c.execute('INSERT INTO schema_migrations(version) VALUES(?)',
-                          (25 if product == 'ICE_BEAUTY' else 5000000000,))
+                          (26 if product == 'ICE_BEAUTY' else 5000000000,))
                 c.execute('DELETE FROM schema_migrations WHERE version=18')
             unrelated = folder / 'unrelated.db'
             with sqlite3.connect(unrelated) as c:
@@ -201,6 +202,13 @@ def main():
                 c.execute("UPDATE business_document_items SET quantity=7")
                 c.execute("INSERT INTO production_task_boms VALUES(81,?)",
                           (json.dumps([{'key':'0','material':'72'}]),))
+                # Run 81 collides with the host for product 71. Run 82 has the same
+                # spelling but a distinct product (its source material ID also collides).
+                c.execute("INSERT INTO production_runs(id,batch_no,product_material_id,product_name,planned_quantity,created_by) VALUES(82,'PROD-OLD',72,'第二库物料',12,41)")
+                c.execute("INSERT INTO business_documents(id,document_no,document_type,stock_direction,document_date,created_by,production_run_id,issue_unit_count) VALUES(93,'OTHER-ISSUE','SCLL','OUT','2026-01-01',41,82,3)")
+                c.execute("UPDATE serial_numbers SET production_batch='PROD-OLD', last_document_id=NULL WHERE id=141")
+                c.execute("INSERT INTO inventory_ledger_serials VALUES(121,141)")
+                c.execute("INSERT INTO serial_numbers(id,material_id,serial_no,status,production_batch,last_document_id) VALUES(142,71,'SN-OTHER','CONSUMED','PROD-OLD',93)")
             base.sql("INSERT INTO wms_business.warehouses(code,name) VALUES('HOST-STORE','重名仓库')", name)
             with sqlite3.connect(second) as c:
                 c.execute("INSERT INTO warehouses(code,name) VALUES('OTHER-STORE','重名仓库')")
@@ -216,20 +224,39 @@ def main():
             assert scalar(name, "SELECT count(*) FROM attachments a JOIN business_documents d ON d.id=a.business_id WHERE a.business_type='QTRK' AND d.notes='另一份同号单据'")=='1'
             assert scalar(name, "SELECT count(*) FROM production_task_boms b JOIN materials m ON m.id=(b.payload::jsonb->0->>'material')::bigint WHERE m.code='OTHER-MAT'")=='1'
             assert scalar(name, "SELECT count(*) FROM business_document_items i JOIN business_documents d ON d.id=i.document_id WHERE d.notes='另一份同号单据' AND i.quantity=7")=='1'
+            assert scalar(name, "SELECT count(*) FROM production_runs WHERE batch_no='PROD-OLD'") == '2'
+            assert scalar(name, """SELECT count(*) FROM business_documents d JOIN production_runs r ON r.id=d.production_run_id
+                JOIN materials m ON m.id=r.product_material_id JOIN serial_numbers s ON s.last_document_id=d.id
+                WHERE d.issue_unit_count=3 AND m.code='OTHER-MAT' AND r.batch_no='PROD-OLD'
+                AND s.serial_no='SN-OTHER' AND s.production_batch='PROD-OLD'""") == '1'
+            assert scalar(name, """SELECT count(*) FROM serial_numbers s JOIN inventory_ledger_serials x ON x.serial_id=s.id
+                JOIN inventory_ledger l ON l.id=x.ledger_id JOIN business_documents d ON d.id=l.document_id
+                JOIN production_runs r ON r.id=d.production_run_id WHERE s.production_batch=r.batch_no
+                AND r.batch_no LIKE 'PROD-OLD-IMPORT-%' AND r.product_material_id=71""") == '1'
             again = migrate(second, product, env, mode='merge')
             assert 'MERGE' not in again.stdout and float(scalar(name,'SELECT quantity FROM stock_balances WHERE id=111'))==104.125
             assert scalar(name, 'SELECT rows_imported FROM legacy_import_history')=='0'
+            # Older hosts renamed this second product too under the global batch key.
+            # A later snapshot can introduce serials for that already-imported run.
+            base.sql("""SET search_path=wms_business,public;
+                UPDATE production_runs SET batch_no='PROD-OLD-IMPORT-'||id WHERE product_material_id=
+                    (SELECT id FROM materials WHERE code='OTHER-MAT');
+                UPDATE serial_numbers s SET production_batch=r.batch_no FROM business_documents d
+                    JOIN production_runs r ON r.id=d.production_run_id WHERE s.last_document_id=d.id AND s.serial_no='SN-OTHER';""", name)
             with sqlite3.connect(second) as c:
                 c.execute('UPDATE stock_balances SET quantity=8')
                 c.execute('UPDATE inventory_ledger SET quantity_after=8,quantity_in=8')
                 c.execute('UPDATE business_document_items SET quantity=8')
+                c.execute("INSERT INTO serial_numbers(id,material_id,serial_no,status,production_batch,last_document_id) VALUES(143,71,'SN-LATER','CONSUMED','PROD-OLD',93)")
             migrate(second, product, env, mode='merge', answer='MERGE\n')
             assert float(scalar(name,'SELECT quantity FROM stock_balances WHERE id=111'))==105.125
+            assert scalar(name, """SELECT count(*) FROM serial_numbers s JOIN business_documents d ON d.id=s.last_document_id
+                JOIN production_runs r ON r.id=d.production_run_id WHERE s.serial_no='SN-LATER' AND s.production_batch=r.batch_no""") == '1'
             migrate(source, product, env, mode='replace')
             assert scalar(name,"SELECT count(*) FROM materials WHERE code='OTHER-MAT'")=='0'
             assert scalar(name,'SELECT count(*) FROM business_documents')=='1'
             assert scalar(name,'SELECT count(*) FROM network_requests')=='0'
-            assert scalar(name, 'SELECT max(version) FROM schema_migrations') == '24'
+            assert scalar(name, 'SELECT max(version) FROM schema_migrations') == '25'
             if product == 'ICE_BEAUTY':
                 branch = folder / 'forked.db'
                 with sqlite3.connect(source) as original, sqlite3.connect(branch) as copy:
@@ -241,7 +268,7 @@ def main():
                 assert scalar(name,"SELECT count(*) FROM business_documents WHERE document_no IN ('HOST-92','SOURCE-92')")=='2'
             base.expect(True, f'{product}: future/gapped schema, conflict preview, cancel/commit, merge stock, ID links, retry, replacement/rollback and post-import outbound')
         # Recreate each older SQLite layout, including the last release without product identity.
-        for version in (19,20,21,22,23):
+        for version in (19,20,21):
             source = folder / f'older-{version}.db'
             with sqlite3.connect(folder / 'ICE_BEAUTY.db') as original, sqlite3.connect(source) as copy:
                 original.backup(copy)
@@ -262,7 +289,41 @@ def main():
             name, env = target('ICE_BEAUTY')
             migrate(source, 'ICE_BEAUTY', env)
             assert scalar(name, 'SELECT count(*) FROM materials') == '2'
-            base.expect(True, f'v{version} snapshot upgrades to v24 without modifying the original')
+            base.expect(True, f'v{version} snapshot upgrades to v25 without modifying the original')
+        # Start with real pre-v25 layouts, including both incompatible versions numbered 22.
+        for version, standalone in [(22, True), (22, False), (23, False), (24, False)]:
+            source = folder / f'historical-{version}-{standalone}.db'
+            historical_fixture(source, version, standalone)
+            name, env = target('ICE_BEAUTY')
+            migrate(source, 'ICE_BEAUTY', env)
+            assert scalar(name, 'SELECT production_run_id FROM business_documents WHERE id=91') == '81'
+            assert scalar(name, 'SELECT coalesce(issue_unit_count,-1) FROM business_documents WHERE id=91') == ('3' if standalone else '-1')
+            if version >= 23:
+                assert scalar(name, "SELECT stage_key FROM production_document_stages WHERE document_id=91 AND production_run_id=81") == 'assembly'
+            base.expect(True, f'v{version} (standalone={standalone}) imported with original run, document and stage links')
+        # Reopen a populated PostgreSQL v24 installation through normal server startup.
+        base.sql("""SET search_path=wms_business,public;
+            ALTER TABLE business_documents DROP COLUMN issue_unit_count;
+            UPDATE legacy_merge_rows p SET digest=encode(sha256(convert_to(to_jsonb(d)::text,'UTF8')),'hex')
+                FROM business_documents d WHERE p.tab='business_documents' AND p.dst_id=d.id;
+            UPDATE business_documents SET notes='host edit' WHERE id=91;
+            ALTER TABLE production_runs DROP CONSTRAINT production_runs_batch_no_product_material_id_key,
+                ADD UNIQUE(batch_no);
+            DELETE FROM schema_migrations WHERE version=25;""", name)
+        with running(env, 'ICE_BEAUTY'):
+            assert scalar(name, """SELECT count(*) FROM business_documents d JOIN production_runs r ON r.id=d.production_run_id
+                JOIN production_document_stages s ON s.document_id=d.id AND s.production_run_id=r.id
+                WHERE d.id=91 AND d.issue_unit_count IS NULL AND r.id=81 AND s.stage_key='assembly'""") == '1'
+            base.sql("""SET search_path=wms_business,public;
+                INSERT INTO production_runs(batch_no,product_material_id,product_name,planned_quantity,created_by)
+                VALUES ('SHARED',72,'two',1,1), ('SHARED',71,'one',1,1)
+                ON CONFLICT(batch_no,product_material_id) DO NOTHING;""", name)
+            assert scalar(name, "SELECT count(*) FROM production_runs WHERE batch_no='shared'") == '2'
+        migrate(source, 'ICE_BEAUTY', env, mode='merge')
+        assert scalar(name, "SELECT notes FROM business_documents WHERE id=91") == 'host edit'
+        with sqlite3.connect(source) as c:
+            c.execute('DROP TABLE schema_migrations')
+        migrate(source, 'ICE_BEAUTY', env, mode='replace')
         # Compatible business data does not need migration metadata at all.
         with sqlite3.connect(folder / 'ICE_BEAUTY.db') as c:
             c.execute('DROP TABLE schema_migrations')

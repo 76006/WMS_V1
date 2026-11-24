@@ -150,6 +150,7 @@ set(WMS_RESOURCE_FILES
         database/migrations/022_process_boms.sql
         database/migrations/023_production_stages.sql
         database/migrations/024_purchase_suppliers.sql
+        database/migrations/025_flexible_production_issues.sql
         resources/PdfPreview.qml
         resources/styles.qss
 )
@@ -205,7 +206,7 @@ if(WMS_BUILD_SERVER)
         src/services/ProductionTask.cpp src/services/ProcessBom.cpp
         src/services/InspectionService.cpp src/services/UserService.cpp
         src/services/AttachmentService.cpp src/services/ShipmentReceiptService.cpp)
-    qt_add_resources(WmsServer "business_schema" PREFIX "/" FILES database/postgresql/business-schema.json database/postgresql/legacy-merge.sql)
+    qt_add_resources(WmsServer "business_schema" PREFIX "/" FILES database/postgresql/business-schema.json database/postgresql/legacy-merge.sql database/postgresql/025_flexible_production_issues.sql)
     qt_add_resources(WmsServer "inventory_web" PREFIX "/" FILES resources/web/inventory.html)
     set(WMS_LEGACY_SCHEMA_RESOURCES ${WMS_RESOURCE_FILES})
     list(FILTER WMS_LEGACY_SCHEMA_RESOURCES INCLUDE REGEX "^database/")
